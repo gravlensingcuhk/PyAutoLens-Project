@@ -1,0 +1,9 @@
+{
+    "type": "instance",
+    "class_path": "autoarray.dataset.over_sampling.OverSamplingDataset",
+    "arguments": {
+        "uniform": null,
+        "non_uniform": null,
+        "pixelization": null
+    }
+}
