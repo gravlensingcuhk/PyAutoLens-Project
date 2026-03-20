@@ -1,0 +1,51 @@
+EllipseMultipole:
+  multipole_comps_0:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1
+  multipole_comps_1:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1
+
+EllipseMultipoleRelative:
+  scaled_multipole_comps_0:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1
+  scaled_multipole_comps_1:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1
