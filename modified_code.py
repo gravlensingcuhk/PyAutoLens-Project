@@ -20,7 +20,7 @@ else:
 #workspace_path = Path("/users/wing-yan.chan/autolens_workspace")
 #os.chdir(workspace_path)
 #print(f"Working Directory successfully set to: {os.getcwd()}")
-conf.instance.push(new_path=Path('config'))
+conf.instance.push(new_path=Path('config'), output_path=Path('./output'))
 dataset_name = "slacs1250+0523"
 dataset_path = Path("data") / dataset_name
 
