@@ -3,12 +3,13 @@ name = "pyautolens-project"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11.1"
+requires-python = ">=3.11"
 dependencies = [
     "autoarray==2026.2.26.4",
     "autoconf==2026.2.26.4",
-    "autolens>=2026.2.26.4",
-    "autofit==2025.5.10.1",
+    "autolens==2026.2.26.4",
+    "autofit==2026.2.26.4",
+    "autogalaxy==2026.2.26.4",
     "pyyaml>=6.0.3",
     "scikit-learn<=1.5.1",
 ]

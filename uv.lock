@@ -1,6 +1,6 @@
 version = 1
 revision = 3
-requires-python = ">=3.11.1"
+requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
     "python_full_version == '3.12.*'",
@@ -32,6 +32,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4c/be/2707a6f074551eee5de990b28779ecfcb20b14c37bfbf3f2ee93641efad4/anesthetic-2.8.14.tar.gz", hash = "sha256:ddbbe3ee7b18457cebadc8e21c60ed3965ba8e1af8fbfd1bc87a205ba51463dc", size = 100256, upload-time = "2024-07-03T07:29:23.748Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/53/60/e7f8a268ec92938f5b7abe53c59c528841078d45e89e684adddd11f7196d/anesthetic-2.8.14-py3-none-any.whl", hash = "sha256:6f298916797ac51f489889771f959c8ebb8dc9f7996a26318d3375ddde7fa915", size = 76091, upload-time = "2024-07-03T07:29:21.262Z" },
+]
+
+[[package]]
+name = "array-api-compat"
+version = "1.14.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/e5/9a12dd1c2b0ad61f3c3ad0fc14b888c65fd735dd9d26805f77317303cbe5/array_api_compat-1.14.0.tar.gz", hash = "sha256:c819ba707f5c507800cb545f7e6348ff1ecc46538381d9ad9b371ffc9cd6d784", size = 106369, upload-time = "2026-02-26T12:02:42.452Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/d3/54cd560804a8c2b898824778e86c13c2a14600bc83532a9c4f69f2f469c3/array_api_compat-1.14.0-py3-none-any.whl", hash = "sha256:ed5af1f9b6595a199c942505f281ec994892556b6efc24679a0501e87a7d6279", size = 60124, upload-time = "2026-02-26T12:02:41.127Z" },
 ]
 
 [[package]]
@@ -143,10 +152,11 @@ wheels = [
 
 [[package]]
 name = "autofit"
-version = "2025.5.10.1"
+version = "2026.2.26.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anesthetic" },
+    { name = "array-api-compat" },
     { name = "astunparse" },
     { name = "autoconf" },
     { name = "corner" },
@@ -170,9 +180,9 @@ dependencies = [
     { name = "typing-inspect" },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/dd/5f223c1c4566829689b31ff417f9093bcf7f6a441def76be70265c93edd2/autofit-2025.5.10.1.tar.gz", hash = "sha256:718a4633ac07ae46a905e32150aaaf836608694e6af9f7fe8fdb73f386ad19c9", size = 7385943, upload-time = "2025-05-10T06:56:35.396Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/40/d6/e018592bb5e526c4b99859ecae03ba7bee0480a2727d1e1ef7ca5b7b052a/autofit-2026.2.26.4.tar.gz", hash = "sha256:a8a211a636023b80ec1c362304365608c2a472a2033f970529e1dc41a1d7228a", size = 7401816, upload-time = "2026-02-26T19:45:07.559Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/1b/7cad1686d5ebc9c630dd18fbc4ae97e36dd2c5b7ff1dd56504f19fe12f1e/autofit-2025.5.10.1-py3-none-any.whl", hash = "sha256:5a8b9b33c2ca20b804d8c4c85f8b56f554911adb2ef7c75b9fcbdf8c9548973d", size = 7506496, upload-time = "2025-05-10T06:56:30.46Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/5f/a474fdf8f9b429f22d031ad1e8ac95fcaaee9b0adc15382f279ae9b9c454/autofit-2026.2.26.4-py3-none-any.whl", hash = "sha256:0e08ddfffb12c2948ac102a839cd7bed342ba6b0cb73451b5ffc4e524affb099", size = 7522954, upload-time = "2026-02-26T19:45:04.596Z" },
 ]
 
 [[package]]
@@ -1456,6 +1466,7 @@ dependencies = [
     { name = "autoarray" },
     { name = "autoconf" },
     { name = "autofit" },
+    { name = "autogalaxy" },
     { name = "autolens" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
@@ -1465,8 +1476,9 @@ dependencies = [
 requires-dist = [
     { name = "autoarray", specifier = "==2026.2.26.4" },
     { name = "autoconf", specifier = "==2026.2.26.4" },
-    { name = "autofit", specifier = "==2025.5.10.1" },
-    { name = "autolens", specifier = ">=2026.2.26.4" },
+    { name = "autofit", specifier = "==2026.2.26.4" },
+    { name = "autogalaxy", specifier = "==2026.2.26.4" },
+    { name = "autolens", specifier = "==2026.2.26.4" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", specifier = "<=1.5.1" },
 ]
