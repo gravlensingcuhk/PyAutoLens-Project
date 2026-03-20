@@ -3,13 +3,26 @@ from pathlib import Path
 import autolens as al
 import autolens.plot as aplt
 import autofit as af
+from autoconf import conf
+import platform
 
-workspace_path = Path("/users/wing-yan.chan/autolens_workspace")
-os.chdir(workspace_path)
-print(f"Working Directory successfully set to: {os.getcwd()}")
+## This if/else loop is specific for macs because jax does not work on ARM
+if platform.machine() == 'arm64':
+    import jax
+    jax.config.update("jax_enable_x64", False)
+    jax.config.update('jax_platform_name', 'cpu')
+    import multiprocessing
+    multiprocessing.set_start_method('fork')
+    use_jax=False
+else:
+    use_jax=True
 
+#workspace_path = Path("/users/wing-yan.chan/autolens_workspace")
+#os.chdir(workspace_path)
+#print(f"Working Directory successfully set to: {os.getcwd()}")
+conf.instance.push(new_path=Path('config'))
 dataset_name = "slacs1250+0523"
-dataset_path = Path("dataset") / "imaging" / dataset_name
+dataset_path = Path("data") / dataset_name
 
 # load mask
 mask = al.Mask2D.from_fits(
@@ -26,7 +39,7 @@ dataset = al.Imaging.from_fits(
     check_noise_map=False
 )
 dataset = dataset.apply_mask(mask=mask)
-plot_path = workspace_path / "output" / dataset_name / "plots"
+plot_path =  Path("output") / dataset_name / "plots"
 plot_path.mkdir(parents=True, exist_ok=True)
 
 mat_plot_2d = aplt.MatPlot2D(
@@ -67,15 +80,16 @@ analysis = al.AnalysisImaging(
     dataset=dataset,
     positions_likelihood=al.analysis.positions.PositionsLH(
         positions=positions,
-        threshold=1.0
-    )
+        threshold=1.0,
+    ),
+    use_jax=use_jax
 )
 
 if __name__ == "__main__":
     search = af.LBFGS(
         path_prefix=os.path.join("output", dataset_name),
         name="basic_fit_lbfgs",
-        iterations_per_quick_update=10
+        iterations_per_quick_update=10,
     )
     result = search.fit(model=model, analysis=analysis)
     
