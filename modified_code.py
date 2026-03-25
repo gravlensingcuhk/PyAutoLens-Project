@@ -24,7 +24,7 @@ working_directory = path.dirname(path.abspath(__file__))
 output_path = path.join(working_directory, 'output')
 conf.instance.push(new_path=path.join(working_directory, 'config'), output_path=output_path)
 dataset_name = "slacs1250+0523"
-dataset_path = path.join(working_directory, 'data')
+dataset_path = path.join(working_directory, 'data', dataset_name)
 
 # load mask
 mask = al.Mask2D.from_fits(
