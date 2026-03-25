@@ -3,7 +3,7 @@ import autolens.plot as aplt
 import autofit as af
 from autoconf import conf
 import platform
-from os import path, getcwd
+from os import path
 
 ## This if/else loop is specific for macs because jax does not work on ARM
 if platform.machine() == 'arm64':
@@ -15,14 +15,16 @@ if platform.machine() == 'arm64':
     use_jax=False
 else:
     use_jax=True
+    
+working_directory = path.dirname(path.abspath(__file__))
 
 #workspace_path = Path("/users/wing-yan.chan/autolens_workspace")
 #os.chdir(workspace_path)
 #print(f"Working Directory successfully set to: {os.getcwd()}")
-output_path = path.join(getcwd(), 'output')
-conf.instance.push(new_path=path.join(getcwd(), 'config'), output_path=output_path)
+output_path = path.join(working_directory, 'output')
+conf.instance.push(new_path=path.join(working_directory, 'config'), output_path=output_path)
 dataset_name = "slacs1250+0523"
-dataset_path = path.join(getcwd(), 'data')
+dataset_path = path.join(working_directory, 'data')
 
 # load mask
 mask = al.Mask2D.from_fits(
