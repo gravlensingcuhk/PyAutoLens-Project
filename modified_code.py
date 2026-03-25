@@ -1,10 +1,9 @@
-import os
-from pathlib import Path
 import autolens as al
 import autolens.plot as aplt
 import autofit as af
 from autoconf import conf
 import platform
+from os import path, getcwd
 
 ## This if/else loop is specific for macs because jax does not work on ARM
 if platform.machine() == 'arm64':
@@ -20,27 +19,28 @@ else:
 #workspace_path = Path("/users/wing-yan.chan/autolens_workspace")
 #os.chdir(workspace_path)
 #print(f"Working Directory successfully set to: {os.getcwd()}")
-conf.instance.push(new_path=Path('config'), output_path=Path('./output'))
+output_path = path.join(getcwd(), 'output')
+conf.instance.push(new_path=path.join(getcwd(), 'config'), output_path=output_path)
 dataset_name = "slacs1250+0523"
-dataset_path = Path("data") / dataset_name
+dataset_path = path.join(getcwd(), 'data')
 
 # load mask
 mask = al.Mask2D.from_fits(
-    file_path=dataset_path / "mask.fits",
+    file_path=path.join(dataset_path, "mask.fits"),
     pixel_scales=0.05,
     hdu=0
 )
 
 dataset = al.Imaging.from_fits(
-    data_path=dataset_path / "data.fits",
-    noise_map_path=dataset_path / "noise_map.fits", 
-    psf_path=dataset_path / "psf.fits",
+    data_path=path.join(dataset_path, "data.fits"),
+    noise_map_path=path.join(dataset_path, "noise_map.fits"),
+    psf_path=path.join(dataset_path, "psf.fits"),
     pixel_scales=0.05,
     check_noise_map=False
 )
 dataset = dataset.apply_mask(mask=mask)
-plot_path =  Path("output") / dataset_name / "plots"
-plot_path.mkdir(parents=True, exist_ok=True)
+plot_path =  path.join(output_path, dataset_name, "plots")
+#plot_path.mkdir(parents=True, exist_ok=True)
 
 mat_plot_2d = aplt.MatPlot2D(
     output=aplt.Output(path=plot_path, filename="dataset_plot", format="png")
@@ -50,7 +50,7 @@ dataset_plotter.subplot_dataset()
 
 # load positions
 positions = al.from_json(
-    file_path=dataset_path / "positions.json"
+    file_path=path.join(dataset_path, "positions.json")
 )
 
 mass = af.Model(al.mp.IsothermalSph)
@@ -78,7 +78,7 @@ model.galaxies.source.bulge.effective_radius = af.GaussianPrior(mean=0.5, sigma=
 
 analysis = al.AnalysisImaging(
     dataset=dataset,
-    positions_likelihood=al.analysis.positions.PositionsLH(
+    positions_likelihood=al.PositionsLH(
         positions=positions,
         threshold=1.0,
     ),
@@ -87,7 +87,7 @@ analysis = al.AnalysisImaging(
 
 if __name__ == "__main__":
     search = af.LBFGS(
-        path_prefix=os.path.join("output", dataset_name),
+        path_prefix=path.join("output", dataset_name),
         name="basic_fit_lbfgs",
         iterations_per_quick_update=10,
     )
