@@ -89,7 +89,7 @@ analysis = al.AnalysisImaging(
 
 if __name__ == "__main__":
     search = af.LBFGS(
-        path_prefix=path.join("output", dataset_name),
+        path_prefix=path.join(output_path, dataset_name),
         name="basic_fit_lbfgs",
         iterations_per_quick_update=10,
     )
