@@ -1,7 +1,5 @@
 import json
-
-from autoconf import jax_wrapper  # Sets JAX environment before other imports
-
+from autoconf import jax_wrapper  # Sets JAX environment before other imports 
 import sys
 from os import path
 import autofit as af
@@ -10,12 +8,12 @@ from autoconf import conf
 import numpy as np
 import slam_pipeline
 
-cosma_path = path.join(path.sep, 'home', 'user', 'lange', 'phygpu')
-workspace_path = path.join(cosma_path, 'multipoles')
-output_path = path.join(path.sep, 'home', 'user', 'lange', 'output', 'multipoles')
+cosma_path = path.join(path.sep, 'home', 'vian', 'PyAutoLens-Project')
+workspace_path = cosma_path
+output_path = path.join(cosma_path, 'output')
 config_path = path.join(cosma_path, 'config')
 conf.instance.push(new_path=config_path, output_path=output_path)
-data_path = path.join(workspace_path, 'data')
+data_path = path.join(workspace_path, 'data', 'cowls')
 
 
 use_jax = True
@@ -25,23 +23,33 @@ __Dataset__
 Load and mask the data.
 """
 dataset_name = str(sys.argv[1])
-ps = 0.067
-dataset_path = path.join(data_path, dataset_name)
+filt = "F277W"
+ps = 0.0315
+dataset_path = path.join(data_path, dataset_name, filt)
 
 dataset = al.Imaging.from_fits(
     data_path=path.join(dataset_path, "data.fits"),
     noise_map_path=path.join(dataset_path, "noise_map.fits"),
-    psf_path=path.join(dataset_path, "psf.fits"),
+    psf_path=path.join(dataset_path, "psf_71x71.fits"),
     pixel_scales=ps,
     check_noise_map=False
 )
 
 positions = al.Grid2DIrregular(
-    al.from_json(file_path=path.join(dataset_path, "positions.json"))
+    al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
 )
-
-mask = al.Mask2D.from_fits(path.join(dataset_path, "mask.fits"), ps, origin=(0,0))
-mask_radius = mask.circular_radius
+mask_extra_galaxies = al.Mask2D.from_fits(
+    file_path=path.join(dataset_path, "mask_extra_galaxies.fits"),
+    pixel_scales=dataset.pixel_scales,
+    invert=True,
+)
+dataset = dataset.apply_noise_scaling(mass=mask_extra_galaxies)
+mask_radius = mask_extra_galaxies.circular_radius
+mask = al.Mask2D.circular(
+    shape_native=dataset.shape_native, 
+    pixel_scales=dataset.pixel_scales,
+    radius=mask_radius,
+)
 
 print(f'RUNNING Dataset: {dataset_name}, Mask: {mask_radius}')
 
@@ -74,9 +82,8 @@ __Redshifts__
 
 The redshifts of the lens and source galaxies.
 """
-redshift_dict = json.load(open(path.join(data_path, 'redshift_dict.json'), 'r'))
-redshift_lens = redshift_dict[dataset_name][0]
-redshift_source = redshift_dict[dataset_name][1]
+redshift_lens = 1.53
+redshift_source = 3.42
 
 
 """

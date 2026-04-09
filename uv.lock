@@ -1468,6 +1468,8 @@ dependencies = [
     { name = "autofit" },
     { name = "autogalaxy" },
     { name = "autolens" },
+    { name = "ipython", version = "9.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "ipython", version = "9.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
 ]
@@ -1479,6 +1481,7 @@ requires-dist = [
     { name = "autofit", specifier = "==2026.2.26.4" },
     { name = "autogalaxy", specifier = "==2026.2.26.4" },
     { name = "autolens", specifier = "==2026.2.26.4" },
+    { name = "ipython", specifier = ">=9.10.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", specifier = "<=1.5.1" },
 ]

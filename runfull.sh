@@ -1,0 +1,9 @@
+#!/bin/bash
+export CPUS_PER_TASK=1
+export OPENBLAS_NUM_THREADS=$CPUS_PER_TASK
+export MKL_NUM_THREADS=$CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$CPUS_PER_TASK
+export OMP_NUM_THREADS=$CPUS_PER_TASK
+export VECLIB_MAXIMUM_THREADS=$CPUS_PER_TASK
+export PYTHONPATH="/home/vian/PyAutoLens-Project:$PYTHONPATH"
+uv run main_runner.py "COSJ100018+022138" >> output.log 2>&1
