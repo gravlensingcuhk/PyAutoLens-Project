@@ -43,7 +43,7 @@ mask_extra_galaxies = al.Mask2D.from_fits(
     pixel_scales=dataset.pixel_scales,
     invert=True,
 )
-dataset = dataset.apply_noise_scaling(mass=mask_extra_galaxies)
+dataset = dataset.apply_noise_scaling(mask=mask_extra_galaxies)
 mask_radius = mask_extra_galaxies.circular_radius
 mask = al.Mask2D.circular(
     shape_native=dataset.shape_native, 
