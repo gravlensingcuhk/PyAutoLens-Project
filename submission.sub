@@ -1,0 +1,10 @@
+universe = vanilla
+getenv = True
+executable = /users/wing-yan.chan/PyAutoLens-Project/run_job.sh
+initialdir = /users/wing-yan.chan
+output = /users/wing-yan.chan/job.out
+error = /users/wing-yan.chan/job.err
+log = /users/wing-yan.chan/job.log
+request_cpus = 16
+request_memory = 16GB
+queue
