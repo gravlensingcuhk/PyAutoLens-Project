@@ -35,6 +35,8 @@ dataset = al.Imaging.from_fits(
     check_noise_map=False
 )
 
+info_file = json.loads(path.join(data_path, dataset_name, 'info.json'))
+
 positions = al.Grid2DIrregular(
     al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
 )
@@ -44,7 +46,7 @@ mask_extra_galaxies = al.Mask2D.from_fits(
     invert=True,
 )
 dataset = dataset.apply_noise_scaling(mask=mask_extra_galaxies)
-mask_radius = mask_extra_galaxies.circular_radius
+mask_radius = info_file['mask_radius']
 mask = al.Mask2D.circular(
     shape_native=dataset.shape_native, 
     pixel_scales=dataset.pixel_scales,
@@ -82,8 +84,8 @@ __Redshifts__
 
 The redshifts of the lens and source galaxies.
 """
-redshift_lens = 1.53
-redshift_source = 3.42
+redshift_lens = info_file['lens_spec_z']
+redshift_source = info_file['source_spec_z']
 
 
 """
@@ -109,15 +111,10 @@ lens_point = slam_pipeline.mge_model_from(
     centre=(0.0, 0.0)
 )
 
-miso = af.Model(al.mp.Isothermal)
-#if dataset_name == 'slacs1143-0144':
-#    miso.ell_comps.ell_comps_0 = af.TruncatedGaussianPrior(mean = -0.144, sigma = 0.01, lower_limit=-0.18, upper_limit=-0.12)
-#    miso.ell_comps.ell_comps_1 = af.TruncatedGaussianPrior(mean = -0.054, sigma = 0.01, lower_limit=-0.08, upper_limit=-0.02)
-
 source_lp_result = slam_pipeline.source_lp.run(
     settings_search=settings_search,
     analysis=analysis,
-    mass=miso,
+    mass=af.Model(al.mp.Isothermal),
     shear=af.Model(al.mp.ExternalShear),
     lens_bulge=lens_bulge,
     lens_disk=lens_disk,
@@ -131,7 +128,7 @@ source_lp_result = slam_pipeline.source_lp.run(
 """
 __SOURCE PIX PIPELINE__
 """
-hilbert_pixels = al.model_util.hilbert_pixels_from_pixel_scale(ps)
+hilbert_pixels = slam_pipeline.model_util.hilbert_pixels_from_pixel_scale(ps)
 
 galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
@@ -328,7 +325,7 @@ sys.exit()
 Chained results
 """
 settings_search = af.SettingsSearch(
-    path_prefix='chained_mass_models_',
+    path_prefix='chained_mass_models',
     unique_tag=f'{dataset_name}',
     info=None,
     session=None,
