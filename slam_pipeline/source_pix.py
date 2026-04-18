@@ -129,7 +129,7 @@ def run_2(
     mesh: af.Model(al.AbstractMesh) = af.Model(al.mesh.Delaunay),
     regularization: af.Model(al.AbstractRegularization) = af.Model(al.reg.AdaptSplit),
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 20,
+    n_batch: int = 5,
 ) -> af.Result:
     """
     The second SLaM SOURCE PIX PIPELINE, which fits a fixed lens model which uses a pixelized source for the source
@@ -229,7 +229,7 @@ def run_1__bypass_lp(
     redshift_source: float = 1.0,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 20,
+    n_batch: int = 5,
 ) -> af.Result:
     """
     The first SLaM SOURCE PIX PIPELINE, which initializes a lens model which uses a pixelized source for the source
@@ -335,7 +335,7 @@ def run_1__multi(
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
     fixed_mass_model: bool = False,
-    n_batch: int = 20,
+    n_batch: int = 5,
 ) -> af.Result:
     """
     The first SLaM SOURCE PIX PIPELINE, which initializes a lens model which uses a pixelized source for the source

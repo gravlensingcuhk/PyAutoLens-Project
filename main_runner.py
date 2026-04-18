@@ -35,7 +35,8 @@ dataset = al.Imaging.from_fits(
     check_noise_map=False
 )
 
-info_file = json.loads(path.join(data_path, dataset_name, 'info.json'))
+with open(path.join(data_path, dataset_name, 'info.json'), 'r') as file:
+    info_file = json.load(file)
 
 positions = al.Grid2DIrregular(
     al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
@@ -248,7 +249,8 @@ source_pix_result_2 = slam_pipeline.source_pix.run_2(
     mesh=al.mesh.Delaunay(
         pixels=image_plane_mesh_grid.shape[0], zeroed_pixels=edge_pixels_total
     ),
-    regularization=af.Model(al.reg.AdaptSplit)
+    regularization=af.Model(al.reg.AdaptSplit),
+
 )
 
 """
