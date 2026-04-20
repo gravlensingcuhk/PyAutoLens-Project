@@ -301,27 +301,6 @@ mass_result = slam_pipeline.mass_total.run(
     name='mass_EPL'
 )
 
-"""
-Multipole
-"""
-
-multipole_result = slam_pipeline.mass_total.run(
-    settings_search=settings_search,
-    analysis=analysis,
-    source_result_for_lens=source_pix_result_1,
-    source_result_for_source=source_pix_result_2,
-    light_result=light_result,
-    mass=af.Model(al.mp.PowerLaw),
-    multipole_1=None,
-    multipole_3=af.Model(al.mp.PowerLawMultipole),
-    multipole_4=af.Model(al.mp.PowerLawMultipole),
-    reset_shear_prior=True,
-    name='mass_multipole'
-)
-
-
-sys.exit()
-
 ## The below is to be used in case there are issues with the priors etc
 """
 Chained results
@@ -342,7 +321,6 @@ chained_mass_result = slam_pipeline.mass_total.run(
     mass=af.Model(al.mp.PowerLaw),
     reset_shear_prior=True,
     name='mass_EPL_chained',
-    use_new_mass=True
 )
 
 chained_multipole_result = slam_pipeline.mass_total.run(
@@ -357,5 +335,29 @@ chained_multipole_result = slam_pipeline.mass_total.run(
     multipole_4=af.Model(al.mp.PowerLawMultipole),
     reset_shear_prior=True,
     name='mass_multipole_chained',
-    use_new_mass=True
+)
+
+
+"""
+Multipole
+"""
+settings_search = af.SettingsSearch(
+    path_prefix='mass_models',
+    unique_tag=f'{dataset_name}',
+    info=None,
+    session=None,
+)
+
+multipole_result = slam_pipeline.mass_total.run(
+    settings_search=settings_search,
+    analysis=analysis,
+    source_result_for_lens=source_pix_result_1,
+    source_result_for_source=source_pix_result_2,
+    light_result=light_result,
+    mass=af.Model(al.mp.PowerLaw),
+    multipole_1=None,
+    multipole_3=af.Model(al.mp.PowerLawMultipole),
+    multipole_4=af.Model(al.mp.PowerLawMultipole),
+    reset_shear_prior=True,
+    name='mass_multipole'
 )

@@ -8,6 +8,7 @@
             <JupyterConnectionParameters>
               <option name="managed" value="true" />
               <option name="sdkHomePath" value="$PROJECT_DIR$/../PAL/venv/bin/python" />
+              <option name="sdkName" value="Python 3.9 (PAL)" />
             </JupyterConnectionParameters>
           </value>
         </entry>

@@ -155,10 +155,15 @@ def run(
         dataset_model=dataset_model,
     )
 
+    if (multipole_1 is not None) or (multipole_3 is not None) or (multipole_4 is not None):
+        nlive = 400
+    else:
+        nlive = 300
+
     search = af.Nautilus(
         name=name,
         **settings_search.search_dict,
-        n_live=300,
+        n_live=nlive,
         n_batch=n_batch,
     )
 

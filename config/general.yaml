@@ -13,9 +13,13 @@ inversion:
   positive_only_uses_p_initial: true  # If True, the positive-only solver of an inversion's uses an initial guess of the reconstructed data's values as which values should be positive, speeding up the solver.
   use_border_relocator: true          # If True, by default a pixelization's border is used to relocate all pixels outside its border to the border.
   reconstruction_vmax_factor: 0.5   # Plots of an Inversion's reconstruction use the reconstructed data's bright value multiplied by this factor.
+updates:
+  iterations_per_quick_update: 1e99 # Non-linear search iterations between every quick update, which just displays the maximum likelihood model fit.
+  iterations_per_full_update: 10000  # Non-linear search iterations between every full update, which outputs all visuals and result fits (e.g. model.result, search.summary), this exits the search and can be slow.
 hpc:
   hpc_mode: true                   # If True, use HPC mode, which disables GUI visualization, logging to screen and other settings which are not suited to running on a super computer.
-  iterations_per_update: 20000       # The number of iterations between every update (visualization, results output, etc) in HPC mode.
+  iterations_per_quick_update: 1e99 #  Non-linear search iterations between every quick update, which just displays the maximum likelihood model fit.
+  iterations_per_full_update: 10000  # Non-linear search iterations between every full update, which outputs all visuals and result fits (e.g. model.result, search.summary), this exits the search and can be slow.
 adapt:
   adapt_minimum_percent: 0.01
   adapt_noise_limit: 100000000.0
