@@ -32,7 +32,7 @@ PowerLaw:
   ell_comps_0:
     type: TruncatedGaussian
     mean: 0.0
-    sigma: 0.2
+    sigma: 0.225
     lower_limit: -1.0
     upper_limit: 1.0
     width_modifier:
@@ -44,7 +44,7 @@ PowerLaw:
   ell_comps_1:
     type: TruncatedGaussian
     mean: 0.0
-    sigma: 0.2
+    sigma: 0.225
     lower_limit: -1.0
     upper_limit: 1.0
     width_modifier:

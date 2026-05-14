@@ -1,0 +1,165 @@
+Total Free Parameters = 12
+
+model                                                                           Collection (N=12)
+    galaxies                                                                    Collection (N=12)
+        lens                                                                    Galaxy (N=12)
+            bulge - point                                                       Basis (N=0)
+                profile_list                                                    ModelInstance (N=0)
+                    0 - 9                                                       Gaussian (N=0)
+            mass                                                                PowerLaw (N=6)
+            multipole_3 - multipole_4                                           PowerLawMultipole (N=6)
+            shear                                                               ExternalShear (N=2)
+            bulge - disk
+                profile_list
+                    10 - 29                                                     Gaussian (N=0)
+        source                                                                  Galaxy (N=0)
+            pixelization                                                        Pixelization (N=0)
+                mesh                                                            Delaunay (N=0)
+                regularization                                                  AdaptSplit (N=0)
+
+galaxies
+    lens
+        redshift                                                                1.53
+        bulge
+            centre                                                              (0.01682228297137925, -0.009058408267015677)
+            ell_comps                                                           (0.07088242666689497, -0.2576983050005715)
+            profile_list
+                0 - 29
+                    centre                                                      (0.01682228297137925, -0.009058408267015677)
+                    ell_comps                                                   (0.07088242666689497, -0.2576983050005715)
+        bulge - point
+            intensity                                                           0.1
+            profile_list
+                0 - 9
+                    intensity                                                   1.0
+        disk
+            centre                                                              (-0.06989272475779791, 0.053763450382545264)
+            ell_comps                                                           (0.2379807036499363, -0.11806907670656935)
+            profile_list
+                0 - 29
+                    centre                                                      (-0.06989272475779791, 0.053763450382545264)
+                    ell_comps                                                   (0.2379807036499363, -0.11806907670656935)
+        point
+            centre                                                              (-0.014643653640717721, -0.011594885475674499)
+            ell_comps                                                           (-0.16469411106545398, -0.6150366764666488)
+            profile_list
+                0 - 9
+                    centre                                                      (-0.014643653640717721, -0.011594885475674499)
+                    ell_comps                                                   (-0.16469411106545398, -0.6150366764666488)
+                0
+                    sigma                                                       0.0001
+                1
+                    sigma                                                       0.00021544346900318845
+                2
+                    sigma                                                       0.00046415888336127773
+                3
+                    sigma                                                       0.001
+                4
+                    sigma                                                       0.002154434690031882
+                5
+                    sigma                                                       0.004641588833612777
+                6
+                    sigma                                                       0.01
+                7
+                    sigma                                                       0.021544346900318822
+                8
+                    sigma                                                       0.046415888336127774
+                9
+                    sigma                                                       0.1
+        mass - multipole_4
+            einstein_radius                                                     UniformPrior [597], lower_limit = 0.0, upper_limit = 5.0
+            slope                                                               UniformPrior [626], lower_limit = 1.5, upper_limit = 3.0
+            centre
+                centre_0                                                        GaussianPrior [608], mean = 0.0, sigma = 0.05
+                centre_1                                                        GaussianPrior [609], mean = 0.0, sigma = 0.05
+        multipole_3
+            m                                                                   3
+            multipole_comps
+                multipole_comps_0                                               TruncatedGaussianPrior [631], mean = 0.0, sigma = 0.01, lower_limit = -0.1, upper_limit = 0.1
+                multipole_comps_1                                               TruncatedGaussianPrior [632], mean = 0.0, sigma = 0.01, lower_limit = -0.1, upper_limit = 0.1
+        multipole_4
+            m                                                                   4
+            multipole_comps
+                multipole_comps_0                                               TruncatedGaussianPrior [637], mean = 0.0, sigma = 0.01, lower_limit = -0.1, upper_limit = 0.1
+                multipole_comps_1                                               TruncatedGaussianPrior [638], mean = 0.0, sigma = 0.01, lower_limit = -0.1, upper_limit = 0.1
+        shear
+            gamma_1                                                             TruncatedGaussianPrior [639], mean = 0.0, sigma = 0.04, lower_limit = -0.1, upper_limit = 0.1
+            gamma_2                                                             TruncatedGaussianPrior [640], mean = 0.0, sigma = 0.04, lower_limit = -0.1, upper_limit = 0.1
+        bulge - disk
+            profile_list
+                0
+                    sigma                                                       0.01
+                1
+                    sigma                                                       0.012173570475023513
+                2
+                    sigma                                                       0.01481958181103642
+                3
+                    sigma                                                       0.018040722358702844
+                4
+                    sigma                                                       0.02196200050540015
+                5
+                    sigma                                                       0.026735596092499075
+                6
+                    sigma                                                       0.03254676632238009
+                7
+                    sigma                                                       0.03962103535596159
+                8
+                    sigma                                                       0.04823294661991968
+                9
+                    sigma                                                       0.05871671748956393
+                10 - 29
+                    intensity                                                   1.0
+                10
+                    sigma                                                       0.07147920984212522
+                11
+                    sigma                                                       0.08701571985121061
+                12
+                    sigma                                                       0.1059291998043615
+                13
+                    sigma                                                       0.12895365791812416
+                14
+                    sigma                                                       0.15698264426783584
+                15
+                    sigma                                                       0.19110392833500456
+                16
+                    sigma                                                       0.23264171396400207
+                17
+                    sigma                                                       0.2832080300371041
+                18
+                    sigma                                                       0.3447652912749263
+                19
+                    sigma                                                       0.4197024570677324
+                20
+                    sigma                                                       0.510927743965457
+                21
+                    sigma                                                       0.6219814898808265
+                22
+                    sigma                                                       0.7571735501224365
+                23
+                    sigma                                                       0.9217505574239229
+                24
+                    sigma                                                       1.122099537119234
+                25
+                    sigma                                                       1.3659957795112256
+                26
+                    sigma                                                       1.6629045890464587
+                27
+                    sigma                                                       2.0243486207997075
+                28
+                    sigma                                                       2.464355060132189
+                29
+                    sigma                                                       3.0
+        mass
+            ell_comps
+                ell_comps_0                                                     TruncatedGaussianPrior [595], mean = 0.0, sigma = 0.225, lower_limit = -1.0, upper_limit = 1.0
+                ell_comps_1                                                     TruncatedGaussianPrior [596], mean = 0.0, sigma = 0.225, lower_limit = -1.0, upper_limit = 1.0
+    source
+        redshift                                                                3.147
+        pixelization
+            mesh
+                pixels                                                          1560
+                areas_factor                                                    0.5
+            regularization
+                inner_coefficient                                               0.00011157398726503526
+                outer_coefficient                                               1009.344231341616
+                signal_scale                                                    0.002220651621367411
