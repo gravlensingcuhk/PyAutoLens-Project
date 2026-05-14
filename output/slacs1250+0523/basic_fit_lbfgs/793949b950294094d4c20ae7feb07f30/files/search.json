@@ -1,0 +1,44 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.mle.bfgs.search.LBFGS",
+    "arguments": {
+        "unique_tag": null,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "name": "basic_fit_lbfgs",
+        "number_of_cores": 1,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerBall",
+            "arguments": {
+                "upper_limit": 0.51,
+                "lower_limit": 0.49
+            }
+        },
+        "inplace": false,
+        "iterations_per_full_update": 1e+99,
+        "iterations_per_quick_update": 1e+99,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "unique_tag": null,
+                "parent": null,
+                "name": "basic_fit_lbfgs",
+                "is_identifier_in_paths": true,
+                "image_path_suffix": "",
+                "path_prefix": {
+                    "type": "path",
+                    "path": "output/slacs1250+0523"
+                },
+                "identifier": "793949b950294094d4c20ae7feb07f30"
+            }
+        },
+        "path_prefix": {
+            "type": "path",
+            "path": "output/slacs1250+0523"
+        }
+    }
+}

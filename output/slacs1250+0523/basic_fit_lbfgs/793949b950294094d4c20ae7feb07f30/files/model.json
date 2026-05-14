@@ -1,0 +1,158 @@
+{
+    "type": "collection",
+    "arguments": {
+        "galaxies": {
+            "type": "collection",
+            "arguments": {
+                "lens": {
+                    "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                    "type": "model",
+                    "arguments": {
+                        "redshift": {
+                            "type": "Constant",
+                            "value": 0.2318
+                        },
+                        "mass": {
+                            "class_path": "autogalaxy.profiles.mass.total.isothermal.IsothermalSph",
+                            "type": "model",
+                            "arguments": {
+                                "centre": {
+                                    "type": "tuple_prior",
+                                    "arguments": {
+                                        "centre_0": {
+                                            "type": "Gaussian",
+                                            "id": 13,
+                                            "mean": 0.0,
+                                            "sigma": 0.05
+                                        },
+                                        "centre_1": {
+                                            "type": "Gaussian",
+                                            "id": 14,
+                                            "mean": 0.0,
+                                            "sigma": 0.05
+                                        }
+                                    }
+                                },
+                                "einstein_radius": {
+                                    "type": "Gaussian",
+                                    "id": 15,
+                                    "mean": 1.0,
+                                    "sigma": 0.3
+                                }
+                            }
+                        },
+                        "bulge": {
+                            "class_path": "autogalaxy.profiles.light.standard.sersic.Sersic",
+                            "type": "model",
+                            "arguments": {
+                                "centre": {
+                                    "type": "tuple_prior",
+                                    "arguments": {
+                                        "centre_0": {
+                                            "type": "Gaussian",
+                                            "id": 13,
+                                            "mean": 0.0,
+                                            "sigma": 0.05
+                                        },
+                                        "centre_1": {
+                                            "type": "Gaussian",
+                                            "id": 14,
+                                            "mean": 0.0,
+                                            "sigma": 0.05
+                                        }
+                                    }
+                                },
+                                "ell_comps": {
+                                    "type": "tuple_prior",
+                                    "arguments": {
+                                        "ell_comps_0": {
+                                            "type": "Gaussian",
+                                            "id": 19,
+                                            "mean": 0.0,
+                                            "sigma": 0.1
+                                        },
+                                        "ell_comps_1": {
+                                            "type": "Gaussian",
+                                            "id": 20,
+                                            "mean": 0.0,
+                                            "sigma": 0.1
+                                        }
+                                    }
+                                },
+                                "intensity": {
+                                    "type": "Gaussian",
+                                    "id": 16,
+                                    "mean": 1.0,
+                                    "sigma": 0.5
+                                },
+                                "effective_radius": {
+                                    "type": "Gaussian",
+                                    "id": 17,
+                                    "mean": 1.0,
+                                    "sigma": 0.5
+                                },
+                                "sersic_index": {
+                                    "type": "Gaussian",
+                                    "id": 18,
+                                    "mean": 4.0,
+                                    "sigma": 1.0
+                                }
+                            }
+                        }
+                    }
+                },
+                "source": {
+                    "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                    "type": "model",
+                    "arguments": {
+                        "redshift": {
+                            "type": "Constant",
+                            "value": 0.7953
+                        },
+                        "bulge": {
+                            "class_path": "autogalaxy.profiles.light.linear.exponential_core.ExponentialCoreSph",
+                            "type": "model",
+                            "arguments": {
+                                "centre": {
+                                    "type": "tuple_prior",
+                                    "arguments": {
+                                        "centre_0": {
+                                            "type": "Gaussian",
+                                            "id": 21,
+                                            "mean": 0.0,
+                                            "sigma": 0.1
+                                        },
+                                        "centre_1": {
+                                            "type": "Gaussian",
+                                            "id": 22,
+                                            "mean": 0.0,
+                                            "sigma": 0.1
+                                        }
+                                    }
+                                },
+                                "effective_radius": {
+                                    "type": "Gaussian",
+                                    "id": 23,
+                                    "mean": 0.5,
+                                    "sigma": 0.2
+                                },
+                                "radius_break": {
+                                    "type": "Constant",
+                                    "value": 0.025
+                                },
+                                "gamma": {
+                                    "type": "Constant",
+                                    "value": 0.25
+                                },
+                                "alpha": {
+                                    "type": "Constant",
+                                    "value": 3.0
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

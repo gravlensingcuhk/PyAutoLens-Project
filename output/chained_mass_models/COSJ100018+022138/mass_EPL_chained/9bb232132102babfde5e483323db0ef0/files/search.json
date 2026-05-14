@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "n_eff": 500,
+        "inplace": false,
+        "number_of_cores": 1,
+        "path_prefix": {
+            "type": "path",
+            "path": "chained_mass_models"
+        },
+        "enlarge_per_dim": 1.1,
+        "n_networks": 4,
+        "iterations_per_quick_update": 1e+99,
+        "n_update": null,
+        "unique_tag": "COSJ100018+022138",
+        "name": "mass_EPL_chained",
+        "use_jax_vmap": true,
+        "n_live": 300,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "split_threshold": 100,
+        "seed": null,
+        "iterations_per_full_update": 10000.0,
+        "n_points_min": null,
+        "n_like_new_bound": null,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "n_shell": 1,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "is_identifier_in_paths": true,
+                "path_prefix": {
+                    "type": "path",
+                    "path": "chained_mass_models"
+                },
+                "image_path_suffix": "",
+                "identifier": "9bb232132102babfde5e483323db0ef0",
+                "unique_tag": "COSJ100018+022138",
+                "name": "mass_EPL_chained",
+                "parent": null
+            }
+        }
+    }
+}
