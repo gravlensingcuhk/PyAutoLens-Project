@@ -75,7 +75,7 @@ __Settings AutoFit__
 The settings of autofit, which controls the output paths, parallelization, database use, etc.
 """
 settings_search = af.SettingsSearch(
-    path_prefix='model_setup',
+    path_prefix='model_setup_free_source',
     unique_tag=f'{dataset_name}',
     info=None,
     session=None,
@@ -102,11 +102,11 @@ source_bulge = slam_pipeline.mge_model_from(
 )
 
 lens_bulge = slam_pipeline.mge_model_from(
-    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(3), 30)
+    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
 )
 
 lens_disk = slam_pipeline.mge_model_from(
-    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(3), 30)
+    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
 )
 
 lens_point = slam_pipeline.mge_model_from(
@@ -134,13 +134,21 @@ source_lp_result = slam_pipeline.source_lp.run(
 """
 __SOURCE PIX PIPELINE__
 """
+settings_search = af.SettingsSearch(
+    path_prefix='model_setup_free_source',
+    unique_tag=f'{dataset_name}',
+    info=None,
+    session=None,
+    number_of_cores = 16,
+)
+
 hilbert_pixels = slam_pipeline.model_util.hilbert_pixels_from_pixel_scale(ps)
 
 galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01)
+image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01) #weight_power= 4.5 and 2
 
 
 image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
@@ -276,6 +284,7 @@ light_result = slam_pipeline.light_lp.run(
     lens_point=lens_point
 )
 
+sys.exit()
 
 """
 __MASS TOTAL PIPELINE__
@@ -325,3 +334,4 @@ multipole_result = slam_pipeline.mass_total.run(
     reset_shear_prior=True,
     name='mass_multipole'
 )
+
