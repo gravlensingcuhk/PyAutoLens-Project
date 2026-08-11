@@ -1,0 +1,2715 @@
+{
+    "type": "instance",
+    "class_path": "autolens.lens.tracer.Tracer",
+    "arguments": {
+        "galaxies": {
+            "type": "instance",
+            "class_path": "autofit.mapper.model.ModelInstance",
+            "arguments": {
+                "child_items": {
+                    "type": "dict",
+                    "arguments": {
+                        "lens": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                            "arguments": {
+                                "label": "cls144",
+                                "redshift": 1.53,
+                                "bulge": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.basis.Basis",
+                                    "arguments": {
+                                        "profile_list": {
+                                            "type": "list",
+                                            "values": [
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.000465027652264e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.7425993793290044e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.012173570475023513
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.213308126052422e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01481958181103642
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 7.295364597703293e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.018040722358702844
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.839315537384965,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.02196200050540015
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.9707120054606334e-18,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.026735596092499075
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.513017727033891e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.03254676632238009
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.051847756657427e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.03962103535596159
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.9274994711275083e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.04823294661991968
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.4272972969280092e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.05871671748956393
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.6971238766918352e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.07147920984212522
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.1613904341367347e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.08701571985121061
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.44439827446989494,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.1059291998043615
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.2618992928243523e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.12895365791812416
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.1626155822278585e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.15698264426783584
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.1338809898608224e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.19110392833500456
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.7359017015227563e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.23264171396400207
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.531035336302658e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.2832080300371041
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.964662008937904e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.3447652912749263
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.622871201301367e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.4197024570677324
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.824014091998924e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.510927743965457
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.8212838933792126e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.6219814898808265
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.240984068042998e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.7571735501224365
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.8930593252284074e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.9217505574239229
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.6779855354757552e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.122099537119234
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.5417362665932892e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.3659957795112256
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.4538022549648577e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.6629045890464587
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.3962751233445435e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 2.0243486207997075
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.3582756604085658e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 2.464355060132189
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.029783360817252545,
+                                                                -0.2755335143017924
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.03105640077443861,
+                                                                0.0006408800882938548
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.333005481651387e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 3.0
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                        "regularization": null
+                                    }
+                                },
+                                "disk": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.basis.Basis",
+                                    "arguments": {
+                                        "profile_list": {
+                                            "type": "list",
+                                            "values": [
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.5207320476093986e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.707725853054577e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.012173570475023513
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.08614686917315e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01481958181103642
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.057550387878316e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.018040722358702844
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.9095274324173168e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.02196200050540015
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.270167900210249e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.026735596092499075
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 9.347572612623305e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.03254676632238009
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 7.962987249516966e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.03962103535596159
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.323505886488074e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.04823294661991968
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.1841473243583149e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.05871671748956393
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.057911631757159e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.07147920984212522
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.44544516277840274,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.08701571985121061
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.4226852294329375e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.1059291998043615
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.934378859584801e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.12895365791812416
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.0522484145852615e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.15698264426783584
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.525428864983512e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.19110392833500456
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.791882614551541e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.23264171396400207
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.2807815393060347e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.2832080300371041
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.766667006280517e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.3447652912749263
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.880524150649221e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.4197024570677324
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.0571552373480114e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.510927743965457
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.972994259765594e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.6219814898808265
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.3335211680239164e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.7571735501224365
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.9495528158764028e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.9217505574239229
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.7131153454385964e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.122099537119234
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.564027254016289e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.3659957795112256
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.4681908783975877e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.6629045890464587
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.4056855802249747e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 2.0243486207997075
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.3644894843815965e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 2.464355060132189
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.18339966022660134,
+                                                                -0.132578616193372
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.08212311212231724,
+                                                                0.03164879438917578
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.3371364557945767e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 3.0
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                        "regularization": null
+                                    }
+                                },
+                                "point": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.basis.Basis",
+                                    "arguments": {
+                                        "profile_list": {
+                                            "type": "list",
+                                            "values": [
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.2467848889797513e-06,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0001
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.009436387598535335,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.00021544346900318845
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 13.927049891735514,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.00046415888336127773
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 41.51403453333949,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.001
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 33.00946391624888,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.002154434690031882
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 33.47104428642596,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.004641588833612777
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.578612300753548,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.7788371038468203,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.021544346900318822
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.2683268500422894,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.046415888336127774
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.17371000502702277,
+                                                                -0.5894188770444352
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.012621799031962727,
+                                                                -0.012620496953563681
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.005239348638634007,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.1
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                        "regularization": null
+                                    }
+                                },
+                                "mass": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.mass.total.isothermal.Isothermal",
+                                    "arguments": {
+                                        "ell_comps": {
+                                            "type": "tuple",
+                                            "values": [
+                                                0.4582970670815521,
+                                                0.07544114534986647
+                                            ]
+                                        },
+                                        "centre": {
+                                            "type": "tuple",
+                                            "values": [
+                                                0.0,
+                                                0.0
+                                            ]
+                                        },
+                                        "einstein_radius": 0.3611419254258294
+                                    }
+                                },
+                                "shear": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.mass.sheets.external_shear.ExternalShear",
+                                    "arguments": {
+                                        "gamma_1": -0.05574910620842026,
+                                        "gamma_2": 0.09969984698039486
+                                    }
+                                }
+                            }
+                        },
+                        "source": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                            "arguments": {
+                                "label": "cls144",
+                                "redshift": 3.147,
+                                "bulge": {
+                                    "type": "instance",
+                                    "class_path": "autogalaxy.profiles.basis.Basis",
+                                    "arguments": {
+                                        "profile_list": {
+                                            "type": "list",
+                                            "values": [
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 18.733620596941524,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.001
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 19.97283182043577,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0012689610031679222
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 33.03037484375479,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0016102620275609393
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.449036075807973,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0020433597178569417
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.840764908659598e-18,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.002592943797404667
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.9580804316209705e-18,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0032903445623126675
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.6654765384374475,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0041753189365604
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 9.391179384910674e-18,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.005298316906283708
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 6.997160138284655e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.006723357536499335
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.0377039415575205e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.008531678524172805
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 6.151768376386091e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.010826367338740546
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 0.010604408819725523,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.01373823795883263
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 8.028518606292648e-19,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.017433288221999882
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 9.295421240360992e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.022122162910704492
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.716072962869938e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.02807216203941177
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.0914429356555504e-20,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.035622478902624426
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.1615842151516615e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.04520353656360243
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.7012746883776632e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.057361525104486784
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.5615950001371234e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.0727895384398315
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.0208977071601439e-21,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.09236708571873861
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 7.477680937668725e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.11721022975334805
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 5.83904028831039e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.14873521072935117
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 4.63456202335466e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.18873918221350977
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 3.6863620289593474e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.2395026619987486
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.9648602494518123e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.3039195382313198
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.435328417624436e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.38566204211634725
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 2.0544541783624851e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.4893900918477494
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.7872866332868894e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.6210169418915616
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.6062089334409897e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 0.7880462815669912
+                                                    }
+                                                },
+                                                {
+                                                    "type": "instance",
+                                                    "class_path": "autogalaxy.profiles.light.standard.gaussian.Gaussian",
+                                                    "arguments": {
+                                                        "ell_comps": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                0.6915543727300452,
+                                                                -0.04313105702827567
+                                                            ]
+                                                        },
+                                                        "centre": {
+                                                            "type": "tuple",
+                                                            "values": [
+                                                                -0.07616368909342737,
+                                                                0.07757144935942284
+                                                            ]
+                                                        },
+                                                        "intensity": {
+                                                            "type": "ndarray",
+                                                            "array": 1.4872847689468973e-22,
+                                                            "dtype": "float64"
+                                                        },
+                                                        "sigma": 1.0
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                        "regularization": null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "cosmology": {
+            "type": "instance",
+            "class_path": "autogalaxy.cosmology.model.Planck15",
+            "arguments": {}
+        }
+    }
+}

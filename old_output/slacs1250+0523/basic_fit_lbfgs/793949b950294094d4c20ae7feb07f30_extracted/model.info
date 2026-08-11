@@ -1,0 +1,36 @@
+Total Free Parameters = 11
+
+model                                                                           Collection (N=11)
+    galaxies                                                                    Collection (N=11)
+        lens                                                                    Galaxy (N=8)
+            mass                                                                IsothermalSph (N=3)
+            bulge                                                               Sersic (N=7)
+        source                                                                  Galaxy (N=3)
+            bulge                                                               ExponentialCoreSph (N=3)
+
+galaxies
+    lens
+        redshift                                                                0.2318
+        bulge - mass
+            centre
+                centre_0                                                        GaussianPrior [13], mean = 0.0, sigma = 0.05
+                centre_1                                                        GaussianPrior [14], mean = 0.0, sigma = 0.05
+        mass
+            einstein_radius                                                     GaussianPrior [15], mean = 1.0, sigma = 0.3
+        bulge
+            ell_comps
+                ell_comps_0                                                     GaussianPrior [19], mean = 0.0, sigma = 0.1
+                ell_comps_1                                                     GaussianPrior [20], mean = 0.0, sigma = 0.1
+            intensity                                                           GaussianPrior [16], mean = 1.0, sigma = 0.5
+            effective_radius                                                    GaussianPrior [17], mean = 1.0, sigma = 0.5
+            sersic_index                                                        GaussianPrior [18], mean = 4.0, sigma = 1.0
+    source
+        redshift                                                                0.7953
+        bulge
+            centre
+                centre_0                                                        GaussianPrior [21], mean = 0.0, sigma = 0.1
+                centre_1                                                        GaussianPrior [22], mean = 0.0, sigma = 0.1
+            effective_radius                                                    GaussianPrior [23], mean = 0.5, sigma = 0.2
+            radius_break                                                        0.025
+            gamma                                                               0.25
+            alpha                                                               3.0

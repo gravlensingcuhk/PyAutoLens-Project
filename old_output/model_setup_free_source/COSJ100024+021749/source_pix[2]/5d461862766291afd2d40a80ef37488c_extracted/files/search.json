@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "n_live": 75,
+        "seed": null,
+        "enlarge_per_dim": 1.1,
+        "split_threshold": 100,
+        "iterations_per_full_update": 10000.0,
+        "n_eff": 500,
+        "n_networks": 4,
+        "n_points_min": null,
+        "name": "source_pix[2]",
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "path_prefix": {
+            "type": "path",
+            "path": "model_setup_free_source"
+        },
+        "number_of_cores": 16,
+        "n_shell": 1,
+        "use_jax_vmap": true,
+        "n_update": null,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "name": "source_pix[2]",
+                "path_prefix": {
+                    "type": "path",
+                    "path": "model_setup_free_source"
+                },
+                "image_path_suffix": "",
+                "is_identifier_in_paths": true,
+                "parent": null,
+                "identifier": "5d461862766291afd2d40a80ef37488c",
+                "unique_tag": "COSJ100024+021749"
+            }
+        },
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "iterations_per_quick_update": 1e+99,
+        "unique_tag": "COSJ100024+021749",
+        "n_like_new_bound": null,
+        "inplace": false
+    }
+}

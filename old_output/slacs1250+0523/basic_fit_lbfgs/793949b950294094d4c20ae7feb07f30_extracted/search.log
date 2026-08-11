@@ -1,0 +1,14 @@
+Generating initial samples of model using JAX LH Function cores
+Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: libtpu.so: cannot open shared object file: No such file or directory
+Initial samples generated, starting non-linear search
+Starting new L-BFGS-B non-linear search (no previous samples found).
+Visualizing Starting Point Model in image_start folder.
+JAX: Applying jit to likelihood function -- may take a few seconds.
+JAX: jit applied in 0.0005652904510498047 seconds.
+Fit Running: Updating results (see output folder).
+Samples with weight less than 1e-10 removed from samples.csv.
+Creating latent samples by drawing 100 from the PDF.
+Drawing via PDF not available for this search, using all samples above the samples weight threshold instead.
+JAX: Applying vmap and jit to likelihood function for latent variables -- may take a few seconds.
+JAX: vmap and jit applied in 0.00038313865661621094 seconds.

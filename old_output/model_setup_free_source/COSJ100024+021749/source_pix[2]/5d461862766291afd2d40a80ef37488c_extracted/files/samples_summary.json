@@ -1,0 +1,146 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.samples.summary.SamplesSummary",
+    "arguments": {
+        "median_pdf_sample": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.samples.sample.Sample",
+            "arguments": {
+                "log_likelihood": 8350.730598747645,
+                "log_prior": 121495.99891914721,
+                "weight": 0.001775917354327058,
+                "kwargs": {
+                    "type": "dict",
+                    "arguments": {
+                        "galaxies.source.pixelization.regularization.inner_coefficient": 0.00029965925644931927,
+                        "galaxies.source.pixelization.regularization.outer_coefficient": 0.0006863866979105731,
+                        "galaxies.source.pixelization.regularization.signal_scale": 0.4819921816302893
+                    }
+                }
+            }
+        },
+        "errors_at_sigma_3": {
+            "type": "dict",
+            "arguments": {
+                "galaxies.source.pixelization.regularization.inner_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        0.00029860184909391026,
+                        0.23797920497770933
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.outer_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        0.0006853610474192812,
+                        27.12131403600335
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.signal_scale": {
+                    "type": "tuple",
+                    "values": [
+                        0.47559397334569503,
+                        0.5121166249378395
+                    ]
+                }
+            }
+        },
+        "errors_at_sigma_1": {
+            "type": "dict",
+            "arguments": {
+                "galaxies.source.pixelization.regularization.inner_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        0.0002936984984199097,
+                        0.01786704367508961
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.outer_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        0.0006743699042896339,
+                        0.06925389753334892
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.signal_scale": {
+                    "type": "tuple",
+                    "values": [
+                        0.3453349326416144,
+                        0.3306705359891922
+                    ]
+                }
+            }
+        },
+        "values_at_sigma_1": {
+            "type": "dict",
+            "arguments": {
+                "galaxies.source.pixelization.regularization.inner_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        5.960758029409567e-06,
+                        0.01816670293153893
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.outer_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        1.2016793620939114e-05,
+                        0.06994028423125949
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.signal_scale": {
+                    "type": "tuple",
+                    "values": [
+                        0.13665724898867487,
+                        0.8126627176194815
+                    ]
+                }
+            }
+        },
+        "log_evidence": 8349.116871852257,
+        "values_at_sigma_3": {
+            "type": "dict",
+            "arguments": {
+                "galaxies.source.pixelization.regularization.inner_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        1.0574073554089993e-06,
+                        0.23827886423415864
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.outer_coefficient": {
+                    "type": "tuple",
+                    "values": [
+                        1.0256504912918643e-06,
+                        27.122000422701262
+                    ]
+                },
+                "galaxies.source.pixelization.regularization.signal_scale": {
+                    "type": "tuple",
+                    "values": [
+                        0.006398208284594252,
+                        0.9941088065681287
+                    ]
+                }
+            }
+        },
+        "model": null,
+        "max_log_likelihood_sample": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.samples.sample.Sample",
+            "arguments": {
+                "log_likelihood": 8350.730598747645,
+                "log_prior": 121495.99891914721,
+                "weight": 0.001775917354327058,
+                "kwargs": {
+                    "type": "dict",
+                    "arguments": {
+                        "galaxies.source.pixelization.regularization.inner_coefficient": 8.419333281033475e-06,
+                        "galaxies.source.pixelization.regularization.outer_coefficient": 0.00036741088404364854,
+                        "galaxies.source.pixelization.regularization.signal_scale": 0.9318264394553909
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,12 @@
+Plane Index: -1 
+Positions: 
+ Grid2DIrregular([[ 0.01082813, -0.22449002],
+       [-0.3268125 ,  0.15572219],
+       [ 0.04134375, -0.22051172],
+       [ 0.1535625 ,  0.10457257]]) 
+
+Radial Distance from (0.0, 0.0): 
+ ArrayIrregular([0.22475101, 0.36201631, 0.22435401, 0.18578715]) 
+
+Threshold = 0.075 
+Max Source Plane Separation of Maximum Likelihood Model = 0.05859036041207639

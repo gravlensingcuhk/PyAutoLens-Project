@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "n_shell": 1,
+        "n_points_min": null,
+        "n_update": null,
+        "seed": null,
+        "name": "mass_multipole",
+        "use_jax_vmap": true,
+        "n_live": 400,
+        "split_threshold": 100,
+        "n_eff": 500,
+        "enlarge_per_dim": 1.1,
+        "n_networks": 4,
+        "iterations_per_full_update": 10000.0,
+        "path_prefix": {
+            "type": "path",
+            "path": "mass_models"
+        },
+        "iterations_per_quick_update": 1e+99,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "unique_tag": "COSJ100018+022138",
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "image_path_suffix": "",
+                "unique_tag": "COSJ100018+022138",
+                "identifier": "7817aa9252b08f71719a376562ecc4e6",
+                "name": "mass_multipole",
+                "parent": null,
+                "is_identifier_in_paths": true,
+                "path_prefix": {
+                    "type": "path",
+                    "path": "mass_models"
+                }
+            }
+        },
+        "inplace": false,
+        "n_like_new_bound": null,
+        "number_of_cores": 16
+    }
+}

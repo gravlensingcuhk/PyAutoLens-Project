@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "seed": null,
+        "number_of_cores": 16,
+        "iterations_per_full_update": 10000.0,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "n_live": 300,
+        "n_points_min": null,
+        "n_eff": 500,
+        "use_jax_vmap": true,
+        "n_update": null,
+        "n_shell": 1,
+        "iterations_per_quick_update": 1e+99,
+        "enlarge_per_dim": 1.1,
+        "path_prefix": {
+            "type": "path",
+            "path": "mass_models"
+        },
+        "inplace": false,
+        "name": "mass_EPL",
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "is_identifier_in_paths": true,
+                "path_prefix": {
+                    "type": "path",
+                    "path": "mass_models"
+                },
+                "name": "mass_EPL",
+                "parent": null,
+                "identifier": "04fa1bee0e5298e77fdc5151c2d8f2ce",
+                "image_path_suffix": "",
+                "unique_tag": "COSJ100024+021749"
+            }
+        },
+        "split_threshold": 100,
+        "n_networks": 4,
+        "n_like_new_bound": null,
+        "unique_tag": "COSJ100024+021749"
+    }
+}

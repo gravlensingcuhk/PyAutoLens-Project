@@ -1,0 +1,38 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.samples.summary.SamplesSummary",
+    "arguments": {
+        "median_pdf_sample": null,
+        "errors_at_sigma_1": null,
+        "values_at_sigma_1": null,
+        "max_log_likelihood_sample": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.samples.sample.Sample",
+            "arguments": {
+                "log_likelihood": 1924.285391012785,
+                "log_prior": 19.49210322324652,
+                "weight": 1.0,
+                "kwargs": {
+                    "type": "dict",
+                    "arguments": {
+                        "galaxies.lens.bulge.centre.centre_0": -0.00625001287078475,
+                        "galaxies.lens.bulge.centre.centre_1": -0.006250003803643208,
+                        "galaxies.lens.mass.einstein_radius": 1.0699429352233703,
+                        "galaxies.lens.bulge.intensity": 0.2934470911931651,
+                        "galaxies.lens.bulge.effective_radius": 1.065772966460538,
+                        "galaxies.lens.bulge.sersic_index": 3.9264929193216567,
+                        "galaxies.lens.bulge.ell_comps.ell_comps_0": -0.005068038226149771,
+                        "galaxies.lens.bulge.ell_comps.ell_comps_1": -0.015295716072472718,
+                        "galaxies.source.bulge.centre.centre_0": 0.08983333734485269,
+                        "galaxies.source.bulge.centre.centre_1": -0.024145670455023513,
+                        "galaxies.source.bulge.effective_radius": 1.6997959224899253
+                    }
+                }
+            }
+        },
+        "values_at_sigma_3": null,
+        "errors_at_sigma_3": null,
+        "model": null,
+        "log_evidence": null
+    }
+}
