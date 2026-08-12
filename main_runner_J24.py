@@ -110,7 +110,7 @@ lens_disk = slam_pipeline.mge_model_from(
 )
 
 lens_point = slam_pipeline.mge_model_from(
-    total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, -1, 10),
+    total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, np.log10(0.025), 10),
     centre=(0.0, 0.0)
 )
 
@@ -283,6 +283,8 @@ light_result = slam_pipeline.light_lp.run(
     lens_disk=lens_disk,
     lens_point=lens_point
 )
+
+sys.exit()
 
 """
 __MASS TOTAL PIPELINE__

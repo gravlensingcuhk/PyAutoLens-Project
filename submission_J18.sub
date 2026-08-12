@@ -1,6 +1,6 @@
 universe = vanilla
 getenv = True
-executable = /users/wing-yan.chan/PyAutoLens-Project/run_job.sh
+executable = /users/wing-yan.chan/PyAutoLens-Project/run_job_J18.sh
 initialdir = /users/wing-yan.chan/PyAutoLens-Project/
 output = /users/wing-yan.chan/log_files/job_free.out
 error = /users/wing-yan.chan/log_files/job_free.err

@@ -110,7 +110,7 @@ lens_disk = slam_pipeline.mge_model_from(
 )
 
 lens_point = slam_pipeline.mge_model_from(
-    total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, -1, 10),
+    total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, np.log10(0.025), 10),
     centre=(0.0, 0.0)
 )
 
@@ -134,8 +134,11 @@ source_lp_result = slam_pipeline.source_lp.run(
 """
 __SOURCE PIX PIPELINE__
 """
+
+weight_power = 3.5
+
 settings_search = af.SettingsSearch(
-    path_prefix='model_setup_free_source',
+    path_prefix=f'model_setup_free_source_weight_{str(weight_power)[0]}',
     unique_tag=f'{dataset_name}',
     info=None,
     session=None,
@@ -148,7 +151,7 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01) #weight_power= 4.5 and 2
+image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01) #weight_power= 4.5 and 2
 
 
 image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
@@ -210,7 +213,7 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01)
+image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01)
 
 
 image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(

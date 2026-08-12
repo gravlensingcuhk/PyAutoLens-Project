@@ -6,4 +6,4 @@ export NUMEXPR_NUM_THREADS=$CPUS_PER_TASK
 export OMP_NUM_THREADS=$CPUS_PER_TASK
 export VECLIB_MAXIMUM_THREADS=$CPUS_PER_TASK
 
-exec uv run python main_runner_cpu.py "COSJ100018+022138"
+exec uv run python main_runner_J18.py "COSJ100018+022138"
