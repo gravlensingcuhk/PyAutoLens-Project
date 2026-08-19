@@ -2,51 +2,51 @@
     "type": "instance",
     "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
     "arguments": {
-        "name": "source_lp[1]",
-        "n_eff": 500,
-        "paths": {
-            "type": "instance",
-            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
-            "arguments": {
-                "name": "source_lp[1]",
-                "image_path_suffix": "",
-                "unique_tag": "COSJ100018+022138",
-                "path_prefix": {
-                    "type": "path",
-                    "path": "model_setup_free_source"
-                },
-                "identifier": "9b486c099a42da3265697e54178bdd76",
-                "is_identifier_in_paths": true,
-                "parent": null
-            }
-        },
-        "n_points_min": null,
-        "n_update": null,
-        "n_like_new_bound": null,
-        "number_of_cores": 16,
         "n_networks": 4,
-        "seed": null,
-        "initializer": {
-            "type": "instance",
-            "class_path": "autofit.non_linear.initializer.InitializerPrior",
-            "arguments": {}
-        },
-        "use_jax_vmap": true,
-        "n_shell": 1,
-        "inplace": false,
+        "iterations_per_full_update": 10000.0,
+        "number_of_cores": 16,
+        "n_eff": 500,
         "unique_tag": "COSJ100018+022138",
         "path_prefix": {
             "type": "path",
             "path": "model_setup_free_source"
         },
+        "n_update": null,
+        "n_like_new_bound": null,
+        "n_shell": 1,
+        "name": "source_lp[1]",
+        "inplace": false,
+        "enlarge_per_dim": 1.1,
         "split_threshold": 100,
+        "seed": null,
         "iterations_per_quick_update": 1e+99,
-        "iterations_per_full_update": 10000.0,
+        "use_jax_vmap": true,
+        "n_points_min": null,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
         "initial_values": {
             "type": "dict",
             "arguments": {}
         },
-        "enlarge_per_dim": 1.1,
-        "n_live": 200
+        "n_live": 200,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "image_path_suffix": "",
+                "identifier": "9b486c099a42da3265697e54178bdd76",
+                "is_identifier_in_paths": true,
+                "unique_tag": "COSJ100018+022138",
+                "path_prefix": {
+                    "type": "path",
+                    "path": "model_setup_free_source"
+                },
+                "parent": null,
+                "name": "source_lp[1]"
+            }
+        }
     }
 }
