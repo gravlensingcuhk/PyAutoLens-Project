@@ -16,7 +16,7 @@ conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, 'data', 'cowls')
 
 
-use_jax = False
+use_jax = True
 
 """
 __Dataset__ 
@@ -30,7 +30,7 @@ dataset_path = path.join(data_path, dataset_name, filt)
 dataset = al.Imaging.from_fits(
     data_path=path.join(dataset_path, "data.fits"),
     noise_map_path=path.join(dataset_path, "noise_map.fits"),
-    psf_path=path.join(dataset_path, "psf_71x71.fits"),
+    psf_path=path.join(dataset_path, "psf95pc.fits"),
     pixel_scales=ps,
     check_noise_map=False
 )
