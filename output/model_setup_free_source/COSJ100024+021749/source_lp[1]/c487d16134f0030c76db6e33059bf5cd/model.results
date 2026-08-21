@@ -1,5 +1,5 @@
-Bayesian Evidence                                                               -3403.66816921
-Maximum Log Likelihood                                                          -3371.00704412
+Bayesian Evidence                                                               -2041.86565436
+Maximum Log Likelihood                                                          -1997.24961888
 
 model                                                                           Collection (N=21)
     galaxies                                                                    Collection (N=21)
@@ -23,54 +23,101 @@ Maximum Log Likelihood Model:
 galaxies
     lens
         mass
-            einstein_radius                                                     0.940
+            einstein_radius                                                     0.947
             ell_comps
-                ell_comps_0                                                     0.322
-                ell_comps_1                                                     0.139
+                ell_comps_0                                                     0.302
+                ell_comps_1                                                     0.187
         shear
-            gamma_1                                                             0.035
-            gamma_2                                                             0.071
+            gamma_1                                                             0.088
+            gamma_2                                                             0.072
         bulge
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                0.044
-                        centre_1                                                0.021
+                        centre_0                                                0.025
+                        centre_1                                                0.025
                     ell_comps
-                        ell_comps_0                                             -0.194
-                        ell_comps_1                                             -0.157
+                        ell_comps_0                                             -0.050
+                        ell_comps_1                                             -0.158
         disk
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                -0.030
-                        centre_1                                                0.007
+                        centre_0                                                -0.081
+                        centre_1                                                -0.083
                     ell_comps
-                        ell_comps_0                                             0.186
-                        ell_comps_1                                             -0.161
+                        ell_comps_0                                             -0.031
+                        ell_comps_1                                             -0.238
         point
             profile_list
                 0 - 9
                     centre
-                        centre_0                                                0.005
-                        centre_1                                                -0.057
+                        centre_0                                                0.052
+                        centre_1                                                -0.005
                     ell_comps
-                        ell_comps_0                                             -0.348
-                        ell_comps_1                                             -0.141
+                        ell_comps_0                                             0.183
+                        ell_comps_1                                             0.206
     source
         bulge
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                0.099
-                        centre_1                                                0.100
+                        centre_0                                                0.098
+                        centre_1                                                0.097
                     ell_comps
-                        ell_comps_0                                             -0.317
-                        ell_comps_1                                             0.007
+                        ell_comps_0                                             -0.183
+                        ell_comps_1                                             -0.099
 
- WARNING: The samples have not converged enough to compute a PDF and model errors. 
- The model below over estimates errors. 
 
+Summary (3.0 sigma limits):
+
+galaxies
+    lens
+        mass
+            einstein_radius                                                     0.9472 (0.9472, 0.9995)
+            ell_comps
+                ell_comps_0                                                     0.3018 (0.3018, 0.3251)
+                ell_comps_1                                                     0.1870 (0.1870, 0.2362)
+        shear
+            gamma_1                                                             0.0880 (0.0807, 0.0880)
+            gamma_2                                                             0.0718 (0.0718, 0.0867)
+        bulge
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                0.0249 (0.0249, 0.0322)
+                        centre_1                                                0.0246 (0.0225, 0.0246)
+                    ell_comps
+                        ell_comps_0                                             -0.0500 (-0.0849, -0.0500)
+                        ell_comps_1                                             -0.1576 (-0.1576, -0.1173)
+        disk
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                -0.0805 (-0.0869, -0.0805)
+                        centre_1                                                -0.0831 (-0.0831, -0.0728)
+                    ell_comps
+                        ell_comps_0                                             -0.0307 (-0.0307, 0.1022)
+                        ell_comps_1                                             -0.2376 (-0.2376, -0.0980)
+        point
+            profile_list
+                0 - 9
+                    centre
+                        centre_0                                                0.0523 (-0.0213, 0.0523)
+                        centre_1                                                -0.0054 (-0.0249, -0.0054)
+                    ell_comps
+                        ell_comps_0                                             0.1833 (-0.4437, 0.1833)
+                        ell_comps_1                                             0.2057 (-0.4023, 0.2057)
+    source
+        bulge
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                0.0982 (0.0979, 0.0982)
+                        centre_1                                                0.0974 (0.0974, 0.0987)
+                    ell_comps
+                        ell_comps_0                                             -0.1828 (-0.1829, -0.0661)
+                        ell_comps_1                                             -0.0988 (-0.0988, -0.0012)
 
 
 Summary (1.0 sigma limits):
@@ -78,50 +125,50 @@ Summary (1.0 sigma limits):
 galaxies
     lens
         mass
-            einstein_radius                                                     0.9405 (0.8326, 1.0292)
+            einstein_radius                                                     0.9472 (0.9472, 0.9472)
             ell_comps
-                ell_comps_0                                                     0.3225 (0.1545, 0.4999)
-                ell_comps_1                                                     0.1390 (0.0194, 0.3693)
+                ell_comps_0                                                     0.3018 (0.3018, 0.3018)
+                ell_comps_1                                                     0.1870 (0.1870, 0.1870)
         shear
-            gamma_1                                                             0.0351 (-0.0534, 0.0832)
-            gamma_2                                                             0.0706 (-0.0359, 0.0999)
+            gamma_1                                                             0.0880 (0.0880, 0.0880)
+            gamma_2                                                             0.0718 (0.0718, 0.0718)
         bulge
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                0.0438 (-0.0474, 0.0727)
-                        centre_1                                                0.0210 (-0.0498, 0.0494)
+                        centre_0                                                0.0249 (0.0249, 0.0249)
+                        centre_1                                                0.0246 (0.0246, 0.0246)
                     ell_comps
-                        ell_comps_0                                             -0.1941 (-0.2079, 0.2092)
-                        ell_comps_1                                             -0.1571 (-0.5090, 0.0464)
+                        ell_comps_0                                             -0.0500 (-0.0500, -0.0500)
+                        ell_comps_1                                             -0.1576 (-0.1576, -0.1576)
         disk
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                -0.0297 (-0.0672, 0.0785)
-                        centre_1                                                0.0072 (-0.0662, 0.0880)
+                        centre_0                                                -0.0805 (-0.0805, -0.0805)
+                        centre_1                                                -0.0831 (-0.0831, -0.0831)
                     ell_comps
-                        ell_comps_0                                             0.1862 (-0.3316, 0.3844)
-                        ell_comps_1                                             -0.1611 (-0.5422, 0.1141)
+                        ell_comps_0                                             -0.0307 (-0.0307, -0.0307)
+                        ell_comps_1                                             -0.2376 (-0.2376, -0.2376)
         point
             profile_list
                 0 - 9
                     centre
-                        centre_0                                                0.0047 (-0.0964, 0.0948)
-                        centre_1                                                -0.0572 (-0.0946, 0.0978)
+                        centre_0                                                0.0523 (0.0523, 0.0523)
+                        centre_1                                                -0.0054 (-0.0054, -0.0054)
                     ell_comps
-                        ell_comps_0                                             -0.3483 (-0.6912, 0.6052)
-                        ell_comps_1                                             -0.1408 (-0.8398, 0.6852)
+                        ell_comps_0                                             0.1833 (0.1833, 0.1833)
+                        ell_comps_1                                             0.2057 (0.2057, 0.2057)
     source
         bulge
             profile_list
                 0 - 29
                     centre
-                        centre_0                                                0.0988 (0.0785, 0.1000)
-                        centre_1                                                0.0998 (0.0820, 0.0999)
+                        centre_0                                                0.0982 (0.0982, 0.0982)
+                        centre_1                                                0.0974 (0.0974, 0.0974)
                     ell_comps
-                        ell_comps_0                                             -0.3168 (-0.5243, 0.1629)
-                        ell_comps_1                                             0.0067 (-0.1713, 0.3557)
+                        ell_comps_0                                             -0.1828 (-0.1828, -0.1828)
+                        ell_comps_1                                             -0.0988 (-0.0988, -0.0988)
 
 instances
 
