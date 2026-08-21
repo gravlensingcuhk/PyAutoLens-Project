@@ -54,11 +54,11 @@ use_jax = False
 def make_regularization():
     regularization = af.Model(al.reg.AdaptSplit)
     regularization.inner_coefficient = af.LogUniformPrior(
-        lower_limit=1.0e-3,      # floor for bright pixels
+        lower_limit=1.0e-4,      # floor for bright pixels
         upper_limit=1.0e6,
     )
     regularization.outer_coefficient = af.LogUniformPrior(
-        lower_limit=1.0e-1,      # floor for faint/background pixels
+        lower_limit=1.0e-4,      # floor for faint/background pixels
         upper_limit=1.0e6,
     )
     return regularization
