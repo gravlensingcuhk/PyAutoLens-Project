@@ -1,0 +1,36 @@
+# HTCondor submit file: one independent job per subhalo tile.
+#
+#   condor_submit submission_subhalo.sub
+#
+# `queue 25` launches NUMBER_OF_TILES**2 = 5x5 = 25 jobs. $(Process) expands to
+# the job index 0..24 and is passed to main_subhalo.py as the tile index.
+#
+# IMPORTANT: run (or at least submit) submission_subhalo_baseline.sub first so
+# the shared no-subhalo baseline exists / is being produced. Each tile job
+# loads source_pix[1] and mass_EPL from your already-finished main_runner_*.py
+# output and then either loads the baseline or waits for it. It does NOT re-run
+# the SLaM chain.
+#
+# EDIT the arguments below to match the target:
+#   $1 dataset        -> dataset name under data/cowls/
+#   $2 tile index     -> $(Process)
+#   $3 filter         -> F444W / F277W / F150W / F115W
+#   $4 source prefix  -> path_prefix of the finished source_pix[1] result
+#   $5 mass prefix    -> path_prefix of the finished mass_EPL result
+
+universe = vanilla
+getenv = True
+executable = /users/wing-yan.chan/PyAutoLens-Project/run_job_subhalo.sh
+initialdir = /users/wing-yan.chan/PyAutoLens-Project/
+
+arguments = "COSJ100024+021749 $(Process) F444W model_setup_free_source mass_models"
+
+output = /users/wing-yan.chan/log_files/subhalo_tile_$(Process).out
+error  = /users/wing-yan.chan/log_files/subhalo_tile_$(Process).err
+log    = /users/wing-yan.chan/log_files/subhalo_tile_$(Process).log
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 2GB
+
+queue 25
