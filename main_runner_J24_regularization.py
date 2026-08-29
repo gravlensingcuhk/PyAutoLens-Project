@@ -274,7 +274,7 @@ image_plane_mesh_grid = al.image_mesh.append_with_circle_edge_points(
 )
 
 adapt_images = al.AdaptImages(
-    galaxy_image_name_dict=galaxy_image_name_dict,
+    galaxy_name_image_dict=galaxy_image_name_dict,
     galaxy_name_image_plane_mesh_grid_dict={
         "('galaxies', 'source')": image_plane_mesh_grid
     },
