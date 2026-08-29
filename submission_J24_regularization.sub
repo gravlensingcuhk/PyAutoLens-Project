@@ -6,6 +6,6 @@ output = /users/wing-yan.chan/log_files/job_reg_$(Cluster)_$(Process).out
 error  = /users/wing-yan.chan/log_files/job_reg_$(Cluster)_$(Process).err
 log    = /users/wing-yan.chan/log_files/job_reg_$(Cluster)_$(Process).log
 request_cpus = 16
-request_memory = 128GB
+request_memory = 93GB
 request_disk = 2GB
 queue
