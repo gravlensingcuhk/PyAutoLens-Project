@@ -1,5 +1,5 @@
-Bayesian Evidence                                                               -2062.83908394
-Maximum Log Likelihood                                                          -2035.13401348
+Bayesian Evidence                                                               -1966.12193733
+Maximum Log Likelihood                                                          -1924.81643979
 
 model                                                                           Collection (N=10)
     galaxies                                                                    Collection (N=10)
@@ -23,21 +23,21 @@ galaxies
     lens
         mass
             ell_comps
-                ell_comps_0                                                     0.233
-                ell_comps_1                                                     -0.021
-            einstein_radius                                                     0.287
+                ell_comps_0                                                     0.371
+                ell_comps_1                                                     -0.068
+            einstein_radius                                                     0.308
             centre
-                centre_0                                                        -0.009
-                centre_1                                                        0.032
+                centre_0                                                        0.002
+                centre_1                                                        0.015
         shear
-            gamma_1                                                             -0.037
-            gamma_2                                                             -0.016
+            gamma_1                                                             -0.045
+            gamma_2                                                             0.014
     source
         pixelization
             regularization
-                inner_coefficient                                               0.000
-                outer_coefficient                                               24.054
-                signal_scale                                                    0.101
+                inner_coefficient                                               0.006
+                outer_coefficient                                               91.887
+                signal_scale                                                    0.024
 
  WARNING: The samples have not converged enough to compute a PDF and model errors. 
  The model below over estimates errors. 
@@ -50,21 +50,21 @@ galaxies
     lens
         mass
             ell_comps
-                ell_comps_0                                                     0.2331 (0.1250, 0.4878)
-                ell_comps_1                                                     -0.0209 (-0.1493, 0.1483)
-            einstein_radius                                                     0.2868 (0.2757, 0.3685)
+                ell_comps_0                                                     0.3713 (0.2942, 0.4408)
+                ell_comps_1                                                     -0.0683 (-0.1033, -0.0062)
+            einstein_radius                                                     0.3082 (0.2957, 0.3246)
             centre
-                centre_0                                                        -0.0085 (-0.0265, 0.0191)
-                centre_1                                                        0.0317 (0.0007, 0.0562)
+                centre_0                                                        0.0024 (-0.0149, 0.0099)
+                centre_1                                                        0.0148 (0.0065, 0.0297)
         shear
-            gamma_1                                                             -0.0368 (-0.0886, 0.0461)
-            gamma_2                                                             -0.0164 (-0.0977, 0.0607)
+            gamma_1                                                             -0.0449 (-0.0726, -0.0238)
+            gamma_2                                                             0.0138 (-0.0134, 0.0469)
     source
         pixelization
             regularization
-                inner_coefficient                                               0.0001 (0.0000, 0.3231)
-                outer_coefficient                                               24.0542 (14.1748, 93.1759)
-                signal_scale                                                    0.1015 (0.0096, 0.1726)
+                inner_coefficient                                               0.0061 (0.0000, 0.0989)
+                outer_coefficient                                               91.8873 (34.2522, 94.6442)
+                signal_scale                                                    0.0240 (0.0225, 0.0671)
 
 instances
 
