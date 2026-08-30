@@ -1,0 +1,12 @@
+Starting new Nautilus non-linear search (no previous samples found).
+JAX: Applying vmap and jit to likelihood function -- may take a few seconds.
+JAX: vmap and jit applied in 0.00039696693420410156 seconds.
+
+            Running search where parallelization is disabled.
+            
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
