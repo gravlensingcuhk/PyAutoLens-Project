@@ -19,9 +19,12 @@ module loads them back in two complementary ways:
    what you need when downstream code calls Result methods such as
    ``positions_likelihood_from(...)`` or ``model_centred``.
 
-Both rely only on the standard ``af.Aggregator.from_directory`` API used in
-``slam_pipeline/subhalo/database.py``, so they work with zipped or unzipped
-outputs alike.
+Both rely only on the directory ``Aggregator.from_directory`` API, so they work
+with zipped or unzipped outputs alike.
+
+Note: the directory aggregator lives at ``autofit.aggregator.aggregator.Aggregator``.
+``af.Aggregator`` is the *database* aggregator (it only has ``add_directory``, not
+``from_directory``), so it must not be used here.
 """
 
 from __future__ import annotations
@@ -30,9 +33,10 @@ from pathlib import Path
 from typing import Optional
 
 import autofit as af
+from autofit.aggregator.aggregator import Aggregator
 
 
-def _aggregator_for(output_path: str | Path, path_prefix: str) -> af.Aggregator:
+def _aggregator_for(output_path: str | Path, path_prefix: str) -> Aggregator:
     """
     Aggregate all searches under ``<output_path>/<path_prefix>``.
 
@@ -44,7 +48,7 @@ def _aggregator_for(output_path: str | Path, path_prefix: str) -> af.Aggregator:
         raise FileNotFoundError(
             f"Expected completed pipeline output at {directory} but it does not exist."
         )
-    return af.Aggregator.from_directory(directory=str(directory), completed_only=False)
+    return Aggregator.from_directory(directory=str(directory), completed_only=False)
 
 
 def load_search_output(

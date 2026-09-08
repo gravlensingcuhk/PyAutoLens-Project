@@ -84,6 +84,12 @@ N_BATCH = 20
 # Override via argv[4]/argv[5] if needed.
 SOURCE_PREFIX = str(sys.argv[4]) if len(sys.argv) > 4 else "model_setup_free_source"
 MASS_PREFIX = str(sys.argv[5]) if len(sys.argv) > 5 else "mass_models"
+# The base smooth mass model for subhalo detection. The main runners fit BOTH
+# "mass_EPL" (PowerLaw) and, after it, "mass_multipole" (PowerLaw + m=3,4
+# multipoles) under MASS_PREFIX. Subhalo detection must build on the final, most
+# complete smooth model so residuals are not just smooth-mass inadequacy, so we
+# load "mass_multipole" (the last search the chain runs).
+MASS_NAME = str(sys.argv[6]) if len(sys.argv) > 6 else "mass_multipole"
 
 # Pixel scale + PSF per filter. CHECK these against your data reduction.
 FILTER_PIXEL_SCALES = {
@@ -169,7 +175,7 @@ source_pix_result_1 = load_result(
     analysis=source_analysis,
 )
 
-# mass_EPL -- full Result (the base lens model for subhalo detection)
+# mass_multipole -- full Result (the base lens model for subhalo detection)
 mass_analysis = al.AnalysisImaging(
     dataset=dataset,
     use_jax=use_jax,
@@ -181,10 +187,10 @@ mass_result = load_result(
     output_path=output_path,
     path_prefix=MASS_PREFIX,
     unique_tag=dataset_name,
-    name="mass_EPL",
+    name=MASS_NAME,
     analysis=mass_analysis,
 )
-print("Loaded source_pix[1] and mass_EPL results from output/.")
+print(f"Loaded source_pix[1] and {MASS_NAME} results from output/.")
 
 
 # ---------------------------------------------------------------------------

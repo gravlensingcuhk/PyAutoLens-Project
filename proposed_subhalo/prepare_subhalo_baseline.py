@@ -10,7 +10,7 @@ which is what makes the delta-log-evidence map clean and comparable.
 This script:
 
   1. loads the masked dataset exactly as the main runners do;
-  2. loads the already-completed ``source_pix[1]`` and ``mass_EPL`` results
+  2. loads the already-completed ``source_pix[1]`` and ``mass_multipole`` results
      from ``output/`` via the Aggregator (the chain is NOT re-run);
   3. runs ONE ``af.Nautilus`` fit of the mass model *without* a subhalo,
      writing it to a tile-independent ``unique_tag`` so every tile job loads
@@ -26,9 +26,11 @@ argv[1]  dataset name        (e.g. "COSJ100024+021749")
 argv[2]  filter              (optional, default "F444W")
 argv[3]  source path_prefix  (optional, default "model_setup_free_source")
 argv[4]  mass   path_prefix  (optional, default "mass_models")
+argv[5]  mass   search name  (optional, default "mass_multipole")
 
 The path_prefix defaults match ``main_runner_J24.py``. Override them if you ran
 under a different prefix (e.g. J18 uses ``model_setup_free_source_weight_3``).
+Pass argv[5]="mass_EPL" to base detection on the pre-multipole PowerLaw instead.
 """
 
 import json
@@ -65,6 +67,10 @@ dataset_name = str(sys.argv[1])
 filt = str(sys.argv[2]) if len(sys.argv) > 2 else "F444W"
 source_prefix = str(sys.argv[3]) if len(sys.argv) > 3 else "model_setup_free_source"
 mass_prefix = str(sys.argv[4]) if len(sys.argv) > 4 else "mass_models"
+# Final smooth mass model the chain produces (mass_EPL is fit first, then
+# mass_multipole with m=3,4 multipoles). The baseline must match the mass model
+# the tiles load in main_subhalo.py, so it too defaults to "mass_multipole".
+mass_name = str(sys.argv[5]) if len(sys.argv) > 5 else "mass_multipole"
 
 # Pixel scale per filter. CHECK against your data reduction if you change filters.
 FILTER_PIXEL_SCALES = {
@@ -127,7 +133,7 @@ print(
 
 
 # ---------------------------------------------------------------------------
-# Load the COMPLETED source_pix[1] and mass_EPL results via the Aggregator.
+# Load the COMPLETED source_pix[1] and mass_multipole results via the Aggregator.
 # The chain is NOT re-run.  We load full Result objects (not just SearchOutput)
 # because detect.subhalo_no_subhalo calls positions_likelihood_from(...) and
 # uses model_centred.
@@ -162,7 +168,7 @@ mass_result = load_result(
     output_path=output_path,
     path_prefix=mass_prefix,
     unique_tag=dataset_name,
-    name="mass_EPL",
+    name=mass_name,
     analysis=mass_analysis,
 )
 
