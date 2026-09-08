@@ -69,7 +69,10 @@ MASS_NAME = str(sys.argv[5]) if len(sys.argv) > 5 else "mass_multipole"
 # ---------------------------------------------------------------------------
 # Refine configuration  <-- keep in sync with main_subhalo.py where relevant
 # ---------------------------------------------------------------------------
-SUBHALO_MASS_LIMITS = [1e6, 1e11]  # M_200 prior range (Msun)
+# Keep in sync with main_subhalo.py: NFWSph sampled in (kappa_s, r_s), Amvrosiadis
+# priors. r_s limits are in kpc and converted to arcsec at the lens redshift.
+SUBHALO_KAPPA_S_LIMITS = [1e-4, 1.0]            # log-uniform: -4 < log10(kappa_s) < 0
+SUBHALO_SCALE_RADIUS_KPC_LIMITS = [1e-3, 10.0]  # log-uniform: -3 < log10(r_s/kpc) < 1
 CENTRE_SIGMA_SCALE = 1.0           # 'a' for model_centred_absolute (Gaussian centre-prior width)
 N_LIVE = 600                       # nautilus live points (larger than tiles: final refined fit)
 N_BATCH = 16
@@ -196,7 +199,8 @@ print(
     f"Highest-evidence tile: index {winner_index} "
     f"(delta_logE = {winner['delta_log_evidence']:.3f}, "
     f"centre = ({winner['best_fit_centre_y']:.3f}, {winner['best_fit_centre_x']:.3f}) arcsec, "
-    f"M_200 = {winner['best_fit_mass_at_200']:.3e} Msun)"
+    f"kappa_s = {winner['best_fit_kappa_s']:.3e}, "
+    f"r_s = {winner['best_fit_scale_radius']:.3f} arcsec)"
 )
 
 
@@ -234,8 +238,9 @@ refine_result = tiling.subhalo_refine(
     mass_result=mass_result,
     subhalo_no_subhalo_result=subhalo_no_subhalo_result,
     winning_tile_result=winning_tile_result,
-    subhalo_mass=af.Model(al.mp.NFWMCRLudlowSph),
-    subhalo_mass_limits=SUBHALO_MASS_LIMITS,
+    subhalo_mass=af.Model(al.mp.NFWSph),
+    kappa_s_limits=SUBHALO_KAPPA_S_LIMITS,
+    scale_radius_kpc_limits=SUBHALO_SCALE_RADIUS_KPC_LIMITS,
     centre_sigma_scale=CENTRE_SIGMA_SCALE,
     n_live=N_LIVE,
     n_batch=N_BATCH,
@@ -248,6 +253,13 @@ refine_result = tiling.subhalo_refine(
 refine_log_evidence = float(refine_result.samples.log_evidence)
 subhalo_inst = refine_result.instance.galaxies.subhalo.mass
 
+# Derive M_200 and concentration from the fitted (kappa_s, r_s), as in main_subhalo.py.
+lens_redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+source_redshift = subhalo_no_subhalo_result.instance.galaxies.source.redshift
+kpc_per_arcsec = float(
+    al.cosmo.Planck15().kpc_per_arcsec_from(redshift=lens_redshift, xp=np)
+)
+
 summary = {
     "dataset": dataset_name,
     "filter": filt,
@@ -255,7 +267,19 @@ summary = {
     "log_evidence_no_subhalo": baseline_log_evidence,
     "log_evidence_with_subhalo_refined": refine_log_evidence,
     "delta_log_evidence_refined": refine_log_evidence - baseline_log_evidence,
-    "best_fit_mass_at_200": float(subhalo_inst.mass_at_200),
+    "best_fit_kappa_s": float(subhalo_inst.kappa_s),
+    "best_fit_scale_radius": float(subhalo_inst.scale_radius),  # arcsec
+    "best_fit_scale_radius_kpc": float(subhalo_inst.scale_radius) * kpc_per_arcsec,
+    "best_fit_concentration": float(
+        subhalo_inst.concentration(
+            redshift_profile=lens_redshift, redshift_source=source_redshift
+        )
+    ),
+    "best_fit_mass_at_200": float(
+        subhalo_inst.mass_at_200_solar_masses(
+            redshift_object=lens_redshift, redshift_source=source_redshift
+        )
+    ),
     "best_fit_centre_y": float(subhalo_inst.centre[0]),
     "best_fit_centre_x": float(subhalo_inst.centre[1]),
 }

@@ -42,7 +42,10 @@ def main():
     expected = n * n
 
     delta = np.full((n, n), np.nan)
-    mass = np.full((n, n), np.nan)
+    mass_at_200 = np.full((n, n), np.nan)
+    concentration = np.full((n, n), np.nan)
+    kappa_s = np.full((n, n), np.nan)
+    scale_radius = np.full((n, n), np.nan)
     best_y = np.full((n, n), np.nan)
     best_x = np.full((n, n), np.nan)
     loge_sub = np.full((n, n), np.nan)
@@ -50,7 +53,10 @@ def main():
     for r in records:
         iy, ix = r["tile"]["iy"], r["tile"]["ix"]
         delta[iy, ix] = r["delta_log_evidence"]
-        mass[iy, ix] = r["best_fit_mass_at_200"]
+        mass_at_200[iy, ix] = r["best_fit_mass_at_200"]
+        concentration[iy, ix] = r["best_fit_concentration"]
+        kappa_s[iy, ix] = r["best_fit_kappa_s"]
+        scale_radius[iy, ix] = r["best_fit_scale_radius"]
         best_y[iy, ix] = r["best_fit_centre_y"]
         best_x[iy, ix] = r["best_fit_centre_x"]
         loge_sub[iy, ix] = r["log_evidence_with_subhalo"]
@@ -60,7 +66,13 @@ def main():
     print(f"\nDelta log-evidence map ({dataset_name}, {filt})  [rows=y, cols=x]")
     print(np.round(delta, 2))
     print("\nBest-fit subhalo M_200 (Msun) per tile:")
-    print(np.array2string(mass, formatter={"float_kind": lambda v: f"{v:.2e}"}))
+    print(np.array2string(mass_at_200, formatter={"float_kind": lambda v: f"{v:.2e}"}))
+    print("\nBest-fit subhalo concentration per tile:")
+    print(np.array2string(concentration, formatter={"float_kind": lambda v: f"{v:.2f}"}))
+    print("\nBest-fit subhalo kappa_s per tile:")
+    print(np.array2string(kappa_s, formatter={"float_kind": lambda v: f"{v:.2e}"}))
+    print("\nBest-fit subhalo scale_radius (arcsec) per tile:")
+    print(np.array2string(scale_radius, formatter={"float_kind": lambda v: f"{v:.3f}"}))
     print("\nBest-fit centre y per tile:")
     print(np.round(best_y, 3))
     print("\nBest-fit centre x per tile:")
@@ -77,17 +89,24 @@ def main():
     print(
         f"\nStrongest detection: tile ({iy},{ix}) [index {iy*n+ix}], "
         f"delta_logE = {delta[iy, ix]:.2f}, "
-        f"M_200 = {mass[iy, ix]:.2e} Msun, "
+        f"M_200 = {mass_at_200[iy, ix]:.2e} Msun, c = {concentration[iy, ix]:.2f}, "
+        f"kappa_s = {kappa_s[iy, ix]:.2e}, r_s = {scale_radius[iy, ix]:.3f} arcsec, "
         f"centre = ({best_y[iy, ix]:.3f}, {best_x[iy, ix]:.3f}) arcsec"
     )
     print(f"No-subhalo baseline log_evidence = {baseline:.4f}")
 
     out_csv = path.join(summary_dir, "delta_log_evidence.csv")
     np.savetxt(out_csv, delta, delimiter=",", fmt="%.4f")
-    out_mass = path.join(summary_dir, "best_fit_mass.csv")
-    np.savetxt(out_mass, mass, delimiter=",", fmt="%.6e")
+    for label, arr in [
+        ("best_fit_mass_at_200", mass_at_200),
+        ("best_fit_concentration", concentration),
+        ("best_fit_kappa_s", kappa_s),
+        ("best_fit_scale_radius", scale_radius),
+    ]:
+        out = path.join(summary_dir, f"{label}.csv")
+        np.savetxt(out, arr, delimiter=",", fmt="%.6e")
+        print(f"Saved {label} map -> {out}")
     print(f"\nSaved delta map -> {out_csv}")
-    print(f"Saved mass map  -> {out_mass}")
 
 
 if __name__ == "__main__":

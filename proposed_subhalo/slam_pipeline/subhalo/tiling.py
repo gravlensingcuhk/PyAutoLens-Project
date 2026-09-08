@@ -136,6 +136,25 @@ def analysis_from(
     )
 
 
+def scale_radius_arcsec_limits_from_kpc(
+    scale_radius_kpc_limits: List[float], redshift: float
+) -> List[float]:
+    """
+    Convert r_s prior bounds from kpc (the units Amvrosiadis et al. quote,
+    ``-3 < log10(r_s/kpc) < 1``) to arcsec, which is what ``NFWSph.scale_radius``
+    expects. The conversion uses ``kpc_per_arcsec`` at the lens ``redshift`` under
+    Planck15 (the same cosmology PyAutoLens uses to derive M_200 / concentration),
+    so the physical prior matches regardless of the dataset's redshift.
+    """
+    kpc_per_arcsec = float(
+        al.cosmo.Planck15().kpc_per_arcsec_from(redshift=redshift, xp=np)
+    )
+    return [
+        scale_radius_kpc_limits[0] / kpc_per_arcsec,
+        scale_radius_kpc_limits[1] / kpc_per_arcsec,
+    ]
+
+
 def subhalo_tile(
     settings_search: af.SettingsSearch,
     dataset,
@@ -145,7 +164,8 @@ def subhalo_tile(
     subhalo_no_subhalo_settings_dict: dict,
     tile: Dict[str, float],
     subhalo_mass: af.Model,
-    subhalo_mass_limits: list = [1e6, 1e11],
+    kappa_s_limits: list = [1e-4, 1.0],
+    scale_radius_kpc_limits: list = [1e-3, 10.0],
     n_live: int = 200,
     n_batch: int = 20,
 ) -> af.Result:
@@ -164,11 +184,24 @@ def subhalo_tile(
         mass_result=mass_result,
     )
 
-    # --- Subhalo galaxy with an MCR-NFW mass profile --------------------
+    # --- Subhalo galaxy with an NFW mass profile ------------------------
+    # NFWSph is sampled DIRECTLY in kappa_s and scale_radius (r_s), matching
+    # Amvrosiadis et al.: independent log-uniform priors -4 < log10(kappa_s) < 0
+    # and -3 < log10(r_s/kpc) < 1. Concentration is left free (derived post-hoc
+    # from kappa_s/r_s), NOT tied to a mass-concentration relation. M_200 and c
+    # are recorded in the JSON summary via the profile's cosmology methods.
+    lens_redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+
     subhalo = af.Model(al.Galaxy, mass=subhalo_mass)
 
-    subhalo.mass.mass_at_200 = af.LogUniformPrior(
-        lower_limit=subhalo_mass_limits[0], upper_limit=subhalo_mass_limits[1]
+    subhalo.mass.kappa_s = af.LogUniformPrior(
+        lower_limit=kappa_s_limits[0], upper_limit=kappa_s_limits[1]
+    )
+    scale_radius_limits = scale_radius_arcsec_limits_from_kpc(
+        scale_radius_kpc_limits, redshift=lens_redshift
+    )
+    subhalo.mass.scale_radius = af.LogUniformPrior(
+        lower_limit=scale_radius_limits[0], upper_limit=scale_radius_limits[1]
     )
     # Confine the subhalo centre to THIS tile only (the whole point of tiling).
     subhalo.mass.centre_0 = af.UniformPrior(
@@ -178,13 +211,7 @@ def subhalo_tile(
         lower_limit=tile["x0"], upper_limit=tile["x1"]
     )
 
-    subhalo.redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
-    subhalo.mass.redshift_object = (
-        subhalo_no_subhalo_result.instance.galaxies.lens.redshift
-    )
-    subhalo.mass.redshift_source = (
-        subhalo_no_subhalo_result.instance.galaxies.source.redshift
-    )
+    subhalo.redshift = lens_redshift
 
     # --- Lens + source model, mirrored from detect.subhalo_grid_search --
     lens = _lens_model_from(
@@ -215,7 +242,8 @@ def subhalo_refine(
     subhalo_no_subhalo_result: af.Result,
     winning_tile_result: af.Result,
     subhalo_mass: af.Model,
-    subhalo_mass_limits: list = [1e6, 1e11],
+    kappa_s_limits: list = [1e-4, 1.0],
+    scale_radius_kpc_limits: list = [1e-3, 10.0],
     centre_sigma_scale: float = 1.0,
     n_live: int = 600,
     n_batch: int = 16,
@@ -255,26 +283,29 @@ def subhalo_refine(
         mass_result=mass_result,
     )
 
-    # Subhalo galaxy: mass free, centre a Gaussian seeded from the winning tile.
+    # Subhalo galaxy: NFWSph sampled in (kappa_s, r_s), centre a Gaussian seeded
+    # from the winning tile. Same Amvrosiadis priors as the tile fit.
+    lens_redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+
     subhalo = af.Model(
         al.Galaxy,
-        redshift=subhalo_no_subhalo_result.instance.galaxies.lens.redshift,
+        redshift=lens_redshift,
         mass=subhalo_mass,
     )
-    subhalo.mass.mass_at_200 = af.LogUniformPrior(
-        lower_limit=subhalo_mass_limits[0], upper_limit=subhalo_mass_limits[1]
+    subhalo.mass.kappa_s = af.LogUniformPrior(
+        lower_limit=kappa_s_limits[0], upper_limit=kappa_s_limits[1]
+    )
+    scale_radius_limits = scale_radius_arcsec_limits_from_kpc(
+        scale_radius_kpc_limits, redshift=lens_redshift
+    )
+    subhalo.mass.scale_radius = af.LogUniformPrior(
+        lower_limit=scale_radius_limits[0], upper_limit=scale_radius_limits[1]
     )
     subhalo.mass.centre = winning_tile_result.model_centred_absolute(
         a=centre_sigma_scale
     ).galaxies.subhalo.mass.centre
 
-    subhalo.redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
-    subhalo.mass.redshift_object = (
-        subhalo_no_subhalo_result.instance.galaxies.lens.redshift
-    )
-    subhalo.mass.redshift_source = (
-        subhalo_no_subhalo_result.instance.galaxies.source.redshift
-    )
+    subhalo.redshift = lens_redshift
 
     # Lens + source freed, initialized from the winning tile's model.
     model = af.Collection(

@@ -111,7 +111,10 @@ output/
   subhalo_tiles/<dataset>/<filter>/
     tile_000.json ... tile_015.json                    # per-tile summaries
     delta_log_evidence.csv                             # written by combine_tiles.py
-    best_fit_mass.csv
+    best_fit_mass_at_200.csv
+    best_fit_concentration.csv
+    best_fit_kappa_s.csv
+    best_fit_scale_radius.csv
     refine.json                                        # final detection (subhalo_refine.py)
 ```
 
@@ -185,9 +188,22 @@ for iy in range(n):       # y, top -> bottom
   change `request_cpus`, change these to match (or a multiple).
 
 * **Other subhalo knobs** — `N_LIVE`, `GRID_DIMENSION_ARCSEC`, `NUMBER_OF_TILES`,
-  `SUBHALO_MASS_LIMITS` at the top of `main_subhalo.py` (4×4 / 3.0" / 200 live
-  points). If you change `NUMBER_OF_TILES`, change `queue N**2` in
-  `submission_subhalo.sub` (currently `queue 16`) to match.
+  `SUBHALO_KAPPA_S_LIMITS`, `SUBHALO_SCALE_RADIUS_KPC_LIMITS` at the top of
+  `main_subhalo.py` (4×4 / 3.0" / 200 live points). If you change
+  `NUMBER_OF_TILES`, change `queue N**2` in `submission_subhalo.sub` (currently
+  `queue 16`) to match.
+
+* **Subhalo mass profile** — the subhalo is an `al.mp.NFWSph` sampled **directly
+  in `kappa_s` and `scale_radius` (r_s)**, matching Amvrosiadis et al.:
+  independent log-uniform priors `-4 < log₁₀(κ_s) < 0` and `-3 < log₁₀(r_s/kpc) <
+  1`. Concentration is **free** — derived post-hoc from κ_s/r_s, *not* tied to a
+  mass–concentration relation. The `SUBHALO_SCALE_RADIUS_KPC_LIMITS` knob is in
+  **kpc** (as the paper quotes) and is converted to arcsec at the lens redshift
+  inside `tiling.py` (`scale_radius_arcsec_limits_from_kpc`). The per-tile JSON
+  records `kappa_s`, `scale_radius` (arcsec), `scale_radius_kpc`, and — derived
+  under Planck15 from the fitted κ_s/r_s and the lens/source redshifts —
+  `concentration` and `mass_at_200`. Plot κ_s vs r_s (Figure 5) directly from the
+  chains; overlay constant-M₂₀₀ / Ludlow-offset tracks post-hoc if desired.
 
 * **Cosmetic:** a few `.sub` comments still say "mass_EPL result" when describing
   the mass *prefix* — harmless; the loaded search *name* is `mass_multipole`.

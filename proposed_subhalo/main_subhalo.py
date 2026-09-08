@@ -74,7 +74,14 @@ filt = str(sys.argv[3]) if len(sys.argv) > 3 else "F444W"
 # ---------------------------------------------------------------------------
 GRID_DIMENSION_ARCSEC = 3.0        # search region is +- this many arcsec
 NUMBER_OF_TILES = 4                # tiles per side -> 4x4 = 16 jobs
-SUBHALO_MASS_LIMITS = [1e6, 1e11]  # M_200 prior range (Msun)
+# NFWSph is sampled DIRECTLY in (kappa_s, scale_radius) with independent
+# log-uniform priors, matching Amvrosiadis et al.: -4 < log10(kappa_s) < 0 and
+# -3 < log10(r_s/kpc) < 1. Concentration is free (derived post-hoc from kappa_s
+# & r_s, NOT tied to a mass-concentration relation); M_200 & c are recorded in
+# the JSON via the profile's cosmology methods. r_s limits are in kpc and are
+# converted to arcsec at the lens redshift inside tiling.py.
+SUBHALO_KAPPA_S_LIMITS = [1e-4, 1.0]          # log-uniform: -4 < log10(kappa_s) < 0
+SUBHALO_SCALE_RADIUS_KPC_LIMITS = [1e-3, 10.0]  # log-uniform: -3 < log10(r_s/kpc) < 1
 N_LIVE = 200                       # nautilus live points per tile
 N_BATCH = 16                       # match request_cpus: one full JAX vmap wave over 16 cores
 
@@ -290,7 +297,7 @@ settings_search = af.SettingsSearch(
     number_of_cores=16,
 )
 
-subhalo_mass = af.Model(al.mp.NFWMCRLudlowSph)
+subhalo_mass = af.Model(al.mp.NFWSph)
 
 tile_result = tiling.subhalo_tile(
     settings_search=settings_search,
@@ -301,7 +308,8 @@ tile_result = tiling.subhalo_tile(
     subhalo_no_subhalo_settings_dict=subhalo_no_subhalo_settings_dict,
     tile=tile,
     subhalo_mass=subhalo_mass,
-    subhalo_mass_limits=SUBHALO_MASS_LIMITS,
+    kappa_s_limits=SUBHALO_KAPPA_S_LIMITS,
+    scale_radius_kpc_limits=SUBHALO_SCALE_RADIUS_KPC_LIMITS,
     n_live=N_LIVE,
     n_batch=N_BATCH,
 )
@@ -316,6 +324,15 @@ os.makedirs(summary_dir, exist_ok=True)
 tile_log_evidence = float(tile_result.samples.log_evidence)
 subhalo_inst = tile_result.instance.galaxies.subhalo.mass
 
+# Derive M_200 and concentration from the fitted (kappa_s, r_s) under Planck15
+# (the same cosmology PyAutoLens/Amvrosiadis use), using the lens & source
+# redshifts. r_s is also reported in kpc (the units of the Amvrosiadis prior).
+lens_redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+source_redshift = subhalo_no_subhalo_result.instance.galaxies.source.redshift
+kpc_per_arcsec = float(
+    al.cosmo.Planck15().kpc_per_arcsec_from(redshift=lens_redshift, xp=np)
+)
+
 summary = {
     "dataset": dataset_name,
     "filter": filt,
@@ -326,7 +343,19 @@ summary = {
     "log_evidence_no_subhalo": baseline_log_evidence,
     "log_evidence_with_subhalo": tile_log_evidence,
     "delta_log_evidence": tile_log_evidence - baseline_log_evidence,
-    "best_fit_mass_at_200": float(subhalo_inst.mass_at_200),
+    "best_fit_kappa_s": float(subhalo_inst.kappa_s),
+    "best_fit_scale_radius": float(subhalo_inst.scale_radius),  # arcsec
+    "best_fit_scale_radius_kpc": float(subhalo_inst.scale_radius) * kpc_per_arcsec,
+    "best_fit_concentration": float(
+        subhalo_inst.concentration(
+            redshift_profile=lens_redshift, redshift_source=source_redshift
+        )
+    ),
+    "best_fit_mass_at_200": float(
+        subhalo_inst.mass_at_200_solar_masses(
+            redshift_object=lens_redshift, redshift_source=source_redshift
+        )
+    ),
     "best_fit_centre_y": float(subhalo_inst.centre[0]),
     "best_fit_centre_x": float(subhalo_inst.centre[1]),
 }
