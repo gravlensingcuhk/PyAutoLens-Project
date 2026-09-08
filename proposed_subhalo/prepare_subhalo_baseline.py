@@ -1,10 +1,10 @@
 """
-Prepare the no-subhalo baseline (run ONCE, before the 9 tile jobs)
+Prepare the no-subhalo baseline (run ONCE, before the 16 tile jobs)
 ===================================================================
 
 The tiled subhalo scan compares every tile's log-evidence against a SINGLE
 no-subhalo baseline. Running that baseline once (instead of once per tile)
-saves ~9 baseline fits' worth of compute and gives every tile the *same* reference evidence,
+saves ~16 baseline fits' worth of compute and gives every tile the *same* reference evidence,
 which is what makes the delta-log-evidence map clean and comparable.
 
 This script:
@@ -175,7 +175,7 @@ mass_result = load_result(
 
 # ---------------------------------------------------------------------------
 # Run the no-subhalo baseline ONCE, under a tile-independent unique_tag so all
-# 9 tile jobs load the exact same result.
+# 16 tile jobs load the exact same result.
 #
 # If this baseline was already produced (e.g. a re-run), Nautilus sees the
 # .completed marker and returns instantly without re-sampling.

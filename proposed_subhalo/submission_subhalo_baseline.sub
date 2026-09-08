@@ -3,14 +3,14 @@
 # Run this first:
 #   condor_submit submission_subhalo_baseline.sub
 #
-# It fits the mass model without a DM subhalo ONCE. The 9 tile jobs below all
+# It fits the mass model without a DM subhalo ONCE. The 16 tile jobs below all
 # load this same result as their evidence reference, so the delta-log-evidence
-# map is computed against a common baseline (not 9 slightly different ones).
+# map is computed against a common baseline (not 16 slightly different ones).
 
 universe = vanilla
 getenv = True
-executable = /users/wing-yan.chan/PyAutoLens-Project/run_job_subhalo_baseline.sh
-initialdir = /users/wing-yan.chan/PyAutoLens-Project/
+executable = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/run_job_subhalo_baseline.sh
+initialdir = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/
 
 # EDIT these to match the target:
 #   $1 dataset   -> dataset name under data/cowls/

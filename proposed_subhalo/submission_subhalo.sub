@@ -2,8 +2,8 @@
 #
 #   condor_submit submission_subhalo.sub
 #
-# `queue 9` launches NUMBER_OF_TILES**2 = 3x3 = 9 jobs. $(Process) expands to
-# the job index 0..8 and is passed to main_subhalo.py as the tile index.
+# `queue 16` launches NUMBER_OF_TILES**2 = 4x4 = 16 jobs. $(Process) expands to
+# the job index 0..15 and is passed to main_subhalo.py as the tile index.
 #
 # IMPORTANT: run (or at least submit) submission_subhalo_baseline.sub first so
 # the shared no-subhalo baseline exists / is being produced. Each tile job
@@ -20,8 +20,8 @@
 
 universe = vanilla
 getenv = True
-executable = /users/wing-yan.chan/PyAutoLens-Project/run_job_subhalo.sh
-initialdir = /users/wing-yan.chan/PyAutoLens-Project/
+executable = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/run_job_subhalo.sh
+initialdir = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/
 
 arguments = "COSJ100024+021749 $(Process) F444W model_setup_free_source mass_models"
 
@@ -33,4 +33,4 @@ request_cpus = 16
 request_memory = 128GB
 request_disk = 2GB
 
-queue 9
+queue 16

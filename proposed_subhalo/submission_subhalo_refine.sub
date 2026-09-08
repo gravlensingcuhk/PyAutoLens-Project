@@ -1,0 +1,29 @@
+# HTCondor submit file: the final subhalo REFINE fit (ONE job).
+#
+#   condor_submit submission_subhalo_refine.sub
+#
+# Run this AFTER all tile jobs (submission_subhalo.sub) finish. It reads the
+# per-tile summaries, takes the highest-evidence tile's best-fit subhalo
+# position as a Gaussian centre prior, and refits the whole image plane. The
+# refined log-evidence vs the no-subhalo baseline is the final detection
+# significance (written to output/subhalo_tiles/<dataset>/<filter>/refine.json).
+#
+# EDIT the arguments to match the target:
+#   $1 dataset  $2 filter  $3 source prefix  $4 mass prefix  $5 mass name
+
+universe = vanilla
+getenv = True
+executable = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/run_job_subhalo_refine.sh
+initialdir = /users/wing-yan.chan/PyAutoLens-Project/proposed_subhalo/
+
+arguments = "COSJ100024+021749 F444W model_setup_free_source mass_models mass_multipole"
+
+output = /users/wing-yan.chan/log_files/subhalo_refine.out
+error  = /users/wing-yan.chan/log_files/subhalo_refine.err
+log    = /users/wing-yan.chan/log_files/subhalo_refine.log
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 2GB
+
+queue

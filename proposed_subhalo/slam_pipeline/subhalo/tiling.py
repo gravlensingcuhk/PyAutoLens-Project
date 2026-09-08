@@ -205,3 +205,91 @@ def subhalo_tile(
     )
 
     return search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
+
+
+def subhalo_refine(
+    settings_search: af.SettingsSearch,
+    dataset,
+    source_pix_result_1: af.Result,
+    mass_result: af.Result,
+    subhalo_no_subhalo_result: af.Result,
+    winning_tile_result: af.Result,
+    subhalo_mass: af.Model,
+    subhalo_mass_limits: list = [1e6, 1e11],
+    centre_sigma_scale: float = 1.0,
+    n_live: int = 600,
+    n_batch: int = 16,
+) -> af.Result:
+    """
+    Final SUBHALO PIPELINE stage: refit the whole frame with a DM subhalo whose
+    (y, x) centre is a Gaussian **initialized from the highest-evidence tile**,
+    rather than confined to a tile.
+
+    This mirrors ``detect.subhalo_refine`` (the third search of the reference
+    grid-search pipeline), but takes the single best tile from the tiled scan in
+    place of an ``af.SearchGridSearch`` result. The subhalo centre prior is a
+    GaussianPrior centred on the winning tile's best-fit centre (via
+    ``winning_tile_result.model_centred_absolute(a=centre_sigma_scale)``), so the
+    subhalo is free to move across the whole image plane while being pulled toward
+    the detected position. The lens (mass + multipoles) and source are freed and
+    initialized from the winning tile.
+
+    The returned result's ``samples.log_evidence`` is compared against the
+    no-subhalo baseline to give the final detection significance.
+
+    Parameters
+    ----------
+    winning_tile_result
+        The full ``Result`` of the tile with the highest log-evidence (the
+        strongest detection), whose best-fit subhalo centre seeds the Gaussian
+        centre prior.
+    centre_sigma_scale
+        The ``a`` passed to ``model_centred_absolute``: the Gaussian centre-prior
+        sigma is ``a`` x the winning tile's 1-sigma centre error. Larger values
+        loosen the position prior across the frame.
+    """
+
+    analysis = analysis_from(
+        dataset=dataset,
+        source_pix_result_1=source_pix_result_1,
+        mass_result=mass_result,
+    )
+
+    # Subhalo galaxy: mass free, centre a Gaussian seeded from the winning tile.
+    subhalo = af.Model(
+        al.Galaxy,
+        redshift=subhalo_no_subhalo_result.instance.galaxies.lens.redshift,
+        mass=subhalo_mass,
+    )
+    subhalo.mass.mass_at_200 = af.LogUniformPrior(
+        lower_limit=subhalo_mass_limits[0], upper_limit=subhalo_mass_limits[1]
+    )
+    subhalo.mass.centre = winning_tile_result.model_centred_absolute(
+        a=centre_sigma_scale
+    ).galaxies.subhalo.mass.centre
+
+    subhalo.redshift = subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+    subhalo.mass.redshift_object = (
+        subhalo_no_subhalo_result.instance.galaxies.lens.redshift
+    )
+    subhalo.mass.redshift_source = (
+        subhalo_no_subhalo_result.instance.galaxies.source.redshift
+    )
+
+    # Lens + source freed, initialized from the winning tile's model.
+    model = af.Collection(
+        galaxies=af.Collection(
+            lens=winning_tile_result.model.galaxies.lens,
+            subhalo=subhalo,
+            source=winning_tile_result.model.galaxies.source,
+        ),
+    )
+
+    search = af.Nautilus(
+        name="subhalo_refine",
+        **settings_search.search_dict,
+        n_live=n_live,
+        n_batch=n_batch,
+    )
+
+    return search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
