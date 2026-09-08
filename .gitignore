@@ -2,3 +2,5 @@
 /PAT
 *.hdf5
 CLAUDE.md
+__pycache__/
+*.pyc
