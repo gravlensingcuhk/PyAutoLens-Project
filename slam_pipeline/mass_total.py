@@ -20,7 +20,7 @@ def run(
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
     reset_shear_prior: bool = False,
-    n_batch: int = 5,
+    n_batch: int = 16,
     use_prior_chaining=False
 ) -> af.Result:
     """
@@ -186,7 +186,7 @@ def run__multi(
     mass_centre: Optional[Tuple[float, float]] = None,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 5,
+    n_batch: int = 16,
 ) -> af.Result:
     """
     The SLaM MASS TOTAL PIPELINE, which fits a lens model with a total mass distribution (e.g. a power-law).

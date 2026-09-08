@@ -17,7 +17,7 @@ def run(
     link_mass_to_light_ratios: bool = True,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 20,
+    n_batch: int = 16,
 ) -> af.Result:
     """
     The SLaM MASS LIGHT DARK PIPELINE, which fits a mass model where the stellar mass is modeled in a way linked
@@ -163,7 +163,7 @@ def run__multi(
     link_mass_to_light_ratios: bool = True,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 20,
+    n_batch: int = 16,
 ) -> af.Result:
     """
     The SLaM MASS LIGHT DARK PIPELINE, which fits a mass model where the stellar mass is modeled in a way linked
