@@ -138,7 +138,7 @@ __SOURCE PIX PIPELINE__
 weight_power = 3.5
 
 settings_search = af.SettingsSearch(
-    path_prefix=f'model_setup_free_source_weight_{str(weight_power)[0]}',
+    path_prefix=f'model_setup_free_source',
     unique_tag=f'{dataset_name}',
     info=None,
     session=None,
@@ -287,7 +287,6 @@ light_result = slam_pipeline.light_lp.run(
     lens_point=lens_point
 )
 
-sys.exit()
 
 """
 __MASS TOTAL PIPELINE__

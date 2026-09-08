@@ -284,7 +284,6 @@ light_result = slam_pipeline.light_lp.run(
     lens_point=lens_point
 )
 
-sys.exit()
 
 """
 __MASS TOTAL PIPELINE__
