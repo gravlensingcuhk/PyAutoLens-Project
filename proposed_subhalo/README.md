@@ -13,17 +13,17 @@ This is the cluster-friendly alternative to `detect.subhalo_grid_search`
 |------|---------|
 | `slam_pipeline/subhalo/tiling.py` | `make_tiles()` + `subhalo_tile()` (one tile fit) and the shared `analysis_from()` / lens-model builder. Mirrors `detect.subhalo_grid_search` exactly. |
 | `slam_pipeline/subhalo/loaders.py` | Load completed results from `output/` via the Aggregator **without re-running** them. |
-| `prepare_subhalo_baseline.py` | Run **once**: fits the no-subhalo baseline under a tile-independent `unique_tag` so all 25 tiles share one reference evidence. |
+| `prepare_subhalo_baseline.py` | Run **once**: fits the no-subhalo baseline under a tile-independent `unique_tag` so all 9 tiles share one reference evidence. |
 | `main_subhalo.py` | The per-tile job. Loads `source_pix[1]`, `mass_multipole`, and the baseline from `output/`, then runs only its one tile. |
-| `combine_tiles.py` | Reads the 25 `tile_###.json` summaries and prints/saves the delta-log-evidence + best-fit mass/centre maps. |
+| `combine_tiles.py` | Reads the 9 `tile_###.json` summaries and prints/saves the delta-log-evidence + best-fit mass/centre maps. |
 | `run_job_subhalo.sh`, `run_job_subhalo_baseline.sh` | Job wrappers. They let XLA use all allocated cores (`CPUS_PER_TASK=16`), matching the JAX-aware `run_job_J18.sh` / `run_job_J24.sh`. |
-| `submission_subhalo_baseline.sub`, `submission_subhalo.sub` | HTCondor submit files (1 baseline job + 25 tile jobs). |
+| `submission_subhalo_baseline.sub`, `submission_subhalo.sub` | HTCondor submit files (1 baseline job + 9 tile jobs). |
 
 ## Why this is not the "rerun everything per tile" version
 
 The reference `main_subhalo.py` you were given re-runs the **entire**
-source → light → mass chain inside every one of the 25 tile jobs. At ~days per
-chain that is ~25× the chain cost, and each job also fits its own slightly
+source → light → mass chain inside every one of the 9 tile jobs. At ~days per
+chain that is ~9× the chain cost, and each job also fits its own slightly
 different no-subhalo baseline (Nautilus is stochastic), which contaminates a
 clean ΔlogE comparison.
 
@@ -34,7 +34,7 @@ This version instead:
 2. Fits the **no-subhalo baseline once** (`prepare_subhalo_baseline.py`) under a
    tile-independent `unique_tag = <dataset>_subhalo_baseline`; every tile loads
    that exact result.
-3. Each of the 25 jobs runs **only its single subhalo-tile Nautilus fit**.
+3. Each of the 9 jobs runs **only its single subhalo-tile Nautilus fit**.
 
 If a tile starts before the baseline job has finished, it polls and waits
 (default up to 6 h); if the baseline never appears it falls back to fitting it
@@ -68,10 +68,10 @@ After your SLaM pipeline submissions (the `.sub` files producing
 #    submitted together with the tiles (tiles wait for it).
 condor_submit submission_subhalo_baseline.sub
 
-# 2. The 25 tile jobs.
+# 2. The 9 tile jobs.
 condor_submit submission_subhalo.sub
 
-# 3. After all 25 finish, assemble the map:
+# 3. After all 9 finish, assemble the map:
 uv run python combine_tiles.py COSJ100024+021749 F444W
 ```
 
@@ -103,9 +103,9 @@ output/
     <dataset>_subhalo_baseline/subhalo_base/...      # one shared baseline
     <dataset>_subhalo_tile_000/subhalo_tile_000/... # per-tile fits
     ...
-    <dataset>_subhalo_tile_024/subhalo_tile_024/...
+    <dataset>_subhalo_tile_008/subhalo_tile_008/...
   subhalo_tiles/<dataset>/<filter>/
-    tile_000.json ... tile_024.json                  # per-tile summaries
+    tile_000.json ... tile_008.json                  # per-tile summaries
     delta_log_evidence.csv                           # written by combine_tiles.py
     best_fit_mass.csv
 ```
@@ -127,7 +127,7 @@ for iy in range(n):       # y, top -> bottom
 1. **`lens.multipole.m = ...`** in `detect.py` / the reference tile function
    sets `m` on a non-existent `lens.multipole` for the `multipole_1/_3/_4`
    cases. `tiling._lens_model_from` sets `m` on each multipole model itself.
-2. **25× chain re-run + 25 stochastic baselines** (see above) — replaced with
+2. **9× chain re-run + 9 stochastic baselines** (see above) — replaced with
    Aggregator loading + one shared baseline.
 3. The reference `main_subhalo.py` hard-coded the cosma path but mixed in a
    `summary_dir` relative to cwd; paths are now all rooted at the workspace
@@ -174,9 +174,9 @@ for iy in range(n):       # y, top -> bottom
   Set it to **16** (one full wave) or 32 to fully use the 16 cores.
 
 * **Other subhalo knobs** — `N_LIVE`, `GRID_DIMENSION_ARCSEC`, `NUMBER_OF_TILES`,
-  `SUBHALO_MASS_LIMITS` at the top of `main_subhalo.py` (5×5 / 3.0" / 200 live
+  `SUBHALO_MASS_LIMITS` at the top of `main_subhalo.py` (3×3 / 3.0" / 200 live
   points). If you change `NUMBER_OF_TILES`, change `queue N**2` in
-  `submission_subhalo.sub` (currently `queue 25`) to match.
+  `submission_subhalo.sub` (currently `queue 9`) to match.
 
 * **Cosmetic:** a few `.sub` comments still say "mass_EPL result" when describing
   the mass *prefix* — harmless; the loaded search *name* is `mass_multipole`.

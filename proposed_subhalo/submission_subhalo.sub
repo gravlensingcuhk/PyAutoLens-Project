@@ -2,8 +2,8 @@
 #
 #   condor_submit submission_subhalo.sub
 #
-# `queue 25` launches NUMBER_OF_TILES**2 = 5x5 = 25 jobs. $(Process) expands to
-# the job index 0..24 and is passed to main_subhalo.py as the tile index.
+# `queue 9` launches NUMBER_OF_TILES**2 = 3x3 = 9 jobs. $(Process) expands to
+# the job index 0..8 and is passed to main_subhalo.py as the tile index.
 #
 # IMPORTANT: run (or at least submit) submission_subhalo_baseline.sub first so
 # the shared no-subhalo baseline exists / is being produced. Each tile job
@@ -33,4 +33,4 @@ request_cpus = 16
 request_memory = 128GB
 request_disk = 2GB
 
-queue 25
+queue 9

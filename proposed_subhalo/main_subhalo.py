@@ -8,12 +8,12 @@ source -> light -> mass SLaM chain. Your submitted ``main_runner_*.py`` jobs
 ``output/``; this script loads them back via the Aggregator and runs only the
 single subhalo tile it is responsible for.
 
-Launch 25 independent jobs, one per tile, e.g.:
+Launch 9 independent jobs, one per tile, e.g.:
 
     python main_subhalo.py COSJ100024+021749 0 F444W
     python main_subhalo.py COSJ100024+021749 1 F444W
     ...
-    python main_subhalo.py COSJ100024+021749 24 F444W
+    python main_subhalo.py COSJ100024+021749 8 F444W
 
 Arguments
 ---------
@@ -23,7 +23,7 @@ argv[3]  filter         (optional, default "F444W")
 
 Each job writes its own result under a tile-specific ``unique_tag`` and a small
 summary JSON under ``output/subhalo_tiles/<dataset>/tile_###.json``. After all
-25 finish, run ``combine_tiles.py <dataset>`` to assemble the delta-log-evidence
+9 finish, run ``combine_tiles.py <dataset>`` to assemble the delta-log-evidence
 map.
 """
 
@@ -73,7 +73,7 @@ filt = str(sys.argv[3]) if len(sys.argv) > 3 else "F444W"
 # Subhalo scan configuration  <-- TUNE HERE
 # ---------------------------------------------------------------------------
 GRID_DIMENSION_ARCSEC = 3.0        # search region is +- this many arcsec
-NUMBER_OF_TILES = 5                # tiles per side -> 5x5 = 25 jobs
+NUMBER_OF_TILES = 3                # tiles per side -> 3x3 = 9 jobs
 SUBHALO_MASS_LIMITS = [1e6, 1e11]  # M_200 prior range (Msun)
 N_LIVE = 200                       # nautilus live points per tile
 N_BATCH = 20
@@ -194,11 +194,11 @@ print(f"Loaded source_pix[1] and {MASS_NAME} results from output/.")
 
 
 # ---------------------------------------------------------------------------
-# No-subhalo baseline: ONE shared result for all 25 tiles.
+# No-subhalo baseline: ONE shared result for all 9 tiles.
 #
 # It is written under a tile-independent unique_tag by
 # prepare_subhalo_baseline.py. If that preparation job is still running when a
-# tile starts, wait for it (rather than 25 jobs racing to fit the same
+# tile starts, wait for it (rather than 9 jobs racing to fit the same
 # baseline). If it never appears, fall back to fitting it here.
 # ---------------------------------------------------------------------------
 baseline_unique_tag = f"{dataset_name}_subhalo_baseline"

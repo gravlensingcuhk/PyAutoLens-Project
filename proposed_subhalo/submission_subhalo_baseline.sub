@@ -3,9 +3,9 @@
 # Run this first:
 #   condor_submit submission_subhalo_baseline.sub
 #
-# It fits the mass model without a DM subhalo ONCE. The 25 tile jobs below all
+# It fits the mass model without a DM subhalo ONCE. The 9 tile jobs below all
 # load this same result as their evidence reference, so the delta-log-evidence
-# map is computed against a common baseline (not 25 slightly different ones).
+# map is computed against a common baseline (not 9 slightly different ones).
 
 universe = vanilla
 getenv = True
