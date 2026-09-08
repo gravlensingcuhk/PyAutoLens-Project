@@ -180,7 +180,7 @@ mass_result = load_result(
 # If this baseline was already produced (e.g. a re-run), Nautilus sees the
 # .completed marker and returns instantly without re-sampling.
 # ---------------------------------------------------------------------------
-N_BATCH = 20
+N_BATCH = 16  # match request_cpus: one full JAX vmap wave over 16 cores
 
 baseline_unique_tag = f"{dataset_name}_subhalo_baseline"
 

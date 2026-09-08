@@ -178,11 +178,11 @@ for iy in range(n):       # y, top -> bottom
   The wrappers set `CPUS_PER_TASK=16` (was 1) so XLA uses all allocated cores —
   no pool, so no oversubscription. `request_cpus = 16` in the `.sub` files matches.
 
-* **`N_BATCH` should match the core count.** Under the JAX path `n_batch` is the
-  width of the vmapped batch (how many of the 16 cores are used per wave).
-  `subhalo_refine.py` uses `N_BATCH=16`, but `main_subhalo.py` /
-  `prepare_subhalo_baseline.py` still set `N_BATCH=20` (two uneven waves, ~62%
-  packed) — set them to **16** (one full wave) or 32 to fully use the cores.
+* **`N_BATCH` matches the core count.** Under the JAX path `n_batch` is the
+  width of the vmapped batch (how many of the 16 cores are used per wave). All
+  three stages (`main_subhalo.py`, `prepare_subhalo_baseline.py`,
+  `subhalo_refine.py`) set `N_BATCH=16` = one full wave over the 16 cores. If you
+  change `request_cpus`, change these to match (or a multiple).
 
 * **Other subhalo knobs** — `N_LIVE`, `GRID_DIMENSION_ARCSEC`, `NUMBER_OF_TILES`,
   `SUBHALO_MASS_LIMITS` at the top of `main_subhalo.py` (4×4 / 3.0" / 200 live

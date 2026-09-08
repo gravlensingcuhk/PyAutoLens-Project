@@ -76,7 +76,7 @@ GRID_DIMENSION_ARCSEC = 3.0        # search region is +- this many arcsec
 NUMBER_OF_TILES = 4                # tiles per side -> 4x4 = 16 jobs
 SUBHALO_MASS_LIMITS = [1e6, 1e11]  # M_200 prior range (Msun)
 N_LIVE = 200                       # nautilus live points per tile
-N_BATCH = 20
+N_BATCH = 16                       # match request_cpus: one full JAX vmap wave over 16 cores
 
 # path_prefixes where the already-finished chain lives.
 # main_runner_J24.py -> source: "model_setup_free_source", mass: "mass_models".
