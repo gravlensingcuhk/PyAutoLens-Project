@@ -3,8 +3,6 @@ IsothermalCore:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -15,8 +13,6 @@ IsothermalCore:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -47,8 +43,6 @@ IsothermalCore:
     type: Gaussian
     mean: 0.0
     sigma: 0.3
-    lower_limit: -1.0
-    upper_limit: 1.0
     width_modifier:
       type: Absolute
       value: 0.2
@@ -59,8 +53,6 @@ IsothermalCore:
     type: Gaussian
     mean: 0.0
     sigma: 0.3
-    lower_limit: -1.0
-    upper_limit: 1.0
     width_modifier:
       type: Absolute
       value: 0.2
@@ -72,8 +64,6 @@ IsothermalCoreSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -84,8 +74,6 @@ IsothermalCoreSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05

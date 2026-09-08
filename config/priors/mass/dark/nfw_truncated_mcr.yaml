@@ -3,8 +3,6 @@ NFWTruncatedMCRDuffySph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -15,8 +13,6 @@ NFWTruncatedMCRDuffySph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -58,8 +54,6 @@ NFWTruncatedMCRLudlowSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -70,8 +64,6 @@ NFWTruncatedMCRLudlowSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -113,8 +105,6 @@ NFWTruncatedMCRScatterLudlowSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -125,8 +115,6 @@ NFWTruncatedMCRScatterLudlowSph:
     type: Gaussian
     mean: 0.0
     sigma: 0.1
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 0.05
@@ -167,8 +155,6 @@ NFWTruncatedMCRScatterLudlowSph:
     type: Gaussian
     mean: 0.0
     sigma: 3.0
-    lower_limit: -inf
-    upper_limit: inf
     width_modifier:
       type: Absolute
       value: 1.0
