@@ -1,0 +1,269 @@
+Total Free Parameters = 21
+
+model                                                                           Collection (N=21)
+    galaxies                                                                    Collection (N=21)
+        lens                                                                    Galaxy (N=17)
+            disk - point                                                        Basis (N=4)
+                profile_list                                                    Collection (N=4)
+                    0 - 9                                                       Gaussian (N=4)
+            mass                                                                Isothermal (N=3)
+            shear                                                               ExternalShear (N=2)
+            disk
+                profile_list
+                    10 - 29                                                     Gaussian (N=4)
+        source                                                                  Galaxy (N=4)
+        lens - source
+            bulge                                                               Basis (N=4)
+                profile_list                                                    Collection (N=4)
+                    0 - 29                                                      Gaussian (N=4)
+
+galaxies
+    lens
+        redshift                                                                0.3616999983787536
+        mass
+            centre                                                              (0.0, 0.0)
+            einstein_radius                                                     UniformPrior [369], lower_limit = 0.0, upper_limit = 5.0
+            ell_comps
+                ell_comps_0                                                     TruncatedGaussianPrior [367], mean = 0.0, sigma = 0.225, lower_limit = -1.0, upper_limit = 1.0
+                ell_comps_1                                                     TruncatedGaussianPrior [368], mean = 0.0, sigma = 0.225, lower_limit = -1.0, upper_limit = 1.0
+        shear
+            gamma_1                                                             TruncatedGaussianPrior [372], mean = 0.0, sigma = 0.04, lower_limit = -0.1, upper_limit = 0.1
+            gamma_2                                                             TruncatedGaussianPrior [373], mean = 0.0, sigma = 0.04, lower_limit = -0.1, upper_limit = 0.1
+        bulge
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                UniformPrior [5], lower_limit = -0.1, upper_limit = 0.1
+                        centre_1                                                UniformPrior [6], lower_limit = -0.1, upper_limit = 0.1
+                    ell_comps
+                        ell_comps_0                                             TruncatedGaussianPrior [7], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                        ell_comps_1                                             TruncatedGaussianPrior [8], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                0
+                    sigma                                                       0.01
+                1
+                    sigma                                                       0.01202476305335094
+                2
+                    sigma                                                       0.014459492648923376
+                3
+                    sigma                                                       0.017387197297497332
+                4
+                    sigma                                                       0.020907692766426914
+                5
+                    sigma                                                       0.025141005150854306
+                6
+                    sigma                                                       0.030231462986209854
+                7
+                    sigma                                                       0.03635261791653226
+                8
+                    sigma                                                       0.04371316168153003
+                9
+                    sigma                                                       0.05256404115332183
+                10
+                    sigma                                                       0.06320701399952827
+                11
+                    sigma                                                       0.07600493666541629
+                12
+                    sigma                                                       0.0913941354286576
+                13
+                    sigma                                                       0.10989928229954736
+                14
+                    sigma                                                       0.1321512829385382
+                15
+                    sigma                                                       0.15890878645322598
+                16
+                    sigma                                                       0.19108405041955862
+                17
+                    sigma                                                       0.22977404295697568
+                18
+                    sigma                                                       0.27629784223681114
+                19
+                    sigma                                                       0.33224160850497936
+                20
+                    sigma                                                       0.39951266187365614
+                21
+                    sigma                                                       0.4804045095844227
+                22
+                    sigma                                                       0.5776750397513941
+                23
+                    sigma                                                       0.69464054748456
+                24
+                    sigma                                                       0.8352887990751806
+                25
+                    sigma                                                       1.0044149889997103
+                26
+                    sigma                                                       1.2077852249955603
+                27
+                    sigma                                                       1.4523331149909773
+                28
+                    sigma                                                       1.7463961582301577
+                29
+                    sigma                                                       2.1
+        disk
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                UniformPrior [159], lower_limit = -0.1, upper_limit = 0.1
+                        centre_1                                                UniformPrior [160], lower_limit = -0.1, upper_limit = 0.1
+                    ell_comps
+                        ell_comps_0                                             TruncatedGaussianPrior [161], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                        ell_comps_1                                             TruncatedGaussianPrior [162], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                0
+                    sigma                                                       0.01
+                1
+                    sigma                                                       0.01202476305335094
+                2
+                    sigma                                                       0.014459492648923376
+                3
+                    sigma                                                       0.017387197297497332
+                4
+                    sigma                                                       0.020907692766426914
+                5
+                    sigma                                                       0.025141005150854306
+                6
+                    sigma                                                       0.030231462986209854
+                7
+                    sigma                                                       0.03635261791653226
+                8
+                    sigma                                                       0.04371316168153003
+                9
+                    sigma                                                       0.05256404115332183
+                10
+                    sigma                                                       0.06320701399952827
+                11
+                    sigma                                                       0.07600493666541629
+                12
+                    sigma                                                       0.0913941354286576
+                13
+                    sigma                                                       0.10989928229954736
+                14
+                    sigma                                                       0.1321512829385382
+                15
+                    sigma                                                       0.15890878645322598
+                16
+                    sigma                                                       0.19108405041955862
+                17
+                    sigma                                                       0.22977404295697568
+                18
+                    sigma                                                       0.27629784223681114
+                19
+                    sigma                                                       0.33224160850497936
+                20
+                    sigma                                                       0.39951266187365614
+                21
+                    sigma                                                       0.4804045095844227
+                22
+                    sigma                                                       0.5776750397513941
+                23
+                    sigma                                                       0.69464054748456
+                24
+                    sigma                                                       0.8352887990751806
+                25
+                    sigma                                                       1.0044149889997103
+                26
+                    sigma                                                       1.2077852249955603
+                27
+                    sigma                                                       1.4523331149909773
+                28
+                    sigma                                                       1.7463961582301577
+                29
+                    sigma                                                       2.1
+        point
+            profile_list
+                0 - 9
+                    centre
+                        centre_0                                                UniformPrior [313], lower_limit = -0.1, upper_limit = 0.1
+                        centre_1                                                UniformPrior [314], lower_limit = -0.1, upper_limit = 0.1
+                    ell_comps
+                        ell_comps_0                                             TruncatedGaussianPrior [315], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                        ell_comps_1                                             TruncatedGaussianPrior [316], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                0
+                    sigma                                                       0.0001
+                1
+                    sigma                                                       0.00018468761744797573
+                2
+                    sigma                                                       0.00034109516038609826
+                3
+                    sigma                                                       0.0006299605249474369
+                4
+                    sigma                                                       0.0011634590843881808
+                5
+                    sigma                                                       0.0021487648629385666
+                6
+                    sigma                                                       0.003968502629920499
+                7
+                    sigma                                                       0.007329332955560427
+                8
+                    sigma                                                       0.013536370410453854
+                9
+                    sigma                                                       0.025000000000000005
+    source
+        redshift                                                                2.625
+        bulge
+            profile_list
+                0 - 29
+                    centre
+                        centre_0                                                UniformPrior [379], lower_limit = -0.1, upper_limit = 0.1
+                        centre_1                                                UniformPrior [380], lower_limit = -0.1, upper_limit = 0.1
+                    ell_comps
+                        ell_comps_0                                             TruncatedGaussianPrior [381], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                        ell_comps_1                                             TruncatedGaussianPrior [382], mean = 0.0, sigma = 0.3, lower_limit = -1.0, upper_limit = 1.0
+                0
+                    sigma                                                       0.001
+                1
+                    sigma                                                       0.0012689610031679222
+                2
+                    sigma                                                       0.0016102620275609393
+                3
+                    sigma                                                       0.0020433597178569417
+                4
+                    sigma                                                       0.002592943797404667
+                5
+                    sigma                                                       0.0032903445623126675
+                6
+                    sigma                                                       0.0041753189365604
+                7
+                    sigma                                                       0.005298316906283708
+                8
+                    sigma                                                       0.006723357536499335
+                9
+                    sigma                                                       0.008531678524172805
+                10
+                    sigma                                                       0.010826367338740546
+                11
+                    sigma                                                       0.01373823795883263
+                12
+                    sigma                                                       0.017433288221999882
+                13
+                    sigma                                                       0.022122162910704492
+                14
+                    sigma                                                       0.02807216203941177
+                15
+                    sigma                                                       0.035622478902624426
+                16
+                    sigma                                                       0.04520353656360243
+                17
+                    sigma                                                       0.057361525104486784
+                18
+                    sigma                                                       0.0727895384398315
+                19
+                    sigma                                                       0.09236708571873861
+                20
+                    sigma                                                       0.11721022975334805
+                21
+                    sigma                                                       0.14873521072935117
+                22
+                    sigma                                                       0.18873918221350977
+                23
+                    sigma                                                       0.2395026619987486
+                24
+                    sigma                                                       0.3039195382313198
+                25
+                    sigma                                                       0.38566204211634725
+                26
+                    sigma                                                       0.4893900918477494
+                27
+                    sigma                                                       0.6210169418915616
+                28
+                    sigma                                                       0.7880462815669912
+                29
+                    sigma                                                       1.0

@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "path_prefix": {
+                    "type": "path",
+                    "path": "model_setup_free_source"
+                },
+                "identifier": "ac7695cdcdd86cadb1786ba98ebfbab4",
+                "is_identifier_in_paths": true,
+                "image_path_suffix": "",
+                "unique_tag": "COSJ100024+021749",
+                "parent": null,
+                "name": "light[1]"
+            }
+        },
+        "use_jax_vmap": true,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "n_networks": 4,
+        "n_live": 150,
+        "unique_tag": "COSJ100024+021749",
+        "n_shell": 1,
+        "n_eff": 500,
+        "n_update": null,
+        "name": "light[1]",
+        "iterations_per_quick_update": 1e+99,
+        "path_prefix": {
+            "type": "path",
+            "path": "model_setup_free_source"
+        },
+        "n_like_new_bound": null,
+        "enlarge_per_dim": 1.1,
+        "seed": null,
+        "inplace": false,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "number_of_cores": 16,
+        "split_threshold": 100,
+        "iterations_per_full_update": 10000.0,
+        "n_points_min": null
+    }
+}
