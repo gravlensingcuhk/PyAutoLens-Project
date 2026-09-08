@@ -1,5 +1,5 @@
 import json
-from autoconf import jax_wrapper  # Sets JAX environment before other imports
+from autoconf import jax_wrapper  # Sets JAX environment before other imports 
 import sys
 from os import path
 import autofit as af
@@ -18,60 +18,13 @@ data_path = path.join(workspace_path, 'data', 'cowls')
 
 use_jax = True
 
-
-# =====================================================================
-# <<< REGULARISATION STRENGTH CONTROL >>>
-# ---------------------------------------------------------------------
-# AdaptSplit regularisation strength is set by the priors on its two
-# coefficients (both default LogUniform(1e-6, 1e6)). Raising their
-# lower_limit puts a FLOOR under the strength while still leaving them
-# FREE to be fitted by the search.
-#
-#   inner_coefficient -> strength in bright (high-signal) source pixels
-#   outer_coefficient -> strength in faint (low-signal / background) pixels
-#
-# The coefficients enter H squared (lambda_i^2), so the FLOOR on the
-# squared strength is (lower_limit)^2.
-#
-#   CHOSEN VALUES:
-#     inner_coefficient  floor = 1e-3  (was 1e-6 -> x1000  coefficient)
-#     outer_coefficient  floor = 1e-1  (was 1e-6 -> x100000 coefficient)
-#
-#   i.e. squared-strength floors:
-#     inner: (1e-6)^2 -> (1e-3)^2 = 1e-6   (x 1,000,000)
-#     outer: (1e-6)^2 -> (1e-1)^2 = 1e-2   (x 100,000,000)
-#
-#   WHY outer > inner: over-fitting / pixelization artefacts live in the
-#   faint outskirts, so we smooth there hardest; bright pixels keep real
-#   structure with only a mild floor.
-#
-#   TUNING (only a floor -- the search still fits above it):
-#     - want it EVEN stronger -> raise these lower_limits (e.g. 1e0, 1e1)
-#     - want to smooth ONLY outskirts -> set inner back to 1e-6
-#     - want to BIAS toward stronger (not just forbid weak) -> lower
-#       upper_limit, or switch to a LogGaussianPrior centred on a target
-# =====================================================================
-def make_regularization():
-    regularization = af.Model(al.reg.AdaptSplit)
-    regularization.inner_coefficient = af.LogUniformPrior(
-        lower_limit=1.0e-4,      # floor for bright pixels
-        upper_limit=1.0e6,
-    )
-    regularization.outer_coefficient = af.LogUniformPrior(
-        lower_limit=1.0e-4,      # floor for faint/background pixels
-        upper_limit=1.0e6,
-    )
-    return regularization
-# =====================================================================
-
-
 """
-__Dataset__
+__Dataset__ 
 Load and mask the data.
 """
 dataset_name = str(sys.argv[1])
-filt = "F444W"
-ps = 0.063
+filt = "F277W"
+ps = 0.0315
 dataset_path = path.join(data_path, dataset_name, filt)
 
 dataset = al.Imaging.from_fits(
@@ -96,7 +49,7 @@ mask_extra_galaxies = al.Mask2D.from_fits(
 dataset = dataset.apply_noise_scaling(mask=mask_extra_galaxies)
 mask_radius = info_file['mask_radius']
 mask = al.Mask2D.circular(
-    shape_native=dataset.shape_native,
+    shape_native=dataset.shape_native, 
     pixel_scales=dataset.pixel_scales,
     radius=mask_radius,
 )
@@ -145,7 +98,8 @@ analysis = al.AnalysisImaging(dataset=dataset, use_jax=use_jax,
                               positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=positions)],)
 
 source_bulge = slam_pipeline.mge_model_from(
-    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30)
+    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
+    centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
 )
 
 lens_bulge = slam_pipeline.mge_model_from(
@@ -181,8 +135,11 @@ source_lp_result = slam_pipeline.source_lp.run(
 """
 __SOURCE PIX PIPELINE__
 """
+
+weight_power = 4.5
+
 settings_search = af.SettingsSearch(
-    path_prefix='model_setup_free_source_regularized_0',
+    path_prefix=f'model_setup_free_source_weight_{str(weight_power)[0]}',
     unique_tag=f'{dataset_name}',
     info=None,
     session=None,
@@ -195,7 +152,20 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01) #weight_power= 4.5 and 2
+# Bind the RAW source image before capping: the over-sampling S/N map (np.where
+# below) needs the true S/N, which the capped image can never exceed.
+source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
+
+# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
+# image-mesh weights and the adaptive regularization. Both are max-normalised
+# ((adapt/max)**power), so without the cap the single brightest source pixel
+# dominates, starving the extended arc of source pixels and regularization weight.
+adapt_image_snr_cap = 3.0
+source_adapt_image = source_image_raw.copy()
+source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
+galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
+
+image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01) #weight_power= 4.5 and 2
 
 
 image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
@@ -220,7 +190,7 @@ adapt_images = al.AdaptImages(
 
 signal_to_noise_threshold = 3.0
 over_sample_size_pixelization = np.where(
-    galaxy_image_name_dict["('galaxies', 'source')"] > signal_to_noise_threshold,
+    source_image_raw > signal_to_noise_threshold,
     4,
     2,
 )
@@ -246,7 +216,7 @@ source_pix_result_1 = slam_pipeline.source_pix.run_1(
     analysis=analysis,
     source_lp_result=source_lp_result,
     mesh_init=al.mesh.Delaunay(pixels=image_plane_mesh_grid.shape[0], zeroed_pixels=edge_pixels_total),
-    regularization_init=make_regularization(),      # <<< CHANGED
+    regularization_init=af.Model(al.reg.AdaptSplit),
 )
 
 """
@@ -257,7 +227,20 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01)
+# Bind the RAW source image before capping: the over-sampling S/N map (np.where
+# below) needs the true S/N, which the capped image can never exceed.
+source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
+
+# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
+# image-mesh weights and the adaptive regularization. Both are max-normalised
+# ((adapt/max)**power), so without the cap the single brightest source pixel
+# dominates, starving the extended arc of source pixels and regularization weight.
+adapt_image_snr_cap = 3.0
+source_adapt_image = source_image_raw.copy()
+source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
+galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
+
+image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01)
 
 
 image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
@@ -281,7 +264,7 @@ adapt_images = al.AdaptImages(
 )
 
 over_sample_size_pixelization = np.where(
-    galaxy_image_name_dict["('galaxies', 'source')"] > signal_to_noise_threshold,
+    source_image_raw > signal_to_noise_threshold,
     4,
     2,
 )
@@ -309,7 +292,7 @@ source_pix_result_2 = slam_pipeline.source_pix.run_2(
     mesh=al.mesh.Delaunay(
         pixels=image_plane_mesh_grid.shape[0], zeroed_pixels=edge_pixels_total
     ),
-    regularization=make_regularization(),           # <<< CHANGED
+    regularization=af.Model(al.reg.AdaptSplit),
 
 )
 
@@ -381,3 +364,4 @@ multipole_result = slam_pipeline.mass_total.run(
     reset_shear_prior=True,
     name='mass_multipole'
 )
+

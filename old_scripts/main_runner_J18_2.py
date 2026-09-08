@@ -98,7 +98,8 @@ analysis = al.AnalysisImaging(dataset=dataset, use_jax=use_jax,
                               positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=positions)],)
 
 source_bulge = slam_pipeline.mge_model_from(
-    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30)
+    total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
+    centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
 )
 
 lens_bulge = slam_pipeline.mge_model_from(
@@ -151,6 +152,19 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
+# Bind the RAW source image before capping: the over-sampling S/N map (np.where
+# below) needs the true S/N, which the capped image can never exceed.
+source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
+
+# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
+# image-mesh weights and the adaptive regularization. Both are max-normalised
+# ((adapt/max)**power), so without the cap the single brightest source pixel
+# dominates, starving the extended arc of source pixels and regularization weight.
+adapt_image_snr_cap = 3.0
+source_adapt_image = source_image_raw.copy()
+source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
+galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
+
 image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01) #weight_power= 4.5 and 2
 
 
@@ -176,7 +190,7 @@ adapt_images = al.AdaptImages(
 
 signal_to_noise_threshold = 3.0
 over_sample_size_pixelization = np.where(
-    galaxy_image_name_dict["('galaxies', 'source')"] > signal_to_noise_threshold,
+    source_image_raw > signal_to_noise_threshold,
     4,
     2,
 )
@@ -213,6 +227,19 @@ galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
     result=source_lp_result
 )
 
+# Bind the RAW source image before capping: the over-sampling S/N map (np.where
+# below) needs the true S/N, which the capped image can never exceed.
+source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
+
+# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
+# image-mesh weights and the adaptive regularization. Both are max-normalised
+# ((adapt/max)**power), so without the cap the single brightest source pixel
+# dominates, starving the extended arc of source pixels and regularization weight.
+adapt_image_snr_cap = 3.0
+source_adapt_image = source_image_raw.copy()
+source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
+galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
+
 image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=weight_power, weight_floor=0.01)
 
 
@@ -237,7 +264,7 @@ adapt_images = al.AdaptImages(
 )
 
 over_sample_size_pixelization = np.where(
-    galaxy_image_name_dict["('galaxies', 'source')"] > signal_to_noise_threshold,
+    source_image_raw > signal_to_noise_threshold,
     4,
     2,
 )
