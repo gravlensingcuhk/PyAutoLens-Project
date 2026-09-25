@@ -1,0 +1,10 @@
+Plane Index: -1 
+Positions: 
+ Array([[-0.3346875 ,  0.25120149],
+       [ 0.        , -0.20573516]], dtype=float64) 
+
+Radial Distance from (0.0, 0.0): 
+ ArrayIrregular([0.41847092, 0.20573516]) 
+
+Threshold = 0.075 
+Max Source Plane Separation of Maximum Likelihood Model = 0.05753828338709327
