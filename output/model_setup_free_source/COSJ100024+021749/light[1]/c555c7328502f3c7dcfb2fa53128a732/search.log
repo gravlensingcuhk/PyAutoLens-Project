@@ -1,0 +1,6 @@
+Starting new Nautilus non-linear search (no previous samples found).
+JAX: Applying vmap and jit to likelihood function -- may take a few seconds.
+JAX: vmap and jit applied in 1.4975523948669434 seconds.
+
+            Running search where parallelization is disabled.
+            

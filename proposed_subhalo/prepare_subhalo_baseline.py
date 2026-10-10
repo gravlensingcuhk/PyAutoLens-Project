@@ -74,10 +74,10 @@ mass_name = str(sys.argv[5]) if len(sys.argv) > 5 else "mass_multipole"
 
 # Pixel scale per filter. CHECK against your data reduction if you change filters.
 FILTER_PIXEL_SCALES = {
-    "F444W": 0.063,
-    "F277W": 0.0315,
-    "F150W": 0.0315,
-    "F115W": 0.0315,
+    "F444W": 0.06,
+    "F277W": 0.06,
+    "F150W": 0.03,
+    "F115W": 0.03,
 }
 PSF_FILENAME = "psf95pc.fits"
 

@@ -24,7 +24,7 @@ Load and mask the data.
 """
 dataset_name = str(sys.argv[1])
 filt = "F444W"
-ps = 0.063
+ps = 0.06
 dataset_path = path.join(data_path, dataset_name, filt)
 
 dataset = al.Imaging.from_fits(
