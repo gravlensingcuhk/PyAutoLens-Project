@@ -1,0 +1,52 @@
+{
+    "type": "instance",
+    "class_path": "autofit.non_linear.search.nest.nautilus.search.Nautilus",
+    "arguments": {
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "n_live": 400,
+        "split_threshold": 100,
+        "unique_tag": "COSJ100024+021749",
+        "n_eff": 500,
+        "number_of_cores": 16,
+        "n_like_new_bound": null,
+        "n_update": null,
+        "seed": null,
+        "n_shell": 1,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "name": "mass_multipole",
+                "image_path_suffix": "",
+                "unique_tag": "COSJ100024+021749",
+                "path_prefix": {
+                    "type": "path",
+                    "path": "mass_models"
+                },
+                "is_identifier_in_paths": true,
+                "identifier": "e95edd4b5657dd6f148f767155779340",
+                "parent": null
+            }
+        },
+        "n_networks": 4,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "iterations_per_quick_update": 1e+99,
+        "use_jax_vmap": true,
+        "inplace": false,
+        "name": "mass_multipole",
+        "iterations_per_full_update": 10000.0,
+        "n_points_min": null,
+        "path_prefix": {
+            "type": "path",
+            "path": "mass_models"
+        },
+        "enlarge_per_dim": 1.1
+    }
+}

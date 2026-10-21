@@ -1,0 +1,42 @@
+Starting new Nautilus non-linear search (no previous samples found).
+JAX: Applying vmap and jit to likelihood function -- may take a few seconds.
+JAX: vmap and jit applied in 0.0004451274871826172 seconds.
+
+            Running search where parallelization is disabled.
+            
+Resuming Nautilus non-linear search (previous samples found).
+JAX: Applying vmap and jit to likelihood function -- may take a few seconds.
+JAX: vmap and jit applied in 0.00025963783264160156 seconds.
+
+            Running search where parallelization is disabled.
+            
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Resuming Nautilus non-linear search (previous samples found).
+JAX: Applying vmap and jit to likelihood function -- may take a few seconds.
+JAX: vmap and jit applied in 0.0007500648498535156 seconds.
+
+            Running search where parallelization is disabled.
+            
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
+Fit Running: Updating results (see output folder).
+Could not plot the source-plane via the Mapper because of a ValueError.
+Could not plot the source-plane via the Mapper because of a ValueError.
