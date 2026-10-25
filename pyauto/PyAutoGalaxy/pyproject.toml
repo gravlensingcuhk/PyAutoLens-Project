@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=79.0", "setuptools-scm", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autogalaxy"
+dynamic = ["version"]
+description="Open-Source Multi Wavelength Galaxy Structure & Morphology"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [
+    { name = "James Nightingale", email = "James.Nightingale@newcastle.ac.uk" },
+    { name = "Richard Hayes", email = "richard@rghsoftware.co.uk" },
+]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Natural Language :: English",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14"
+]
+keywords = ["cli"]
+dependencies = [
+    # Prevent fallback to Nerves releases permitting the CPU LAPACK deadlock.
+    "autonerves>2026.10.4.1",
+    # Floors, not pins (PyAutoLens#687) — bump to the first release with JAX
+    # in the family's base dependencies once it exists (PyAutoLens#702), so
+    # backtracking cannot pair this autogalaxy with a jax-optional chain.
+    "autofit>=2026.8.22.1",
+    "autoarray>=2026.8.22.1",
+    "astropy>=5.0",
+    "nautilus-sampler==1.0.5",
+    # Marker-gated like the jax deps in autonerves (jax_zero_contour depends
+    # on jax, which has no wheels on Intel macOS). PyAutoLens#702.
+    'jax_zero_contour>=2.0.0,<3.0.0; sys_platform != "darwin" or platform_machine == "arm64"'
+]
+
+[project.urls]
+Homepage = "https://github.com/PyAutoLabs/PyAutoGalaxy"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["autogalaxy*"]
+exclude = ["docs", "test_autogalaxy", "test_autogalaxy*"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"  
+
+
+[project.optional-dependencies]
+# JAX moved into the base dependencies (PyAutoLens#702). Kept as a declared
+# no-op so `pip install autogalaxy[jax]` keeps resolving (PyAutoLens#687).
+jax = []
+optional = [
+    "autogalaxy[jax]",
+    "numba",
+    "zeus-mcmc==2.5.4",
+    "getdist==1.4"
+]
+docs=[
+    "sphinx",
+    "furo",
+    "myst-parser",
+    "sphinx_copybutton",
+    "sphinx_design",
+    "sphinx_inline_tabs",
+    "sphinx_autodoc_typehints"
+]
+test = ["pytest", "colossus==1.3.1"]
+dev = ["pytest", "black", "colossus==1.3.1"]
+
+[tool.setuptools.package-data]
+"autogalaxy.config" = ["*"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_autogalaxy"]
+filterwarnings = [
+    "ignore:cuda_plugin_extension:UserWarning",
+    "ignore::DeprecationWarning:jax",
+]

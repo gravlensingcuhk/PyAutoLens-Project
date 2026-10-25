@@ -1,0 +1,204 @@
+import inspect
+import json
+import os
+import sys
+import zipfile
+from contextlib import contextmanager
+from functools import wraps
+from pathlib import Path
+from typing import Union
+
+import numpy as np
+
+from autonerves import conf
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """
+    A ``json`` encoder that can serialise NumPy scalars and arrays.
+
+    ``json`` serialises ``np.float64`` without help, because it subclasses
+    Python's ``float``. **``np.float32`` does not subclass anything ``json``
+    knows**, so a single ``float32`` anywhere in an otherwise ordinary dict
+    raises ``TypeError: Object of type float32 is not JSON serializable``. The
+    same is true of ``np.int32``/``np.int64`` (not a Python ``int`` on every
+    platform) and ``np.bool_``.
+
+    That asymmetry is why this failed so rarely and so late: a run in float64
+    is fine, and a run in float32 is fine right up until the moment it writes
+    its results. It surfaces at the *end of a successful fit*, discarding the
+    whole computation at the output step.
+
+    Coercion belongs here rather than at each producer. The producers are
+    search-specific and new ones keep appearing -- every new diagnostic counter
+    or summary field is another chance to reintroduce this -- so the encoder is
+    the one place that closes the class rather than one instance of it.
+    """
+
+    def default(self, o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.generic):
+            # ``.item()`` returns the nearest Python scalar: float32/float64 ->
+            # float, any int width -> int, bool_ -> bool. Precision is not lost
+            # on the way out, because a Python float IS a double.
+            return o.item()
+        return super().default(o)
+
+
+def split_paths(func):
+    """
+    Split string paths if they are passed.
+
+    e.g. "lens.mass.centre" -> ["lens", "mass", "centre"]
+    """
+
+    @wraps(func)
+    def wrapper(self, paths):
+        paths = [path.split(".") if isinstance(path, str) else path for path in paths]
+        return func(self, paths)
+
+    return wrapper
+
+
+class IntervalCounter:
+    def __init__(self, interval):
+        self.count = 0
+        self.interval = interval
+
+    def __call__(self):
+        if self.interval == -1:
+            return False
+        self.count += 1
+        return self.count % self.interval == 0
+
+
+def zip_directory(source_directory, output=None):
+    output = output or f"{source_directory}.zip"
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as f:
+        for root, dirs, files in os.walk(source_directory):
+            for file in files:
+                f.write(
+                    Path(root) / file,
+                    Path(root[len(str(source_directory)):]) / file,
+                )
+
+
+def open_(filename, *flags):
+    directory = Path(filename)
+    os.makedirs(directory.parent, exist_ok=True)
+    return open(filename, *flags)
+
+
+@contextmanager
+def open_atomic(filename, mode: str = "w+"):
+    """
+    Write ``filename`` so that it is either fully replaced or left untouched.
+
+    A plain ``open(path, "w+")`` **truncates first and writes second**. If the
+    write then fails partway -- a serialisation ``TypeError``, a full disk, a
+    killed process -- what is left on disk is a half-written file where a valid
+    one used to be. That truncated file is not inert: the next run of the same
+    search reads it while resuming and fails on it, so one crash propagates
+    into every subsequent run of that search until the output directory is
+    deleted by hand.
+
+    Writing to a temporary file in the *same directory* and then ``os.replace``
+    -ing it into place removes the window. ``os.replace`` is atomic on POSIX
+    and on Windows, and staying in one directory keeps it a rename within a
+    single filesystem, which is where that guarantee holds. On failure the
+    temporary file is removed and the original is still whole.
+    """
+    path = Path(filename)
+    os.makedirs(path.parent, exist_ok=True)
+
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+
+    try:
+        with open(tmp, mode) as f:
+            yield f
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt mid-write leaves
+        # exactly the same debris and must not leak a .tmp file either.
+        tmp.unlink(missing_ok=True)
+        raise
+
+    os.replace(tmp, path)
+
+
+@contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+
+
+def numpy_array_to_json(
+    array: np.ndarray, file_path: Union[Path, str], overwrite: bool = False
+):
+    """
+    Write a NumPy array to a json file.
+
+    Parameters
+    ----------
+    array
+        The array that is written to json.
+    file_path
+        The full path of the file that is output, including the file name and `.json` extension.
+    overwrite
+        If `True` and a file already exists with the input file_path the .json file is overwritten. If
+        `False`, an error will be raised.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    array_2d = np.ones((5,5))
+    numpy_array_to_json(array_2d=array_2d, file_path='/path/to/file/filename.json', overwrite=True)
+    """
+
+    file_dir = Path(file_path).parent
+
+    if not file_dir.exists():
+        os.makedirs(file_dir)
+
+    if overwrite and Path(file_path).exists():
+        os.remove(file_path)
+
+    with open(file_path, "w+") as f:
+        json.dump(array.tolist(), f)
+
+
+def numpy_array_from_json(file_path: Union[Path, str]):
+    """
+    Read a 1D NumPy array from a .json file.
+
+    After loading the NumPy array, the array is flipped upside-down using np.flipud. This is so that the structures
+    appear the same orientation as .json files loaded in DS9.
+
+    Parameters
+    ----------
+    file_path
+        The full path of the file that is loaded, including the file name and ``.json`` extension.
+
+    Returns
+    -------
+    ndarray
+        The NumPy array that is loaded from the .json file.
+
+    Examples
+    --------
+    array_2d = numpy_array_from_json(file_path='/path/to/file/filename.json')
+    """
+    with open(file_path, "r") as f:
+        return np.asarray(json.load(f))
+
+
+def info_whitespace():
+    return conf.instance["general"]["output"]["info_whitespace_length"]

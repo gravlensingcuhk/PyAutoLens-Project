@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import numpy as np
+from typing import Optional, TYPE_CHECKING
+
+
+from autofit.mapper.prior_model.abstract import AbstractPriorModel
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import POINT
+from autofit.non_linear.initializer import AbstractInitializer
+from autofit.non_linear.samples.adapter import RawSamples
+from autofit.non_linear.search import capabilities as cap
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+
+class Drawer(NonLinearSearch):
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.NONE
+    gradient = cap.Gradient.NONE
+    batched = False
+    honours_gradient_mode = False
+    posterior_kind = cap.PosteriorKind.POINT
+    produces_evidence = False
+    resumable = False
+    warm_start = cap.WarmStart.NEUTRAL
+    install_extra = ""
+    upstream_url = "https://github.com/PyAutoLabs/PyAutoFit"
+    citation_keys = ()
+    status = cap.Status.STABLE
+    test_mode_budget = {}
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.LOG_POSTERIOR, cap.CoordinateSpace.PHYSICAL)
+    invalid_value = -float("inf")
+
+    # The draws are the result, not a starting point: nothing to plot.
+    _plots_start_point = False
+
+    __identifier_fields__ = ("total_draws",)
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        total_draws: int = 50,
+        initializer: Optional[AbstractInitializer] = None,
+        iterations_per_full_update: int = None,
+        iterations_per_quick_update: int = None,
+        silence: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        clipper=None,
+        **kwargs,
+    ):
+        """
+        A Drawer non-linear search, which simply draws a fixed number of samples from the model uniformly from the
+        priors.
+
+        Therefore, it does not seek to determine model parameters which maximize the likelihood or map out the
+        posterior of the overall parameter space.
+
+        Whilst this is not the typical use case of a non-linear search, it has certain niche applications, for example:
+
+        - Given a model one can determine how much variation there is in the log likelihood / log posterior values.
+          By visualizing this as a histogram one can therefore quantify the behaviour of that
+          model's `log_likelihood_function`.
+
+        - If the `log_likelihood_function` of a model is stochastic (e.g. different values of likelihood may be
+          computed for an identical model due to randomness in the likelihood evaluation) this search can quantify
+          the behaviour of that stochasticity.
+
+        - For advanced modeling tools, for example sensitivity mapping performed via the `Sensitivity` object,
+          the `Drawer` search may be sufficient to perform the overall modeling task, without the need of performing
+          an actual parameter space search.
+
+        The drawer search itself is performed by simply reusing the functionality of the `AbstractInitializer` object.
+        Whereas this is normally used to initialize a non-linear search, for the drawer it performed all log
+        likelihood evluations.
+
+        Parameters
+        ----------
+        name
+            The name of the search, controlling the last folder results are output.
+        path_prefix
+            The path of folders prefixing the name folder where results are output.
+        unique_tag
+            The name of a unique tag for this model-fit, which will be given a unique entry in the sqlite database
+            and also acts as the folder after the path prefix and before the search name.
+        initializer
+            Generates the initialize samples of non-linear parameter space (see autofit.non_linear.initializer).
+        session
+            An SQLalchemy session instance so the results of the model-fit are written to an SQLite database.
+        clipper
+            Accepted for the point-estimate searches' common interface and recorded in ``search.json``; the
+            drawer never uses it, so it does not enter the identifier. It is the last named argument so the
+            existing positional slots (``total_draws`` ... ``session``) keep their places.
+        """
+
+        # Drawer is single-core only; drop any saved number_of_cores so a
+        # round-tripped search.json (which records the resolved value) can be
+        # deserialized without colliding with the hardcoded kwarg below.
+        kwargs.pop("number_of_cores", None)
+
+        # The point-estimate default clipper. Drawer never consumes it and it is not an
+        # identifier field (#1493); it is kept as an argument so `search.json` records it
+        # exactly as when the clipper came from the former `AbstractMLE` base.
+        self.clipper = POINT.clipper_for(clipper)
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=POINT.initializer_for(initializer),
+            iterations_per_quick_update=iterations_per_quick_update,
+            iterations_per_full_update=iterations_per_full_update,
+            number_of_cores=1,
+            silence=silence,
+            session=session,
+            **kwargs,
+        )
+
+        self.total_draws = total_draws
+
+        self.logger.debug("Creating Drawer Search")
+
+    def run(self, ctx):
+        """
+        Draw ``total_draws`` points from the initializer and return them (the ``run(ctx)``
+        hook; see ``docs/design/run_ctx.md``).
+
+        Every log likelihood evaluation happens in the initializer, through the fit's
+        objective (lazily jitted on a JAX analysis).
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+
+        Returns
+        -------
+        The internal state: the drawn parameter lists, their log posteriors and the run time.
+        """
+        self.logger.info(
+            f"Performing DrawerSearch for a total of {self.total_draws} points."
+        )
+
+        parameters, log_posteriors = ctx.start_points(self.total_draws)
+
+        search_internal = {
+            "parameter_lists": parameters.tolist(),
+            "log_posterior_list": log_posteriors.tolist(),
+            "time": self.timer.time if self.timer else None,
+        }
+
+        ctx.paths.save_search_internal(
+            obj=search_internal,
+        )
+
+        self.logger.info("Drawer complete")
+
+        return search_internal
+
+    def raw_samples_from(self, model, search_internal):
+        """
+        The Drawer's draws as raw samples: the parameter lists and log posteriors
+        ``run`` stores, each with weight 1. The stored dictionary (including the run
+        ``time`` recorded by ``run``) is the ``samples_info``.
+
+        The ``search_internal`` dictionary returned by `run` is used when passed, so a fit with `NullPaths`
+        (which writes nothing to disk) can still build its samples; otherwise it is loaded from the output folder.
+
+        Parameters
+        ----------
+        model
+            Maps input vectors of unit parameter values to physical values and model instances via priors.
+        search_internal
+            The dictionary of parameter lists, log posteriors and run time that `run` returns.
+        """
+        return RawSamples(
+            parameters=search_internal["parameter_lists"],
+            log_posterior=search_internal["log_posterior_list"],
+            info=self.info_from(search_internal),
+            label="Drawer",
+        )
+
+    def info_from(self, internal):
+        """
+        The stored dictionary itself (including the run ``time`` recorded by ``run``)
+        is the ``samples_info``.
+        """
+        return internal

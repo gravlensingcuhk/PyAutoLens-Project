@@ -1,0 +1,403 @@
+"""
+Standalone functions for plotting inversion / pixelization reconstructions.
+
+Replaces the inversion-specific paths in ``MatPlot2D.plot_mapper``.
+"""
+
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from autoarray.plot.utils import (
+    subplots,
+    apply_extent,
+    apply_labels,
+    conf_figsize,
+    save_figure,
+    norm_from,
+    _conf_imshow_origin,
+    _overlay_yx_for_origin,
+    numpy_grid,
+    plot_regions,
+)
+
+
+def plot_inversion_reconstruction(
+    pixel_values: np.ndarray,
+    mapper,
+    ax=None,
+    # --- cosmetics --------------------------------------------------------------
+    title: str = "Reconstruction",
+    xlabel: str = 'x (")',
+    ylabel: str = 'y (")',
+    colormap: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    use_log10: bool = False,
+    zoom_to_brightest: bool = True,
+    zoom_extent_scale: float = 1.0,
+    arcsec_after_decimal: Optional[bool] = None,
+    # --- overlays ---------------------------------------------------------------
+    lines: Optional[List[np.ndarray]] = None,
+    line_colors: Optional[List] = None,
+    grid: Optional[np.ndarray] = None,
+    regions: Optional[List] = None,
+    region_colors: Optional[List] = None,
+    region_alpha: float = 0.25,
+    region_labels: Optional[List[str]] = None,
+    # --- figure control (used only when ax is None) -----------------------------
+    figsize: Optional[Tuple[int, int]] = None,
+    output_path: Optional[str] = None,
+    output_filename: str = "reconstruction",
+    output_format: str = None,
+) -> None:
+    """
+    Plot an inversion reconstruction using the appropriate mapper type.
+
+    Chooses between rectangular (``imshow``/``pcolormesh``) and Delaunay
+    (``tripcolor``) rendering based on the mapper's interpolator type.
+
+    Parameters
+    ----------
+    pixel_values
+        1D array of reconstructed flux values, one per source pixel.
+    mapper
+        Autoarray mapper object exposing ``interpolator``, ``mesh_geometry``,
+        ``source_plane_mesh_grid``, etc.
+    ax
+        Existing ``Axes``.  ``None`` creates a new figure.
+    title, xlabel, ylabel
+        Text labels.
+    colormap
+        Matplotlib colormap name.
+    vmin, vmax
+        Explicit colour scale limits.
+    use_log10
+        Apply ``LogNorm``.
+    zoom_to_brightest
+        Pass through to ``mapper.extent_from``.
+    arcsec_after_decimal
+        Per-call override of the ``ticks.symbol_over_decimal`` config flag.
+        When ``True`` the arcsecond tick labels place the ``″`` symbol over the
+        decimal point (``3.″8``) instead of suffixing it (``3.8"``); when ``False``
+        the suffix form is forced.  ``None`` (the default) reads the config.
+    lines
+        Line overlays (e.g. critical curves).
+    grid
+        Scatter overlay (e.g. data-plane grid).
+    regions
+        List of source-plane regions to overlay as filled polygons, each region being a list of
+        ``(N, 2)`` arrays of ``(y, x)`` coordinates (e.g. the ``source_contours`` of a ``Mapping``).
+        Every region is drawn in its own colour, matching the colour its image-plane counterpart is
+        drawn with by :func:`~autoarray.plot.array.plot_array`.
+    region_colors
+        The colour of each region, cycled if there are more regions than colours.  ``None`` uses
+        ``["r", "g", "b", "m", "c", "y"]``.
+    region_alpha
+        The alpha of each region's fill; the outline is always drawn opaque.
+    region_labels
+        A text label drawn at the centre of each region, e.g. ``["1", "2"]``.
+    figsize, output_path, output_filename, output_format
+        Figure output controls.
+    """
+    from autoarray.inversion.mesh.interpolator.rectangular import (
+        InterpolatorRectangular,
+    )
+    from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
+        InterpolatorRectangularUniform,
+    )
+    from autoarray.inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
+    from autoarray.inversion.mesh.interpolator.knn import InterpolatorKNearestNeighbor
+
+    if colormap is None:
+        from autoarray.plot.utils import _default_colormap
+
+        colormap = _default_colormap()
+
+    owns_figure = ax is None
+    if owns_figure:
+        figsize = figsize or conf_figsize("figures")
+        fig, ax = subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.get_figure()
+
+    # --- colour normalisation --------------------------------------------------
+    norm = norm_from(array=pixel_values, use_log10=use_log10, vmin=vmin, vmax=vmax)
+
+    extent = mapper.extent_from(
+        values=pixel_values,
+        zoom_to_brightest=zoom_to_brightest,
+        zoom_extent_scale=zoom_extent_scale,
+    )
+
+    is_subplot = not owns_figure
+
+    # Extent of an ``imshow`` raster drawn on *ax* (uniform rectangular meshes
+    # only); ``None`` for ``pcolormesh`` / ``tripcolor`` panels, which are drawn
+    # in data coordinates and need no origin handling.
+    raster_extent = None
+
+    if isinstance(
+        mapper.interpolator, (InterpolatorRectangular, InterpolatorRectangularUniform)
+    ):
+        raster_extent = _plot_rectangular(
+            ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot
+        )
+    elif isinstance(
+        mapper.interpolator, (InterpolatorDelaunay, InterpolatorKNearestNeighbor)
+    ):
+        _plot_delaunay(
+            ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot
+        )
+
+    # --- overlays --------------------------------------------------------------
+    # Over an ``imshow`` raster drawn with ``origin="lower"`` the (y, x)
+    # overlays are reflected for display so they stay registered to the
+    # pixels (PyAutoArray#565); every other case is left unchanged.
+    origin_imshow = _conf_imshow_origin() if raster_extent is not None else None
+    if origin_imshow == "lower":
+
+        def _for_origin(yx):
+            return _overlay_yx_for_origin(yx, raster_extent, origin_imshow)
+
+        if lines is not None:
+            lines = [
+                (
+                    _for_origin(np.asarray(line).reshape(-1, 2))
+                    if line is not None and len(line) > 0
+                    else line
+                )
+                for line in lines
+            ]
+        if regions is not None:
+            regions = [
+                (
+                    None
+                    if region is None
+                    else (
+                        _for_origin(region)
+                        if isinstance(region, np.ndarray) and region.ndim == 2
+                        else [_for_origin(polygon) for polygon in region]
+                    )
+                )
+                for region in regions
+            ]
+        grid = _for_origin(numpy_grid(grid))
+
+    if lines is not None:
+        for i, line in enumerate(lines):
+            if line is not None and len(line) > 0:
+                line = np.asarray(line).reshape(-1, 2)
+                color = (
+                    line_colors[i]
+                    if (line_colors is not None and i < len(line_colors))
+                    else None
+                )
+                kw = {"linewidth": 1}
+                if color is not None:
+                    kw["color"] = color
+                ax.plot(line[:, 1], line[:, 0], **kw)
+
+    plot_regions(
+        ax,
+        regions=regions,
+        region_colors=region_colors,
+        region_alpha=region_alpha,
+        region_labels=region_labels,
+    )
+
+    if grid is not None:
+        ax.scatter(grid[:, 1], grid[:, 0], s=1, c="w", alpha=0.5)
+
+    apply_extent(ax, extent, symbol_over_decimal=arcsec_after_decimal)
+
+    apply_labels(
+        ax,
+        title=title,
+        xlabel="" if is_subplot else xlabel,
+        ylabel="" if is_subplot else ylabel,
+        is_subplot=is_subplot,
+    )
+
+    if owns_figure:
+        save_figure(
+            fig,
+            path=output_path or "",
+            filename=output_filename,
+            format=output_format,
+        )
+
+
+def _plot_rectangular(
+    ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False
+):
+    """Render a rectangular pixelization reconstruction onto *ax*.
+
+    Uses ``imshow`` for uniform rectangular grids
+    (``InterpolatorRectangularUniform``) and ``pcolormesh`` for non-uniform
+    rectangular grids.  Both paths add a colorbar.
+
+    Parameters
+    ----------
+    ax
+        Matplotlib ``Axes`` to draw onto.
+    pixel_values
+        1-D array of reconstructed flux values, one per source pixel.
+        ``None`` renders a zero-filled image.
+    mapper
+        Mapper object exposing ``interpolator``, ``mesh_geometry``, and
+        (for uniform grids) ``pixel_scales`` / ``origin``.
+    norm
+        ``matplotlib.colors.Normalize`` (or ``LogNorm``) instance, or
+        ``None`` for automatic scaling.
+    colormap
+        Matplotlib colormap name.
+    extent
+        ``[xmin, xmax, ymin, ymax]`` spatial extent; passed to ``imshow``.
+    is_subplot
+        When ``True`` uses ``labelsize_subplot`` from config for the colorbar
+        tick labels (matches the behaviour of :func:`~autoarray.plot.array.plot_array`).
+
+    Returns
+    -------
+    tuple or None
+        The ``imshow`` extent when the uniform path draws a raster (so callers
+        can register overlays to its origin), else ``None``.
+    """
+    from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
+        InterpolatorRectangularUniform,
+    )
+    import numpy as np
+
+    shape_native = mapper.mesh_geometry.shape
+
+    if pixel_values is None:
+        pixel_values = np.zeros(shape_native[0] * shape_native[1])
+
+    xmin, xmax, ymin, ymax = extent
+    x_range = abs(xmax - xmin)
+    y_range = abs(ymax - ymin)
+    box_aspect = (x_range / y_range) if y_range > 0 else 1.0
+    ax.set_aspect(box_aspect, adjustable="box")
+
+    from autoarray.plot.utils import _apply_colorbar
+
+    if isinstance(mapper.interpolator, InterpolatorRectangularUniform):
+        from autoarray.structures.arrays.uniform_2d import Array2D
+        from autoarray.structures.arrays import array_2d_util
+
+        solution_array_2d = array_2d_util.array_2d_native_from(
+            array_2d_slim=pixel_values,
+            mask_2d=np.full(fill_value=False, shape=shape_native),
+        )
+        pix_array = Array2D.no_mask(
+            values=solution_array_2d,
+            pixel_scales=mapper.mesh_geometry.pixel_scales,
+            origin=mapper.mesh_geometry.origin,
+        )
+        im = ax.imshow(
+            pix_array.native.array,
+            cmap=colormap,
+            norm=norm,
+            extent=pix_array.geometry.extent,
+            aspect="auto",
+            origin=_conf_imshow_origin(),
+        )
+        _apply_colorbar(im, ax, is_subplot=is_subplot)
+        return pix_array.geometry.extent
+    else:
+        y_edges, x_edges = mapper.mesh_geometry.edges_transformed.T
+        Y, X = np.meshgrid(y_edges, x_edges, indexing="ij")
+        im = ax.pcolormesh(
+            X,
+            Y,
+            pixel_values.reshape(shape_native),
+            shading="flat",
+            norm=norm,
+            cmap=colormap,
+        )
+        _apply_colorbar(im, ax, is_subplot=is_subplot)
+        return None
+
+
+def _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False):
+    """Render a Delaunay or KNN pixelization reconstruction onto *ax*.
+
+    Uses ``ax.tripcolor`` with its default *flat* shading: each triangle is
+    painted with the mean of its three vertex values. That is not the
+    piecewise-linear reconstruction pointwise, but its area-weighted integral
+    is identical to it by linearity -- the mean of the three vertices times the
+    triangle area is exactly the integral of the linear interpolant over that
+    triangle, which is the same sum the barycentric dual areas
+    (``mesh_geometry.areas_for_magnification``) accumulate per vertex.
+
+    The triangulation is taken from the mapper's own Delaunay tables
+    (``mapper.interpolator.delaunay.simplices``, with the ``-1`` padded rows
+    dropped) so the figure shows the mesh the inversion actually used rather
+    than a triangulation matplotlib re-derives. Mappers with no such tables
+    (kNN, mocks) fall back to matplotlib's own triangulation.
+
+    A colorbar is attached after rendering.
+
+    Parameters
+    ----------
+    ax
+        Matplotlib ``Axes`` to draw onto.
+    pixel_values
+        1-D array of reconstructed flux values (one per source-plane pixel),
+        or an autoarray object exposing a ``.array`` attribute.
+    mapper
+        Mapper object exposing ``source_plane_mesh_grid`` — an ``(N, 2)``
+        array of ``(y, x)`` mesh-point coordinates.
+    norm
+        ``matplotlib.colors.Normalize`` (or ``LogNorm``) instance, or
+        ``None`` for automatic scaling.
+    colormap
+        Matplotlib colormap name.
+    extent
+        ``[xmin, xmax, ymin, ymax]`` spatial extent; used to set the axes
+        aspect ratio to match rectangular pixelization plots.
+    is_subplot
+        When ``True`` uses ``labelsize_subplot`` from config for the colorbar
+        tick labels (matches the behaviour of :func:`~autoarray.plot.array.plot_array`).
+    """
+    xmin, xmax, ymin, ymax = extent
+    x_range = abs(xmax - xmin)
+    y_range = abs(ymax - ymin)
+    box_aspect = (x_range / y_range) if y_range > 0 else 1.0
+    ax.set_aspect(box_aspect, adjustable="box")
+
+    mesh_grid = mapper.source_plane_mesh_grid
+
+    if hasattr(mesh_grid, "array"):
+        mesh_grid = mesh_grid.array
+
+    mesh_grid = np.asarray(mesh_grid)
+
+    x = np.asarray(mesh_grid[:, 1], dtype=float)
+    y = np.asarray(mesh_grid[:, 0], dtype=float)
+
+    if hasattr(pixel_values, "array"):
+        vals = pixel_values.array
+    else:
+        vals = pixel_values
+
+    # The mesh grid is (y,x) and tripcolor is given x=column 1, y=column 0; the
+    # simplices index the same points in the same order, so they pass through
+    # unchanged.
+    triangles = None
+
+    try:
+        simplices = np.asarray(mapper.interpolator.delaunay.simplices)
+        if simplices.ndim == 2 and simplices.shape[1] == 3:
+            triangles = simplices[simplices[:, 0] >= 0]
+    except AttributeError:
+        triangles = None
+
+    if triangles is not None and triangles.shape[0] > 0:
+        tc = ax.tripcolor(x, y, triangles, vals, cmap=colormap, norm=norm)
+    else:
+        tc = ax.tripcolor(x, y, vals, cmap=colormap, norm=norm)
+    from autoarray.plot.utils import _apply_colorbar
+
+    _apply_colorbar(tc, ax, is_subplot=is_subplot)

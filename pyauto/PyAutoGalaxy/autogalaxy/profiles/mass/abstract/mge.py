@@ -1,0 +1,801 @@
+import numpy as np
+from scipy import special
+
+import autoarray as aa
+from autogalaxy import convert
+from autogalaxy.profiles.mass.abstract.abstract import MassProfile
+
+# Weideman (1994) rational approximation to the Faddeeva function, order N = 32.
+# The coefficients are the real FFT of a Gaussian sampled on a tangent grid and
+# depend on nothing but the order, so they are computed once here with numpy and
+# hoisted to module level as plain Python floats -- the JAX path neither rebuilds
+# them nor traces a 0-d array constant per call.
+_WOFZ_WEIDEMAN_N = 32
+
+
+def _weideman_coefficients(n_terms: int):
+    """
+    `(L, a)` for the Weideman (1994) rational approximation of order `n_terms`.
+
+    See Weideman 1994, SIAM J. Numer. Anal. 31, 1497, Eq. (38): the coefficients
+    `a_k` are the Fourier coefficients of a Gaussian sampled on the tangent grid
+    `t = L tan(k pi / 2M)`, obtained here by a single real FFT.
+    """
+    m = 2 * n_terms
+    m2 = 2 * m
+    k = np.arange(-m + 1, m, dtype=np.float64)
+    scale = np.sqrt(n_terms / np.sqrt(2.0))
+    t = scale * np.tan(k * np.pi / m2)
+    f = np.exp(-(t**2.0)) * (scale**2.0 + t**2.0)
+    f = np.concatenate((np.zeros(1), f))
+    coefficients = np.real(np.fft.fft(np.fft.fftshift(f))) / m2
+    return float(scale), np.flipud(coefficients[1 : n_terms + 1]).copy()
+
+
+_WOFZ_WEIDEMAN_L, _WOFZ_WEIDEMAN_A = _weideman_coefficients(_WOFZ_WEIDEMAN_N)
+_WOFZ_WEIDEMAN_A = tuple(float(coefficient) for coefficient in _WOFZ_WEIDEMAN_A)
+
+_INV_SQRT_PI = float(1.0 / np.sqrt(np.pi))
+
+
+def _wofz_weideman(z, xp=np):
+    """
+    Faddeeva function w(z) = exp(-z^2) * erfc(-i z) by the Weideman (1994)
+    rational series of order 32, evaluated by Horner's rule in the conformal
+    variable (L + iz) / (L - iz).
+
+    This is the routine used on the JAX path, where `scipy.special.wofz` is not
+    traceable. It is a single expression with no region selection, so it is as
+    smooth as `w` itself -- unlike a piecewise rational approximation, whose
+    *derivative* jumps where the regions meet.
+
+    **Valid for Im(z) >= 0 only.** The series approximates `w` on the closed
+    upper half-plane; in the lower half-plane it is silently wrong. Every caller
+    reaches it through `zeta_from`, which builds `z = xs + i ys` with
+    `ys = |y| * scale >= 0`, so the constraint holds -- but nothing in this
+    signature enforces it.
+
+    Accuracy and cost on the MGE domain (gNFW MGE-30 on an hst grid,
+    |z| = 0 ... 1e4): max relative error 1.9e-13 against `scipy.special.wofz`
+    (which is itself 1.2e-14 against mpmath at dps 40), and clean out to
+    |z| = 1e5 (1.5e-16 there). The origin -- where a piecewise routine carries
+    its largest error -- is exact to rounding: `w(0)` to 3.1e-14 and `w'(0)` to
+    3.7e-13 relative. On a (30, 15361) complex128 block it costs ~0.75x the
+    piecewise rational routine it replaces, with less than half the JAX compile
+    time.
+    """
+    z = xp.asarray(z, dtype=xp.complex128)
+
+    denominator = _WOFZ_WEIDEMAN_L - 1j * z
+    ratio = (_WOFZ_WEIDEMAN_L + 1j * z) / denominator
+
+    polynomial = xp.zeros_like(ratio)
+    for coefficient in _WOFZ_WEIDEMAN_A:
+        polynomial = polynomial * ratio + coefficient
+
+    return 2.0 * polynomial / denominator**2.0 + _INV_SQRT_PI / denominator
+
+
+def _wofz(z, xp=np):
+    """
+    Faddeeva function w(z) = exp(-z^2) * erfc(-i z), dispatched on the array
+    backend: `scipy.special.wofz` on numpy (slightly faster and one order of
+    magnitude more accurate), the Weideman series `_wofz_weideman` on JAX
+    (traceable). Both are accurate to ~1e-13 or better on the MGE domain.
+    """
+    if xp is np:
+        return special.wofz(np.asarray(z, dtype=np.complex128))
+
+    return _wofz_weideman(z, xp=xp)
+
+
+def _wofz_masked(z, exp_term, threshold: float = 1e-18):
+    """
+    `w(z)` on the numpy path, evaluated only where the Gaussian envelope it is about to
+    be multiplied by is significant.
+
+    `zeta_from` only ever passes Im(z) >= 0, where |w(z)| <= 1, so wherever `exp_term`
+    has underflowed the product is negligible to < 1e-15 and `w` is simply taken as
+    zero. On the (N_gaussians, N_pixels) arrays of an MGE ~32% of the entries qualify;
+    where nothing qualifies (a single Gaussian on a typical grid) the mask would be pure
+    overhead, so the full array is evaluated instead.
+    """
+    significant = exp_term > threshold
+
+    if significant.all():
+        return _wofz(z)
+
+    w = np.zeros(np.shape(z), dtype=np.complex128)
+    w[significant] = _wofz(z[significant])
+    return w
+
+
+def _is_static_scalar(value) -> bool:
+    """
+    Whether `value` is a Python / numpy scalar whose value is known outside any
+    array-backend trace.
+
+    A JAX tracer or array is rejected by the module its type is defined in, so
+    that nothing here has to import jax (the same test as
+    `autogalaxy.jax.registration._is_builtin`).
+    """
+    if type(value).__module__.startswith(("jax", "jaxlib")):
+        return False
+
+    return isinstance(value, (int, float, np.number))
+
+
+def _is_circular(ell_comps) -> bool:
+    """
+    Whether the *unclamped* geometry of a profile is exactly circular (q = 1).
+
+    The axis ratio used inside the MGE machinery is clamped to 0.9999 (the
+    elliptical Faddeeva form is singular at q = 1), so it can never be used to
+    detect a spherical profile -- this reads the profile's own ellipticity
+    components instead.
+
+    This is a branch predicate on the JAX path as well as the numpy one, so it
+    must be *static*: a `*Sph` class sets `ell_comps = (0.0, 0.0)` as Python
+    floats in `__init__` and they stay Python floats under `jax.jit` / `jax.vmap`
+    and through the `autofit` pytree, while a free (or traced) ellipticity gives
+    a JAX tracer or an array. Anything that is not a Python / numpy scalar
+    therefore returns `False` -- the elliptical path -- rather than raising.
+    """
+    if not all(_is_static_scalar(component) for component in ell_comps):
+        return False
+
+    return float(convert.axis_ratio_from(ell_comps=ell_comps)) == 1.0
+
+
+def _spherical_mge_deflections_from(grid, amps, sigmas, xp=np):
+    r"""
+    Deflection angles of a circular (q = 1) Multi-Gaussian Expansion, in closed
+    form, on both array backends.
+
+    For a circular Gaussian of convergence :math:`A_j \exp(-r^2/2\sigma_j^2)`
+    the deflection is purely radial, so the elliptical Faddeeva sum reduces
+    exactly (its q -> 1 limit) to
+
+    .. math::
+
+        \alpha_r(r) = \sum_j \frac{2 A_j \sigma_j^2}{r}
+                      \left(1 - e^{-r^2 / 2\sigma_j^2}\right)
+
+    which is evaluated here in real arithmetic, with :math:`\alpha_r(0) = 0`.
+    Evaluating a spherical profile through the elliptical path at the q = 0.9999
+    clamp instead costs a complex `(N_gaussians, N_pixels)` Faddeeva evaluation
+    and carries a ~6e-5 relative bias plus a spurious cross-axis deflection.
+
+    Parameters
+    ----------
+    grid
+        The (y,x) coordinates in the profile's reference frame.
+    amps
+        The amplitudes :math:`A_j` of the Gaussian components.
+    sigmas
+        The widths :math:`\sigma_j` of the Gaussian components.
+    xp
+        The array backend, `numpy` or `jax.numpy`. The arithmetic is real on
+        both, and the branch that reaches here is static (see `_is_circular`).
+
+    Returns
+    -------
+    The (y,x) deflection angles, in the profile's reference frame.
+    """
+    y = xp.asarray(grid.array[:, 0], dtype=xp.float64)
+    x = xp.asarray(grid.array[:, 1], dtype=xp.float64)
+
+    amps = xp.asarray(amps, dtype=xp.float64)[:, None]
+    sigmas = xp.asarray(sigmas, dtype=xp.float64)[:, None]
+
+    radii_squared = y * y + x * x
+
+    magnitude = xp.sum(
+        2.0
+        * amps
+        * sigmas**2.0
+        * -xp.expm1(-0.5 * radii_squared[None, :] / sigmas**2.0),
+        axis=0,
+    )
+
+    # magnitude / r gives alpha_r, and the unit vector another 1 / r. The
+    # denominator is made safe before the divide (rather than after) so that the
+    # r = 0 entry carries no NaN into a reverse-mode gradient.
+    is_off_centre = radii_squared > 0.0
+    radii_squared_safe = xp.where(is_off_centre, radii_squared, 1.0)
+    factor = xp.where(is_off_centre, magnitude / radii_squared_safe, 0.0)
+
+    return xp.vstack((factor * y, factor * x)).T
+
+
+class MGEDecomposer:
+    r"""
+    Multi-Gaussian Expansion (MGE) decomposer for arbitrary mass profiles.
+
+    Accelerates deflection-angle and convergence calculations by decomposing a mass
+    profile's projected convergence (or 3-D density) into a sum of Gaussian components,
+    each of which has an analytic deflection-angle formula via the Faddeeva (scaled
+    complementary error) function.
+
+    The decomposition of an arbitrary radial function :math:`f(\sigma)` into Gaussians
+    with amplitudes :math:`A_j` and widths :math:`\sigma_j` follows the numerical
+    contour-integration quadrature of Shajib (2019) Eq. 6:
+
+    .. math::
+
+        f(\sigma) \approx \sum_{j} A_j \exp\!\left(-\frac{r^2}{2\sigma_j^2}\right)
+
+    The deflection angles of each Gaussian component are then evaluated analytically via
+    the complex Faddeeva function :math:`w(z) = e^{-z^2}\,\mathrm{erfc}(-iz)`.
+
+    Supported ellipticity conventions for the scale-parameter :math:`\sigma` are
+    ``'major'``, ``'circularised'``, and ``'minor'`` (see :meth:`sigmas_factor_from`).
+
+    References
+    ----------
+    - Shajib 2019, MNRAS, 488, 1387  (arXiv:1906.08263)
+    """
+
+    def __init__(
+        self,
+        mass_profile: MassProfile,
+    ):
+        self.mass_profile = mass_profile
+
+    @property
+    def centre(self):
+        return self.mass_profile.centre
+
+    @property
+    def ell_comps(self):
+        return self.mass_profile.ell_comps
+
+    @property
+    def transformed_to_reference_frame_grid_from(self):
+        return self.mass_profile.transformed_to_reference_frame_grid_from
+
+    @staticmethod
+    def kesi(p, xp=np):
+        """
+        see Eq.(6) of Shajib 2019 1906.08263
+        """
+        n_list = xp.arange(0, 2 * p + 1, 1)
+        return (2.0 * p * xp.log(10) / 3.0 + 2.0 * xp.pi * n_list * 1j) ** (0.5)
+
+    @staticmethod
+    def eta(p, xp=np):
+        """
+        see Eq.(6) of Shajib 2019 1906.00263
+        """
+        i = xp.arange(1, p, 1)
+        kesi_last = 1 / 2**p
+        k = kesi_last + xp.cumsum(xp.cumprod((p + 1 - i) / i) * kesi_last)
+
+        kesi_list = xp.hstack(
+            [xp.array([0.5]), xp.ones(p), k[::-1], xp.array([kesi_last])]
+        )
+        coef = (-1) ** xp.arange(0, 2 * p + 1, 1)
+        eta_const = 2.0 * xp.sqrt(2.0 * xp.pi) * 10 ** (p / 3.0)
+        eta_list = coef * eta_const * kesi_list
+
+        return eta_list
+
+    @staticmethod
+    def wofz(z, xp=np):
+        """
+        Faddeeva function w(z) = exp(-z^2) * erfc(-i z).
+
+        The numpy path calls `scipy.special.wofz`; the JAX path calls
+        `_wofz_weideman` (the Weideman 1994 rational series, order 32), which is
+        JIT + autodiff safe. The split exists because scipy is not traceable
+        under JAX. Note that the JAX routine is valid for Im(z) >= 0 only, which
+        is all `zeta_from` ever passes.
+        """
+        return _wofz(z, xp=xp)
+
+    @aa.decorators.to_vector_yx
+    @aa.decorators.transform
+    def deflections_2d_via_mge_from(
+        self,
+        grid: aa.type.Grid2DLike,
+        xp=np,
+        *,
+        sigma_log_list,
+        three_D: bool,
+        ellipticity_convention: str,
+        func_terms: int = 28,
+        **kwargs,
+    ):
+        """
+        Calculates the deflection angle of an arbitrary elliptical convergence / 3d density
+        profile via a summation of Gaussian convergences
+        ----------
+        sigma_log_list : list
+            A log spaced list of Gaussian sigmas
+        three_D : bool
+            if input function is a three-dimensional density profile, yes
+        sigmas_factor : float
+            depending on the ellipticity convention, different profiles need different multiplications
+            of the sigmas. Most profiles need a sigmas factor of axis_ratio(), some sqrt(axis_ratio())
+        func_terms
+            The number of terms used to approximate the input func, 28 is sufficient for 64bits
+
+        Returns
+        -------
+        """
+        sigma_log_array = xp.asarray(sigma_log_list, dtype=xp.float64)
+
+        amps, _ = self.decompose_convergence_via_mge(
+            sigma_log_list=sigma_log_array,
+            func_terms=func_terms,
+            three_D=three_D,
+            xp=xp,
+        )
+
+        # Change ellipticity convention to (q**2*x**2 + y**2) (most profiles are in (x**2 + y**2/q**2))
+        sigmas_factor = self.sigmas_factor_from(
+            input_convention=ellipticity_convention, target_convention="minor", xp=xp
+        )
+        sigmas = sigmas_factor * sigma_log_array
+
+        if _is_circular(self.ell_comps):
+            # A spherical profile has an exact real radial form -- take it instead of
+            # the complex Faddeeva sum evaluated at the q = 0.9999 clamp. The
+            # predicate is static on both backends (a `*Sph` class has literal
+            # `ell_comps = (0.0, 0.0)`), so this is not a data-dependent branch
+            # under a trace and JAX takes it too.
+            return self.mass_profile.rotated_grid_from_reference_frame_from(
+                _spherical_mge_deflections_from(
+                    grid=grid, amps=amps, sigmas=sigmas, xp=xp
+                ),
+                xp=xp,
+            )
+
+        q = xp.asarray(self.axis_ratio(xp), dtype=xp.float64)
+
+        deflection_angles = (
+            amps[:, None]
+            * sigmas[:, None]
+            * xp.sqrt((2.0 * xp.pi) / (1.0 - q**2.0))
+            * self.zeta_from(grid=grid, sigma_log_list=sigmas, xp=xp)
+        )
+
+        # Add Gaussian profiles
+        deflections = xp.sum(deflection_angles, axis=0)
+
+        return self.mass_profile.rotated_grid_from_reference_frame_from(
+            xp.vstack((-1.0 * xp.imag(deflections), xp.real(deflections))).T,
+            xp=xp,
+        )
+
+    def decompose_convergence_via_mge(
+        self, sigma_log_list, three_D: bool, func_terms: int = 28, xp=np
+    ):
+        """
+        Decomposes the convergence profile of an arbitrary elliptical function into a sum of
+        Gaussian convergence profiles
+        Parameters
+        ----------
+        sigma_log_list : list
+            A log spaced list of Gaussian sigmas
+        three_D : bool
+            if input function is a three-dimensional density profile, yes
+        func_terms
+            The number of terms used to approximate the input func, 28 is sufficient for 64bits
+
+        Returns
+        -------
+        """
+        kesis = self.kesi(func_terms, xp=xp)  # kesi in Eq.(6) of 1906.08263
+        etas = self.eta(func_terms, xp=xp)  # eta in Eqr.(6) of 1906.08263
+
+        sigmas = xp.asarray(sigma_log_list, dtype=xp.float64)  # major axis
+
+        log_sigmas = xp.log(sigmas)
+        d_log_sigma = log_sigmas[1] - log_sigmas[0]
+
+        if three_D == True:
+            f_sigma = xp.sum(
+                etas
+                * xp.real(
+                    self.mass_profile.density_3d_func(
+                        aa.ArrayIrregular(sigmas.reshape(-1, 1) * kesis), xp=xp
+                    )
+                ),
+                axis=1,
+            )
+            amplitude_list = f_sigma * d_log_sigma * sigmas
+
+        else:
+            f_sigma = xp.sum(
+                etas
+                * xp.real(
+                    self.mass_profile.convergence_func(
+                        aa.ArrayIrregular(sigmas.reshape(-1, 1) * kesis), xp=xp
+                    )
+                ),
+                axis=1,
+            )
+            amplitude_list = f_sigma * d_log_sigma / xp.sqrt(2.0 * xp.pi)
+
+        if xp == np:
+            amplitude_list[0] *= 0.5
+            amplitude_list[-1] *= 0.5
+        else:
+            amplitude_list = amplitude_list.at[0].multiply(0.5)
+            amplitude_list = amplitude_list.at[-1].multiply(0.5)
+
+        return amplitude_list, sigmas
+
+    def axis_ratio(self, xp=np):
+        axis_ratio = self.mass_profile.axis_ratio(xp=xp)
+        return xp.where(axis_ratio < 0.9999, axis_ratio, 0.9999)
+
+    def zeta_from(self, grid: aa.type.Grid2DLike, sigma_log_list, xp=np):
+        q = xp.asarray(self.axis_ratio(xp), dtype=xp.float64)
+        q2 = q * q
+
+        y = xp.asarray(grid.array[:, 0], dtype=xp.float64)
+        x = xp.asarray(grid.array[:, 1], dtype=xp.float64)
+
+        ind_pos_y = y >= 0
+
+        sigmas = xp.asarray(sigma_log_list, dtype=xp.float64)[:, None]
+
+        scale = q / (sigmas * xp.sqrt(xp.asarray(2.0, dtype=xp.float64) * (1.0 - q2)))
+
+        xs = x[None, :] * scale
+        ys = xp.abs(y)[None, :] * scale
+
+        z1 = xs + 1j * ys
+        z2 = q * xs + 1j * ys / q
+
+        exp_term = xp.exp(-(xs * xs) * (1.0 - q2) - (ys * ys) * (1.0 / q2 - 1.0))
+
+        if xp is np:
+            w2 = _wofz_masked(z2, exp_term)
+        else:
+            w2 = self.wofz(z2, xp=xp)
+
+        core = -1j * (self.wofz(z1, xp=xp) - exp_term * w2)
+
+        return xp.where(ind_pos_y[None, :], core, xp.conj(core))
+
+    @aa.over_sample
+    @aa.decorators.to_array
+    @aa.decorators.transform
+    def convergence_2d_via_mge_from(
+        self,
+        grid: aa.type.Grid2DLike,
+        xp=np,
+        *,
+        sigma_log_list,
+        three_D: bool,
+        ellipticity_convention: str,
+        func_terms: int = 28,
+        **kwargs,
+    ):
+        """
+        Calculate the projected convergence at a given set of arc-second gridded coordinates.
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the convergence is computed on.
+
+        """
+
+        eccentric_radii = self.mass_profile.eccentric_radii_grid_from(
+            grid=grid, xp=xp, **kwargs
+        )
+
+        sigmas_factor = self.sigmas_factor_from(
+            input_convention=ellipticity_convention,
+            target_convention="circularised",
+            xp=xp,
+        )
+
+        return self._convergence_2d_via_mge_from(
+            grid_radii=eccentric_radii,
+            xp=xp,
+            sigma_log_list=sigma_log_list,
+            three_D=three_D,
+            sigmas_factor=sigmas_factor,
+            func_terms=func_terms,
+        )
+
+    def _convergence_2d_via_mge_from(
+        self,
+        grid_radii,
+        xp=np,
+        *,
+        sigma_log_list,
+        three_D: bool,
+        sigmas_factor: float = 1.0,
+        func_terms: int = 28,
+        **kwargs,
+    ):
+        """Calculate the projected convergence at a given set of arc-second gridded coordinates.
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the convergence is computed on.
+
+        """
+
+        sigma_log_array = xp.asarray(sigma_log_list, dtype=xp.float64)
+
+        amps, sigmas = self.decompose_convergence_via_mge(
+            sigma_log_list=sigma_log_array,
+            func_terms=func_terms,
+            three_D=three_D,
+            xp=xp,
+        )
+
+        # Change ellipticity convention to (q*x**2 + y**2/q) (most profiles are in (x**2 + y**2/q**2))
+        sigmas = sigmas_factor * xp.asarray(sigmas)[:, None]
+        amps = xp.asarray(amps)[:, None]
+
+        grid_radii = grid_radii[None, ...]
+
+        convergence = xp.sum(
+            self.convergence_func_gaussian(
+                grid_radii=aa.ArrayIrregular(grid_radii),
+                sigma=sigmas,
+                intensity=amps,
+            ),
+            axis=0,
+        )
+        return convergence
+
+    def convergence_func_gaussian(self, grid_radii, sigma, intensity, xp=np):
+        return xp.multiply(
+            intensity, xp.exp(-0.5 * xp.square(xp.divide(grid_radii.array, sigma)))
+        )
+
+    @staticmethod
+    def E1(x, xp=np):
+        """Exponential integral of the first order via Abramowitz & Stegun (1970).
+
+        Polynomial approximation for x <= 1, rational approximation for x > 1.
+        Uses xp.where for branchless evaluation (JAX-compatible).
+
+        Reference: Abramowitz & Stegun, Handbook of Mathematical Functions, 5.1.53 / 5.1.56.
+        Same approximation used in Jax-Lensing-Profiles (Herculens).
+        """
+        A0 = -0.57721566
+        A1 = 0.99999193
+        A2 = -0.24991055
+        A3 = 0.05519968
+        A4 = -0.00976004
+        A5 = 0.00107857
+        B1 = 8.5733287401
+        B2 = 18.059016973
+        B3 = 8.6347608925
+        B4 = 0.2677737343
+        C1 = 9.5733223454
+        C2 = 25.6329561486
+        C3 = 21.0996530827
+        C4 = 3.9584969228
+
+        x_safe = xp.where(x > 0, x, 1e-20)
+        x2 = x_safe ** 2
+        x3 = x_safe ** 3
+        x4 = x_safe ** 4
+        x5 = x_safe ** 5
+
+        small = (
+            -xp.log(x_safe) + A0 + A1 * x_safe + A2 * x2
+            + A3 * x3 + A4 * x4 + A5 * x5
+        )
+        num = xp.exp(-x_safe) * (x4 + B1 * x3 + B2 * x2 + B3 * x_safe + B4)
+        denom = x5 + C1 * x4 + C2 * x3 + C3 * x2 + C4 * x_safe
+        large = num / denom
+
+        return xp.where(x_safe <= 1.0, small, large)
+
+    def potential_func_gaussian(self, grid_radii, sigma, intensity, xp=np):
+        EULER_GAMMA = 0.5772156649015329
+        value = 0.5 * xp.square(xp.divide(grid_radii.array, sigma))
+        value_safe = xp.where(value > 0, value, 1e-20)
+        return xp.multiply(
+            intensity,
+            xp.multiply(
+                sigma ** 2,
+                EULER_GAMMA + xp.log(value_safe) + self.E1(value_safe, xp),
+            ),
+        )
+
+    _GL_NODES_20, _GL_WEIGHTS_20 = np.polynomial.legendre.leggauss(20)
+
+    @staticmethod
+    def sigma_function(x, y, q, xp=np):
+        """Shajib (2019) sigma function for the elliptical Gaussian potential.
+
+        Returns (sigma_re, sigma_im) used in the line-integral computation
+        of the lensing potential.
+        """
+        w1 = MGEDecomposer.wofz(x + 1j * y, xp=xp)
+        w2 = MGEDecomposer.wofz(q * x + 1j * y / q, xp=xp)
+        exp_factor = xp.exp(-x * x * (1.0 - q * q) - y * y * (1.0 / (q * q) - 1.0))
+        sigma_re = xp.imag(w1) - exp_factor * xp.imag(w2)
+        sigma_im = -xp.real(w1) + exp_factor * xp.real(w2)
+        return sigma_re, sigma_im
+
+    @aa.over_sample
+    @aa.decorators.to_array
+    @aa.decorators.transform
+    def potential_2d_via_mge_from(
+        self,
+        grid: aa.type.Grid2DLike,
+        xp=np,
+        *,
+        sigma_log_list,
+        three_D: bool,
+        ellipticity_convention: str,
+        func_terms: int = 28,
+        n_quad: int = 20,
+        **kwargs,
+    ):
+        """Calculate the lensing potential via MGE decomposition.
+
+        Integrates the MGE deflection field along radial lines from the
+        origin to each grid point using Gauss-Legendre quadrature:
+
+            psi(x, y) = integral_0^1 alpha(t*x, t*y) . (x, y) dt
+
+        This correctly handles both spherical and elliptical profiles by
+        reusing the existing (verified correct) MGE deflection machinery.
+        """
+        sigma_log_array = xp.asarray(sigma_log_list, dtype=xp.float64)
+
+        amps, _ = self.decompose_convergence_via_mge(
+            sigma_log_list=sigma_log_array,
+            func_terms=func_terms,
+            three_D=three_D,
+            xp=xp,
+        )
+
+        q = xp.asarray(self.axis_ratio(xp), dtype=xp.float64)
+
+        sigmas_factor = self.sigmas_factor_from(
+            input_convention=ellipticity_convention,
+            target_convention="minor",
+            xp=xp,
+        )
+        sigmas_scaled = sigmas_factor * sigma_log_array
+
+        y = xp.asarray(grid.array[:, 0], dtype=xp.float64)
+        x = xp.asarray(grid.array[:, 1], dtype=xp.float64)
+        n_pts = x.shape[0]
+
+        gl_nodes = xp.asarray(self._GL_NODES_20[:n_quad], dtype=xp.float64)
+        gl_weights = xp.asarray(self._GL_WEIGHTS_20[:n_quad], dtype=xp.float64)
+
+        t_vals = 0.5 * (1.0 + gl_nodes)
+
+        factors = amps * sigmas_scaled * xp.sqrt(2.0 * xp.pi / (1.0 - q * q))
+
+        potential = xp.zeros(n_pts, dtype=xp.float64)
+
+        for k in range(n_quad):
+            t = t_vals[k]
+            scaled_grid = aa.Grid2DIrregular(
+                values=xp.stack([t * y, t * x], axis=-1)
+            )
+
+            zeta = self.zeta_from(
+                grid=scaled_grid,
+                sigma_log_list=sigmas_scaled,
+                xp=xp,
+            )
+
+            defl_y = xp.sum(-factors[:, None] * xp.imag(zeta), axis=0)
+            defl_x = xp.sum(factors[:, None] * xp.real(zeta), axis=0)
+
+            potential += 0.5 * gl_weights[k] * (defl_y * y + defl_x * x)
+
+        return potential
+
+    def sigmas_factor_from(self, input_convention: str, target_convention: str, xp=np):
+        """
+        Returns the multiplicative factor required to convert a scale parameter (e.g. sigma)
+        defined under one ellipticity convention to another.
+
+        The three supported ellipticity conventions are:
+
+        Major-axis convention
+        ---------------------
+        The elliptical radius is defined such that the scale parameter lies along
+        the major axis:
+
+            R^2 = x^2 + y^2 / q^2
+
+        where q = b/a is the projected minor-to-major axis ratio (q <= 1).
+        In this convention, the scale parameter corresponds directly to the
+        semi-major axis length.
+
+        Circularised convention
+        ------------------------
+        The elliptical radius is defined such that the ellipse has the same area
+        as a circle of radius R:
+
+            R^2 = q x^2 + y^2 / q
+
+        In this case:
+
+            a = R / sqrt(q)
+            b = R sqrt(q)
+
+        and the enclosed area πab = πR^2 is independent of q.
+        The scale parameter corresponds to the circularised radius.
+
+        Minor-axis convention
+        ----------------------
+        The elliptical radius is defined such that the scale parameter lies along
+        the minor axis:
+
+            R^2 = q^2 x^2 + y^2
+
+        Here, the scale parameter corresponds directly to the semi-minor axis length.
+
+        ------------------------------------------------------------------------------
+
+        Parameters
+        ----------
+        input_convention : str
+            The current definition of the scale parameter.
+            Must be one of: 'major', 'circularised', or 'minor'.
+
+        target_convention : str
+            The desired definition of the scale parameter.
+            Must be one of: 'major', 'circularised', or 'minor'.
+
+        Returns
+        -------
+        float or array-like
+            Multiplicative factor required to convert the scale parameter
+            between ellipticity conventions.
+        """
+
+        if target_convention == "major":
+            if input_convention == "major":
+                return 1.0
+            elif input_convention == "circularised":
+                return xp.divide(1.0, xp.sqrt(self.mass_profile.axis_ratio(xp)))
+            elif input_convention == "minor":
+                return xp.divide(1.0, self.mass_profile.axis_ratio(xp))
+            else:
+                raise TypeError(
+                    "sigmas_factor_from takes either 'major', 'circularised' or 'minor' as an input ellipticity convention"
+                )
+
+        elif target_convention == "circularised":
+            if input_convention == "major":
+                return xp.sqrt(self.mass_profile.axis_ratio(xp))
+            elif input_convention == "circularised":
+                return 1.0
+            elif input_convention == "minor":
+                return xp.divide(1.0, xp.sqrt(self.mass_profile.axis_ratio(xp)))
+            else:
+                raise TypeError(
+                    "sigmas_factor_from takes either 'major', 'circularised' or 'minor' as an input ellipticity convention"
+                )
+
+        elif target_convention == "minor":
+            if input_convention == "major":
+                return self.mass_profile.axis_ratio(xp)
+            elif input_convention == "circularised":
+                return xp.sqrt(self.mass_profile.axis_ratio(xp))
+            elif input_convention == "minor":
+                return 1.0
+            else:
+                raise TypeError(
+                    "sigmas_factor_from takes either 'major', 'circularised' or 'minor' as an input ellipticity convention"
+                )
+
+        else:
+            raise TypeError(
+                "sigmas_factor_from takes either 'major', 'circularised' or 'minor' as a target ellipticity convention"
+            )

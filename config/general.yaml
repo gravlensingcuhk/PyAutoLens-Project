@@ -12,6 +12,10 @@ inversion:
   no_regularization_add_to_curvature_diag_value : 1.0e-3 # The default value added to the curvature matrix's diagonal when regularization is not applied to a linear object, which prevents inversion's failing due to the matrix being singular.
   positive_only_uses_p_initial: true  # If True, the positive-only solver of an inversion's uses an initial guess of the reconstructed data's values as which values should be positive, speeding up the solver.
   use_border_relocator: true          # If True, by default a pixelization's border is used to relocate all pixels outside its border to the border.
+  use_edge_zeroed_pixels: true        # If True, the edge pixels of a (rectangular) pixelization are set to zero; replaces the Delaunay mesh's ring of zeroed edge points.
+  rtu_forward: tabulated              # RTU meshes evaluate the kernel-CDF forward transform from a cubic-Hermite table of the exact CDF (rtu_forward_knots knots per axis) instead of the exact erf sum; same result to ~1e-10, several times faster (HST project setting).
+  rtu_forward_knots: 1024             # Table size per axis for rtu_forward: tabulated.
+  pixel_signal_normalisation: weights # Adaptive regularizations (AdaptPower) weight each mesh pixel by its adapt-image "signal". The library default ("count") normalises that signal by the integer number of mapping entries in the pixel, which jumps by whole units as traced sub-pixels cross mesh-pixel boundaries, so the likelihood jumps as the mass model moves (J18 source_pix[1]: ~120 nats RMS on 0.1-sigma steps of theta_E, ESS 2 after 130k samples). "weights" normalises by the sum of the mapping weights, which is continuous (same scan: 0.01-0.2 nats). Needs the vendored PyAutoArray production/hst branch (pyauto/).
   reconstruction_vmax_factor: 0.5   # Plots of an Inversion's reconstruction use the reconstructed data's bright value multiplied by this factor.
 updates:
   iterations_per_quick_update: 1e99 # Non-linear search iterations between every quick update, which just displays the maximum likelihood model fit.
@@ -57,3 +61,6 @@ test:
   lh_timeout_seconds:               # If a float is input, the log_likelihood_function call is timed out after this many seconds, to diagnose infinite loops. Default is None, meaning no timeout.
   preloads_check_threshold: 1.0     # If the figure of merit of a fit with and without preloads is greater than this threshold, the check preload test fails and an exception raised for a model-fit. 
   disable_positions_lh_inversion_check: true
+version:
+  python_version_check: True
+  workspace_version_check: False   # This config is the project's own, not an autolens_workspace checkout, so there is no workspace version to check against the library.

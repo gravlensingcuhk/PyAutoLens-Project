@@ -1,0 +1,2958 @@
+from dataclasses import dataclass, replace
+from functools import cached_property
+import logging
+import math
+import numbers
+import numpy as np
+import time
+from pathlib import Path
+from typing import Callable, Iterable, Optional, Tuple
+
+from autoarray import exc
+
+from autoarray.operators.transformer import _load_nufftax, nufftax_exception
+
+try:
+    from autonerves.test_mode import disable_jax
+except ImportError:
+    # Mirrors the fallback in `autoarray/dataset/interferometer/dataset.py`:
+    # `disable_jax()` arrives in the autonerves release that closes
+    # PyAutoNerves#159, and a `--no-deps` install, an editable checkout or a
+    # hand-built virtualenv can all put an older autonerves on the path
+    # regardless of the floor in `pyproject.toml`. Degrade to the predicate's
+    # own one-line body rather than fail at module load; delete the fallback
+    # when the floor names a release carrying the predicate.
+    import os
+
+    def disable_jax():
+        return os.environ.get("PYAUTO_DISABLE_JAX") == "1"
+
+
+logger = logging.getLogger(__name__)
+
+
+def check_noise_map_real_imag_equal(noise_map) -> None:
+    """
+    Raise a `DatasetException` unless every visibility of `noise_map` has equal real and
+    imaginary noise sigma (`noise_map.real == noise_map.imag`, to `np.allclose` with
+    `atol=0.0` and the default relative tolerance, so the check is scale-free and tiny sigmas
+    such as 1e-9 vs 2e-9 are not waved through by the default absolute tolerance).
+
+    This is the precondition of the sparse operator: its precision operator
+    `W~ = Re(F^H W F)` is built from the real-part sigma alone (see
+    `nufft_precision_operator_from`), a reduction that is exact only under that equality.
+    It is shared by `Interferometer.apply_sparse_operator`, which checks the whole resident
+    noise-map, and `sparse_terms_from_chunks`, which checks every chunk as it streams past.
+
+    With per-visibility weights `w_r = 1 / sigma_real^2`, `w_i = 1 / sigma_imag^2` the exact
+    curvature is `sum_k wbar cos(a - b) + dw cos(a + b)` with `wbar = (w_r + w_i) / 2` and
+    `dw = (w_r - w_i) / 2`; only the `cos(a - b)` (lag-only, Toeplitz) part is representable by
+    `W~`, so no equal-sigma substitute is exact when the sigmas genuinely differ. When they
+    differ only by noise-estimator scatter, pool them in quadrature with `pool_noise_map=True`
+    (or `noise_map_pooled_from`), which skips this check.
+
+    Parameters
+    ----------
+    noise_map
+        The complex noise-map (a `VisibilitiesNoiseMap` or a complex ndarray) to check.
+
+    Raises
+    ------
+    exc.DatasetException
+        If any visibility has unequal real and imaginary noise sigma.
+    """
+    noise_map = getattr(noise_map, "array", noise_map)
+
+    noise_map_real = np.asarray(np.real(noise_map))
+    noise_map_imag = np.asarray(np.imag(noise_map))
+
+    if np.allclose(noise_map_real, noise_map_imag, atol=0.0):
+        return
+
+    unequal = ~np.isclose(noise_map_real, noise_map_imag, atol=0.0)
+
+    denominator = np.maximum(np.abs(noise_map_real), np.abs(noise_map_imag))
+    relative_difference = np.abs(noise_map_real - noise_map_imag) / np.where(
+        denominator == 0.0, 1.0, denominator
+    )
+
+    raise exc.DatasetException(
+        "The sparse operator cannot be applied to this interferometer dataset because its "
+        "noise-map has unequal real and imaginary sigma.\n\n"
+        "The sparse operator's precision operator `W~ = Re(F^H W F)` is built from the "
+        "real-part noise sigma only (see `psf_precision_operator_from`, which passes "
+        "`noise_map_real` to `nufft_precision_operator_from`). That reduction is exact only "
+        "when every visibility has equal real and imaginary sigma "
+        "(`sigma_real == sigma_imag`).\n\n"
+        f"This dataset has {int(np.count_nonzero(unequal))} of {noise_map_real.size} "
+        "visibilities where the real and imaginary sigma differ (maximum relative difference "
+        f"{np.max(relative_difference):.3e}), so the sparse curvature matrix would silently "
+        "disagree with the dense path.\n\n"
+        "For thermal noise the real and imaginary parts of one visibility have the same "
+        "variance, so a small difference (typically 1-2 % when the noise is estimated by "
+        "differencing adjacent visibilities) is estimator scatter. Pool the two sigmas in "
+        "quadrature, sigma^2 = (sigma_real^2 + sigma_imag^2) / 2, which preserves the total "
+        "variance: pass `pool_noise_map=True` to `apply_sparse_operator`, `from_stream` or "
+        "`sparse_terms_from_chunks`, or pool the noise-map yourself with "
+        "`inversion_interferometer_util.noise_map_pooled_from(noise_map)` before building the "
+        "dataset or chunks. Pooling is an approximation when the sigmas genuinely differ: the "
+        "exact curvature is `sum wbar cos(a - b) + dw cos(a + b)` (`wbar`, `dw` the mean and "
+        "half-difference of the real and imaginary weights) and `W~` can only hold the "
+        "`cos(a - b)` part.\n\n"
+        "Alternatively fit without calling `apply_sparse_operator()` — the dense "
+        "`InversionInterferometerMapping` path handles unequal real and imaginary sigmas "
+        "exactly."
+    )
+
+
+# The median fractional real/imag sigma difference above which pooling logs a warning rather
+# than an info line: a difference this large may be real rather than noise-estimator scatter
+# (the threshold pyuvimage uses, Discussion #13).
+NOISE_MAP_POOLING_WARNING_FRACTION = 0.25
+
+
+def noise_map_pooled_from(noise_map) -> np.ndarray:
+    """
+    Return `noise_map` with the real and imaginary sigma of every visibility pooled in
+    quadrature, `sigma = sqrt((sigma_real^2 + sigma_imag^2) / 2)`, as the complex array
+    `sigma + 1j * sigma`.
+
+    The sparse operator assumes equal real and imaginary sigma per visibility (see
+    `check_noise_map_real_imag_equal`). For thermal noise the two parts of one visibility have
+    the same variance, so a measured difference usually comes from the noise estimator (1-2 %
+    when estimated by differencing adjacent visibilities); quadrature pooling preserves the
+    total variance `sigma_real^2 + sigma_imag^2` (and so the chi-squared expectation) and is
+    the better estimate of both. It differs from the arithmetic mean of the two weights
+    `1 / sigma^2` only at second order in the fractional asymmetry (4e-4 at 2 %).
+
+    Visibilities whose real and imaginary sigma are already exactly equal are returned
+    unchanged (bit for bit), so pooling a pooled noise-map is a no-op.
+
+    Parameters
+    ----------
+    noise_map
+        The noise-map, in any form `sparse_terms_from_chunks` accepts: a
+        `VisibilitiesNoiseMap`, a complex `(K,)` array or a real `(K, 2)` array of
+        (real, imag) columns.
+
+    Returns
+    -------
+    np.ndarray
+        The pooled complex128 `(K,)` noise-map, with equal real and imaginary parts.
+    """
+    noise_map = _complex_visibilities_from(noise_map)
+
+    noise_map_real = noise_map.real
+    noise_map_imag = noise_map.imag
+
+    sigma = np.where(
+        noise_map_real == noise_map_imag,
+        noise_map_real,
+        np.sqrt((noise_map_real**2.0 + noise_map_imag**2.0) / 2.0),
+    )
+
+    return sigma + 1j * sigma
+
+
+def _noise_map_real_imag_fraction_from(noise_map) -> np.ndarray:
+    """
+    The per-visibility fractional real/imag sigma difference `|re - im| / max(|re|, |im|)`
+    (0 where both are 0).
+    """
+    noise_map = _complex_visibilities_from(noise_map)
+
+    noise_map_real = np.abs(noise_map.real)
+    noise_map_imag = np.abs(noise_map.imag)
+
+    denominator = np.maximum(noise_map_real, noise_map_imag)
+
+    return np.abs(noise_map_real - noise_map_imag) / np.where(
+        denominator == 0.0, 1.0, denominator
+    )
+
+
+def noise_map_real_imag_asymmetry_from(noise_map) -> Tuple[float, float]:
+    """
+    Return the median and maximum fractional difference between the real and imaginary sigma
+    of `noise_map`, `|sigma_real - sigma_imag| / max(sigma_real, sigma_imag)` per visibility.
+
+    The median is what `pool_noise_map=True` judges a noise-map by (so one bad baseline does
+    not escalate the message); the maximum is reported beside it.
+
+    Parameters
+    ----------
+    noise_map
+        The noise-map, in any form `noise_map_pooled_from` accepts.
+
+    Returns
+    -------
+    (float, float)
+        The `(median, max)` fractional asymmetry, e.g. `(0.02, 0.05)` for a 2 % median and a
+        5 % maximum difference.
+    """
+    fraction = _noise_map_real_imag_fraction_from(noise_map)
+
+    return float(np.median(fraction)), float(np.max(fraction))
+
+
+class _NoiseMapPoolingRecord:
+    """
+    Accumulates the real/imag sigma asymmetry of every noise-map pooled by one
+    `pool_noise_map=True` call -- one chunk at a time for `sparse_terms_from_chunks` -- so one
+    message is logged per call, not per chunk.
+
+    The median is taken from a fixed histogram of the fractional asymmetry (bins of `1e-5`, so
+    a resolution of 0.001 %) rather than from the per-visibility values, so the record's memory
+    does not grow with the number of visibilities streamed; the maximum is exact.
+    """
+
+    _bin_edges = np.linspace(0.0, 1.0, 100_001)
+
+    def __init__(self):
+        self.counts = np.zeros(self._bin_edges.size - 1, dtype=np.int64)
+        self.maximum = 0.0
+        self.unequal = False
+
+    def add(self, noise_map: np.ndarray):
+        """
+        Record the asymmetry of a complex noise-map about to be pooled.
+        """
+        if np.allclose(noise_map.real, noise_map.imag, atol=0.0):
+            return
+
+        self.unequal = True
+
+        fraction = _noise_map_real_imag_fraction_from(noise_map)
+
+        self.counts += np.histogram(fraction, bins=self._bin_edges)[0]
+        self.maximum = max(self.maximum, float(np.max(fraction)))
+
+    @property
+    def median(self) -> float:
+        cumulative = np.cumsum(self.counts)
+        index = int(np.searchsorted(cumulative, 0.5 * cumulative[-1]))
+
+        return float(0.5 * (self._bin_edges[index] + self._bin_edges[index + 1]))
+
+    def log(self):
+        """
+        Log one line describing the pooling: nothing when every pooled noise-map already had
+        equal real and imaginary sigma (to the relative tolerance of
+        `check_noise_map_real_imag_equal`), an info line for a median difference up to
+        `NOISE_MAP_POOLING_WARNING_FRACTION`, a warning above it.
+        """
+        if not self.unequal:
+            return
+
+        median = self.median
+
+        summary = (
+            f"INTERFEROMETER - pooled sigma_re / sigma_im in quadrature, "
+            f"sigma^2 = (sigma_re^2 + sigma_im^2) / 2, for the sparse operator: median "
+            f"difference {100.0 * median:.2f} %, max {100.0 * self.maximum:.2f} %"
+        )
+
+        if median <= NOISE_MAP_POOLING_WARNING_FRACTION:
+            logger.info(f"{summary} (consistent with noise-estimator scatter).")
+            return
+
+        logger.warning(
+            f"{summary}. A difference this large may be real: pooling weights the real and "
+            f"imaginary parts equally, which the noise-map does not, so the sparse curvature "
+            f"matrix drops the cos(a + b) term the unequal weights carry. The dense "
+            f"`InversionInterferometerMapping` path (fit without `apply_sparse_operator`) "
+            f"is exact for unequal real and imaginary sigmas."
+        )
+
+
+def data_vector_via_transformed_mapping_matrix_from(
+    transformed_mapping_matrix: np.ndarray,
+    visibilities: np.ndarray,
+    noise_map: np.ndarray,
+) -> np.ndarray:
+    """
+    Returns the data vector `D` from a transformed mapping matrix `f` and the 1D image `d` and 1D noise-map `sigma`
+    (see Warren & Dye 2003).
+
+    Parameters
+    ----------
+    transformed_mapping_matrix
+        The matrix representing the transformed mappings between sub-grid pixels and pixelization pixels.
+    visibilities
+        The complex 1D array of observed visibilities the inversion is fitting, with real and imaginary components.
+    noise_map
+        The complex 1D array of the noise-map used by the inversion during the fit.
+    """
+    # Extract components
+    vis_real = visibilities.real
+    vis_imag = visibilities.imag
+    f_real = transformed_mapping_matrix.real
+    f_imag = transformed_mapping_matrix.imag
+    noise_real = noise_map.real
+    noise_imag = noise_map.imag
+
+    # Square noise components
+    inv_var_real = 1.0 / (noise_real**2)
+    inv_var_imag = 1.0 / (noise_imag**2)
+
+    # Real and imaginary contributions
+    weighted_real = (vis_real * inv_var_real)[:, None] * f_real
+    weighted_imag = (vis_imag * inv_var_imag)[:, None] * f_imag
+
+    # Sum over visibilities
+    return np.sum(weighted_real + weighted_imag, axis=0)
+
+
+def mapped_reconstructed_visibilities_from(
+    transformed_mapping_matrix: np.ndarray, reconstruction: np.ndarray
+) -> np.ndarray:
+    """
+    Returns the reconstructed data vector from the blurrred mapping matrix `f` and solution vector *S*.
+
+    Parameters
+    ----------
+    transformed_mapping_matrix
+        The matrix representing the blurred mappings between sub-grid pixels and pixelization pixels.
+
+    """
+    return transformed_mapping_matrix @ reconstruction
+
+
+def _report_memory(arr):
+    """
+    Report array memory + process RSS (best-effort).
+    Safe to call inside a tqdm loop.
+    """
+    try:
+        import resource
+
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        arr_mb = arr.nbytes / 1024**2
+        from tqdm import tqdm
+
+        tqdm.write(f"    Memory: array={arr_mb:.1f} MB, RSS≈{rss_mb:.1f} MB")
+    except Exception:
+        pass
+
+
+def nufft_precision_operator_from(
+    noise_map_real: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    shape_masked_pixels_2d,
+    grid_radians_2d: np.ndarray,
+    *,
+    method: str = "nufft",
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
+    chunk_k: int = 2048,
+    show_progress: bool = False,
+    show_memory: bool = False,
+    use_jax: bool = False,
+) -> np.ndarray:
+    """
+     Compute the interferometer W-tilde curvature preload on a rectangular offset grid,
+     exploiting translational symmetry of the NUFFT kernel.
+
+     This function computes a compact 2D preload array that depends only on the relative
+     (dy, dx) offsets between image pixels, avoiding construction of the dense
+     W-tilde matrix of shape [N_image_pixels, N_image_pixels].
+
+     The result can be used to rapidly assemble or apply W-tilde during curvature
+     matrix construction without performing a NUFFT per source pixel.
+
+     -------------------------------------------------------------------------------
+     Backend behaviour (the two brute-force builders)
+     -------------------------------------------------------------------------------
+     - NumPy backend (`method="numpy"`):
+         * CPU execution
+         * Explicit Python loop over visibility chunks
+         * Supports progress bars and optional memory reporting
+         * Numerically closest to the original reference implementation
+
+     - JAX backend (`method="jax"`, or `method="numpy"` with `use_jax=True`):
+         * JIT-compilable and GPU/TPU capable
+         * Uses fixed-size chunking and lax.fori_loop
+         * No Python-side loops during execution
+         * Progress bars and memory reporting are disabled
+         * Floating-point results are numerically stable but not guaranteed to be
+           bitwise-identical to NumPy due to parallel reduction order
+
+     -------------------------------------------------------------------------------
+     Numerical notes
+     -------------------------------------------------------------------------------
+     The preload values are computed as:
+
+         sum_k w_k * cos(dx * ku_k + dy * kv_k)
+
+     where ku_k = 2π u_k and kv_k = 2π v_k. This corresponds to the real part of the
+     adjoint NUFFT evaluated on a uniform real-space offset grid.
+
+     The chunking strategy controls temporary memory usage and GPU occupancy. Changing
+     `chunk_k` in JAX mode triggers recompilation.
+
+     -------------------------------------------------------------------------------
+     Full Description (Original Documentation)
+     -------------------------------------------------------------------------------
+     The matrix `translation_invariant_nufft` a matrix of dimensions [unmasked_image_pixels, unmasked_image_pixels]
+     that encodes the NUFFT of every pair of image pixels given the noise map. This can be used to efficiently compute
+     the curvature matrix via the mapping matrix, in a way that omits having to perform the NUFFT on every individual
+     source pixel. This provides a significant speed up for inversions of interferometer datasets with large number of
+     visibilities.
+
+     The limitation of this matrix is that the dimensions of [image_pixels, image_pixels] can exceed many 10s of GB's,
+     making it impossible to store in memory and its use in linear algebra calculations extremely. This methods creates
+     a preload matrix that can compute the matrix via an efficient preloading scheme which exploits the
+     symmetries in the NUFFT.
+
+     To compute `translation_invariant_nufft`, one first defines a real space mask where every False entry is an
+     unmasked pixel which is used in the calculation, for example:
+
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI     This is an imaging.Mask2D, where:
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI     x = `True` (Pixel is masked and excluded from lens)
+         IxIxIxIoIoIoIxIxIxIxI     o = `False` (Pixel is not masked and included in lens)
+         IxIxIxIoIoIoIxIxIxIxI
+         IxIxIxIoIoIoIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+
+     Here, there are 9 unmasked pixels. Indexing of each unmasked pixel goes from the top-left corner right and
+     downwards, therefore:
+
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxI0I1I2IxIxIxIxI
+         IxIxIxI3I4I5IxIxIxIxI
+         IxIxIxI6I7I8IxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+         IxIxIxIxIxIxIxIxIxIxI
+
+     In the standard calculation of `translation_invariant_nufft` it is a matrix of
+     dimensions [unmasked_image_pixels, unmasked_pixel_images], therefore for the example mask above it would be
+     dimensions [9, 9]. One performs a double for loop over `unmasked_image_pixels`, using the (y,x) spatial offset
+     between every possible pair of unmasked image pixels to precompute values that depend on the properties of the NUFFT.
+
+     This calculation has a lot of redundancy, because it uses the (y,x) *spatial offset* between the image pixels. For
+     example, if two image pixel are next to one another by the same spacing the same value will be computed via the
+     NUFFT. For the example mask above:
+
+     - The value precomputed for pixel pair [0,1] is the same as pixel pairs [1,2], [3,4], [4,5], [6,7] and [7,9].
+     - The value precomputed for pixel pair [0,3] is the same as pixel pairs [1,4], [2,5], [3,6], [4,7] and [5,8].
+     - The values of pixels paired with themselves are also computed repeatedly for the standard calculation (e.g. 9
+       times using the mask above).
+
+     The `nufft_precision_operator` method instead only computes each value once. To do this, it stores the preload values in a
+     matrix of dimensions [shape_masked_pixels_y, shape_masked_pixels_x, 2], where `shape_masked_pixels` is the (y,x)
+     size of the vertical and horizontal extent of unmasked pixels, e.g. the spatial extent over which the real space
+     grid extends.
+
+     Each entry in the matrix `nufft_precision_operator[:,:,0]` provides the the precomputed NUFFT value mapping an image pixel
+     to a pixel offset by that much in the y and x directions, for example:
+
+     - nufft_precision_operator[0,0,0] gives the precomputed values of image pixels that are offset in the y direction by 0 and
+       in the x direction by 0 - the values of pixels paired with themselves.
+     - nufft_precision_operator[1,0,0] gives the precomputed values of image pixels that are offset in the y direction by 1 and
+       in the x direction by 0 - the values of pixel pairs [0,3], [1,4], [2,5], [3,6], [4,7] and [5,8]
+     - nufft_precision_operator[0,1,0] gives the precomputed values of image pixels that are offset in the y direction by 0 and
+       in the x direction by 1 - the values of pixel pairs [0,1], [1,2], [3,4], [4,5], [6,7] and [7,9].
+
+     Flipped pairs:
+
+     The above preloaded values pair all image pixel NUFFT values when a pixel is to the right and / or down of the
+     first image pixel. However, one must also precompute pairs where the paired pixel is to the left of the host
+     pixels. These pairings are stored in `nufft_precision_operator[:,:,1]`, and the ordering of these pairings is flipped in the
+     x direction to make it straight forward to use this matrix when computing the nufft weighted noise.
+
+    Notes
+    -----
+    Three builders compute the same array; `method` selects which:
+
+    - `"nufft"` (default) -- `nufft_precision_operator_via_nufft_from`, the type-1
+      (adjoint) NUFFT. `O(K*nspread^2 + M log M)` for `M = 4*Ny*Nx`, i.e. seconds
+      where the brute-force builders take minutes to hours. Needs `nufftax`.
+    - `"numpy"` -- `nufft_precision_operator_via_np_from`, the brute-force
+      `O(N_pix*K)` reference builder. Kept as the reference the NUFFT builder is
+      pinned against, and used as the fallback below.
+    - `"jax"` -- `nufft_precision_operator_via_jax_from`, the same brute force on
+      JAX. `method="jax"` is the explicit way to ask for it.
+
+    `use_jax` is only honoured when a brute-force method is selected: it upgrades
+    `method="numpy"` to `method="jax"` and is otherwise ignored. Under the default
+    `method="nufft"` it does nothing, because the NUFFT already runs on JAX -- an
+    existing `use_jax=True` caller therefore keeps the fast path rather than being
+    demoted to the `O(N_pix*K)` brute force.
+
+    Two fallbacks to `"numpy"` are taken, both logged loudly (never silently),
+    because they cost `O(N_pix*K)` where the NUFFT is `O(K*nspread^2 + M log M)`:
+
+    1. `disable_jax()` is true (`PYAUTO_DISABLE_JAX=1`, the test-mode kill switch).
+       Both `"nufft"` and `"jax"` run on JAX, so both are demoted.
+    2. `nufftax` is not importable, so `"nufft"` cannot run.
+
+    Any other `method` raises `ValueError`.
+
+    Parameters
+    ----------
+    noise_map_real
+        The real noise-map values of the interferometer data
+    uv_wavelengths
+        The wavelengths of the coordinates in the uv-plane for the interferometer dataset that is to be Fourier
+        transformed.
+    shape_masked_pixels_2d
+        The (y,x) shape corresponding to the extent of unmasked pixels that go vertically and horizontally across the
+        mask.
+    grid_radians_2d
+        The 2D (y,x) grid of coordinates in radians corresponding to real-space mask within which the image that is
+        Fourier transformed is computed.
+    method
+        Which builder computes the operator: `"nufft"` (default), `"numpy"` or `"jax"`.
+    eps
+        The requested NUFFT precision, used by `method="nufft"` only.
+    chunk_size
+        The visibility chunk size of the NUFFT builder (a memory ceiling, not an
+        optimisation), used by `method="nufft"` only. `None` is one shot.
+    chunk_k
+        The visibility chunk size of the two brute-force builders.
+    use_jax
+        Only honoured when a brute-force method is selected: `method="numpy"` with
+        `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). It is
+        ignored under the default `method="nufft"`, which already runs on JAX.
+    """
+    if method == "numpy" and use_jax:
+        method = "jax"
+
+    if method not in ("nufft", "numpy", "jax"):
+        raise ValueError(
+            f"nufft_precision_operator_from: unknown method {method!r}. "
+            'Use "nufft" (the default type-1 NUFFT builder), "numpy" or "jax" (the '
+            "brute-force reference builders)."
+        )
+
+    if method in ("nufft", "jax") and disable_jax():
+        logger.warning(
+            f"INTERFEROMETER - `PYAUTO_DISABLE_JAX=1` is set, so the NUFFT precision "
+            f"operator cannot be built with method={method!r} (both the NUFFT and the "
+            f"JAX brute force run on JAX). Falling back to the NumPy brute force, which "
+            f"is O(N_pix * K) rather than O(K * nspread^2 + M log M) and can take "
+            f"minutes to hours on a real dataset."
+        )
+        method = "numpy"
+
+    if method == "nufft" and _load_nufftax() is None:
+        logger.warning(
+            "INTERFEROMETER - `nufftax` is not installed, so the NUFFT precision "
+            "operator cannot be built with the type-1 NUFFT. Falling back to the NumPy "
+            "brute force, which is O(N_pix * K) rather than O(K * nspread^2 + M log M) "
+            "and can take minutes to hours on a real dataset. Install it via "
+            "`pip install nufftax`."
+        )
+        method = "numpy"
+
+    if method == "nufft":
+        return nufft_precision_operator_via_nufft_from(
+            noise_map_real=noise_map_real,
+            uv_wavelengths=uv_wavelengths,
+            shape_masked_pixels_2d=shape_masked_pixels_2d,
+            grid_radians_2d=grid_radians_2d,
+            eps=eps,
+            chunk_size=chunk_size,
+        )
+
+    if method == "jax":
+        return nufft_precision_operator_via_jax_from(
+            noise_map_real=noise_map_real,
+            uv_wavelengths=uv_wavelengths,
+            shape_masked_pixels_2d=shape_masked_pixels_2d,
+            grid_radians_2d=grid_radians_2d,
+            chunk_k=chunk_k,
+        )
+
+    return nufft_precision_operator_via_np_from(
+        noise_map_real=noise_map_real,
+        uv_wavelengths=uv_wavelengths,
+        shape_masked_pixels_2d=shape_masked_pixels_2d,
+        grid_radians_2d=grid_radians_2d,
+        chunk_k=chunk_k,
+        show_progress=show_progress,
+        show_memory=show_memory,
+    )
+
+
+def _pixel_scale_radians_from(grid_radians_2d: np.ndarray) -> float:
+    """
+    Returns the pixel scale in radians, `delta_rad`, read off the radian grid as an
+    adjacent-pixel difference.
+
+    It is taken from the grid rather than from `mask.pixel_scales` because the grid is what
+    the brute-force builders difference to get their `dx` / `dy`: deriving it any other way
+    would let a unit or half-pixel convention drift in between the two implementations that
+    have to agree exactly.
+
+    Square pixels are asserted rather than handled. Every interferometer preset is square,
+    the `[2Ny, 2Nx]` offset grid has a single mode spacing per axis by construction, and a
+    rectangular-pixel dataset would silently produce a *plausible* wrong operator.
+
+    Parameters
+    ----------
+    grid_radians_2d
+        The 2D (y,x) native grid of coordinates in radians, shape `[ny, nx, 2]`.
+    """
+    grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
+
+    if grid_radians_2d.ndim != 3 or grid_radians_2d.shape[-1] != 2:
+        raise ValueError(
+            f"grid_radians_2d must be [ny, nx, 2] native; got {grid_radians_2d.shape}."
+        )
+
+    n_y, n_x = grid_radians_2d.shape[:2]
+
+    if n_y < 2 or n_x < 2:
+        raise ValueError(
+            "grid_radians_2d must be at least 2x2 for the pixel scale to be read off as an "
+            f"adjacent-pixel difference; got {(n_y, n_x)}."
+        )
+
+    # Native y decreases down the rows, x increases along the columns.
+    delta_y = float(grid_radians_2d[0, 0, 0] - grid_radians_2d[1, 0, 0])
+    delta_x = float(grid_radians_2d[0, 1, 1] - grid_radians_2d[0, 0, 1])
+
+    if not np.isclose(delta_y, delta_x, rtol=1.0e-12, atol=0.0):
+        raise ValueError(
+            "The NUFFT precision operator requires square pixels: the radian grid's row "
+            f"spacing {delta_y!r} and column spacing {delta_x!r} differ."
+        )
+
+    return delta_x
+
+
+def _add_ifftshifted(out: np.ndarray, block: np.ndarray) -> None:
+    """
+    `out += np.fft.ifftshift(block)` for a 2D `block` with even axis lengths, without
+    materialising the shifted copy.
+
+    For an even length `L` the shift moves index `n` to `(n + L / 2) % L`, i.e. it swaps the
+    two halves of each axis, so the sum is four quadrant-wise in-place adds. This is what lets
+    a fine grid of hundreds of MB be accumulated across chunks with no second full-size
+    buffer per chunk.
+    """
+    n_rows, n_cols = block.shape
+
+    if n_rows % 2 or n_cols % 2:
+        raise ValueError(
+            f"_add_ifftshifted needs even axis lengths; got {block.shape}."
+        )
+
+    h, c = n_rows // 2, n_cols // 2
+
+    out[:h, :c] += block[h:, c:]
+    out[:h, c:] += block[h:, :c]
+    out[h:, :c] += block[:h, c:]
+    out[h:, c:] += block[:h, :c]
+
+
+def _type1_real_grid_from(
+    uv_wavelengths: np.ndarray,
+    values: np.ndarray,
+    n_modes: Tuple[int, int],
+    pixel_scale_radians: float,
+    *,
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
+    centred: bool = False,
+    zero_nyquist: bool = False,
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    The real part of a **type-1 (adjoint) NUFFT** of per-visibility `values` onto a regular
+    grid of spacing `pixel_scale_radians`:
+
+        G[m2, m1] = Re sum_k c_k exp(i(-m1 * x_k + m2 * y_k)),
+        x_k = 2 pi u_k pixel_scale_radians,  y_k = 2 pi v_k pixel_scale_radians,
+
+    on the `(n_modes[1], n_modes[0])` mode grid (`nufftax.nufft2d1` argument order,
+    `(N_x, N_y)`). This is the core of `nufft_precision_operator_via_nufft_from` (where
+    `c = w`, the real weights, and the `(-x, +y)` sign is pinned against the brute force), lifted
+    out so that the same transform can be evaluated on grids finer than the image pixel
+    (`sparse_terms_from_chunks(oversample=q)` passes `pixel_scale_radians / q`).
+
+    For a real `c` (the weights) `G` is `sum_k w_k cos(...)`, even in `(m1, m2)`, so its sign
+    convention is immaterial. For a complex `c` it is not: passing `conj(c)` gives
+    `Re sum_k c_k exp(i(m1 * x_k - m2 * y_k))`, i.e. the dirty image at `x = +m1 * delta`,
+    `y = -m2 * delta` -- autoarray's native orientation (`x` along the columns, `y` decreasing
+    down the rows).
+
+    Parameters
+    ----------
+    uv_wavelengths
+        `[K, 2]` `(u, v)` baselines in wavelengths.
+    values
+        `[K]` real or complex per-visibility values `c_k`.
+    n_modes
+        `(N_x, N_y)`, the grid's column and row counts.
+    pixel_scale_radians
+        The grid spacing in radians.
+    eps
+        The requested NUFFT precision (peak-scaled; see `nufft_precision_operator_via_nufft_from`).
+    chunk_size
+        Cap on the visibilities passed to `nufft2d1` in one call (a memory ceiling), or `None`
+        for one shot. The transform is linear in `c`, so the chunks' transforms are summed.
+    centred
+        If `True` the grid is returned in the centred order `nufft2d1` produces (mode 0 at
+        index `N // 2`); if `False` it is `ifftshift`-ed to wraparound order (mode 0 at index 0,
+        negative modes at negative indices), which needs even `N_x`, `N_y`.
+    zero_nyquist
+        If `True` the Nyquist row and column (mode `-N / 2`, at index `N / 2` in wraparound order
+        and `0` in centred order) are set to zero, as `W~` requires.
+    out
+        If given, the grid is **added** in place into this float64 array (shape `(N_y, N_x)`),
+        which is returned; nothing of the grid's size is allocated beyond `nufft2d1`'s own output
+        and its real part per chunk. This is how `sparse_terms_from_chunks` accumulates the
+        fine grids across a stream. If `None` a new array is returned.
+
+    Returns
+    -------
+    np.ndarray
+        `[N_y, N_x]` float64.
+    """
+    nufftax = _load_nufftax()
+
+    if nufftax is None:
+        nufftax_exception()
+
+    import jax.numpy as jnp
+
+    uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
+
+    # The transformer's own scaled frequencies.
+    x = 2.0 * np.pi * uv_wavelengths[:, 0] * pixel_scale_radians
+    y = 2.0 * np.pi * uv_wavelengths[:, 1] * pixel_scale_radians
+
+    n_x, n_y = (int(n) for n in n_modes)
+    n_modes = (n_x, n_y)
+    total_visibilities = int(x.shape[0])
+
+    if chunk_size is None or chunk_size >= total_visibilities:
+        chunk_size = total_visibilities
+
+    if chunk_size <= 0:
+        raise ValueError(
+            f"chunk_size must be a positive integer or None, got {chunk_size}."
+        )
+
+    if out is not None and out.shape != (n_y, n_x):
+        raise ValueError(
+            f"_type1_real_grid_from: out has shape {out.shape}, expected {(n_y, n_x)}."
+        )
+
+    if out is None:
+        # Only Re(f) is ever used, so each chunk's real part is accumulated in float64 and the
+        # complex block is released before the next one is spread.
+        real_modes = np.zeros((n_y, n_x), dtype=np.float64)
+    elif centred:
+        real_modes = out
+    else:
+        real_modes = None
+
+    for k0 in range(0, total_visibilities, chunk_size):
+        k1 = min(total_visibilities, k0 + chunk_size)
+
+        f = nufftax.nufft2d1(
+            jnp.asarray(-x[k0:k1]),
+            jnp.asarray(y[k0:k1]),
+            jnp.asarray(values[k0:k1], dtype=jnp.complex128),
+            n_modes,
+            eps,
+            1,
+        )
+
+        if real_modes is not None:
+            real_modes += np.asarray(np.real(f), dtype=np.float64)
+        else:
+            _add_ifftshifted(out, np.asarray(np.real(f), dtype=np.float64))
+
+        del f
+
+    if out is None:
+        grid = (
+            real_modes
+            if centred
+            else np.ascontiguousarray(np.fft.ifftshift(real_modes))
+        )
+    else:
+        grid = out
+
+    if zero_nyquist:
+        row, col = (0, 0) if centred else (n_y // 2, n_x // 2)
+
+        grid[row, :] = 0.0
+        grid[:, col] = 0.0
+
+    return grid
+
+
+def nufft_precision_operator_via_nufft_from(
+    noise_map_real: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    shape_masked_pixels_2d,
+    grid_radians_2d: np.ndarray,
+    *,
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Returns the `W~` precision operator built as the real part of a **type-1 (adjoint)
+    NUFFT**.
+
+    Same signature family and same return value as the brute-force builders
+    `nufft_precision_operator_via_np_from` / `..._via_jax_from`, but `O(K * nspread^2 +
+    M log M)` instead of `O(N_pix * K)`, where `M = 4 * Ny * Nx` is the doubled offset
+    grid. At ALMA scale (`K = 1e6`, `N_pix = 15380`) that is the difference between
+    ~35 minutes and ~7 seconds.
+
+    The construction
+    ----------------
+    The brute-force builders compute, over the mask's bounding extent
+    `(Ny, Nx) = shape_native_masked_pixels`:
+
+        P[i, j] = sum_k w_k cos(2 pi (dx * u_k + dy * v_k)),   w_k = 1 / sigma_k^2
+
+    with `dx = -j * delta_rad` and `dy = +i * delta_rad` on autoarray's radian grid
+    (native `y` *decreases* down the rows, `x` increases along the columns), the four
+    quadrants filled from the four corners so that offset `0` sits at `[0, 0]` and
+    negative offsets sit at negative indices (wraparound / FFT ordering), with the middle
+    row `Ny` and column `Nx` left zero as padding.
+
+    Writing `x_k = 2 pi u_k delta_rad` and `y_k = 2 pi v_k delta_rad` -- the transformer's
+    own scaled frequencies -- that is exactly
+
+        P[i, j] = Re sum_k w_k exp(i(-j * x_k + i * y_k))
+
+    i.e. the real part of a type-1 NUFFT of the weights onto the `(2Ny, 2Nx)` mode grid.
+    `nufftax.nufft2d1(x, y, c, n_modes=(N1, N2), eps, isign)` returns
+    `f[m2, m1] = sum_k c_k exp(isign * i(m1 * x_k + m2 * y_k))` on the **centred** mode
+    grid, shape `(N2, N1)`, so the mapping is
+
+        f = nufft2d1(-x, y, w, n_modes=(2Nx, 2Ny), eps, isign=+1)
+        P = ifftshift(Re f);  P[Ny, :] = 0;  P[:, Nx] = 0
+
+    Why this mapping and not one of the other seven
+    -----------------------------------------------
+    Pinned empirically against `nufft_precision_operator_via_np_from`. Of the eight
+    candidates (axis swap x sign of `x` x sign of `y`) exactly two agree with the brute
+    force -- `(-x, +y)` above and `(+x, -y)` -- at `max|delta| = 1.7e-17`, i.e. `8.7e-14`
+    of the peak `P[0, 0]`. The other six are wrong by `2.1e-1` of the peak, so the
+    identification is not marginal: the discrimination is thirteen orders of magnitude.
+
+    The two survivors are the *same* construction: `w` is real, so `f(-x, +y)` and
+    `f(+x, -y)` are complex conjugates and their real parts are identical. `(-x, +y)` is
+    kept because it reads off the formula above term by term. That degeneracy is also why
+    `P[i, j] == P[-i, -j]` (cosine evenness) holds -- pinned separately.
+
+    `ifftshift` vs `fftshift` is likewise not a choice here: both axes have even length
+    `2N`, and for even `N` the two shifts are the same permutation. The canonical
+    `ifftshift` (centred -> wraparound) is used because that is the direction the transform
+    actually goes.
+
+    The padding row / column is at index `Ny` / `Nx`, not `Ny - 1` / `Nx - 1`: after
+    `ifftshift`, index `Ny` carries mode `-Ny`, the Nyquist mode, which the brute force
+    never evaluates (its quadrants span offsets `-(Ny - 1) ... Ny - 1`). The NUFFT *does*
+    return a value there, so it is zeroed explicitly.
+
+    Accuracy
+    --------
+    `eps` is the NUFFT's requested precision and its error bound is **peak-scaled**, not
+    elementwise-relative: a type-1 NUFFT bounds `max|delta|` against `sum_k |c_k|`, so the
+    near-zero entries of `P` -- five orders below its peak -- carry no relative accuracy
+    guarantee at all. `eps = 1e-12` saturates fp64 at every instrument profiled: the
+    measured `max|delta| = 1.7e-17` is already the round-off floor (`eps = 1e-14` only
+    reaches `1.4e-17`), yet the worst *elementwise* relative error is `6.0e-10` on 32 of
+    19600 entries. A pin against this builder must therefore be **mixed** --
+    `rtol = 1e-10` with `atol = 1e-10 * P[0, 0]` -- never `rtol` with `atol = 0`.
+
+    Chunking is mandatory at scale
+    ------------------------------
+    `chunk_size` is not an optimisation, it is a memory ceiling -- the same one
+    `TransformerNUFFT` carries as its own `chunk_size`. The spreader's gather buffer is
+    `K * nspread^2` complex128; at `eps = 1e-12`, `nspread ~ 14`, so `K = 1e6` needs ~3 GB
+    and `K = 5e6` needs ~15 GB, which is where an unchunked call on a 15 GB machine is
+    killed by the OOM reaper rather than returning slowly. Use the instrument's own
+    transformer chunk size. The transform is linear in the weights, so the chunks'
+    transforms are summed and the result is the same array (to summation order).
+
+    A caveat on the timings quoted above: they are **CPU** seconds. The saving is in the
+    algorithm, not the backend -- the brute force is `O(N_pix * K)` whatever it runs on.
+
+    Parameters
+    ----------
+    noise_map_real
+        `[K]` real noise-map values of the interferometer data; `w = 1 / sigma^2`.
+    uv_wavelengths
+        `[K, 2]` `(u, v)` baselines in wavelengths.
+    shape_masked_pixels_2d
+        `(Ny, Nx)`, the mask's bounding extent (`mask.shape_native_masked_pixels`).
+    grid_radians_2d
+        `[ny, nx, 2]` native `(y, x)` grid in radians. Only its pixel spacing is used, so
+        the full native grid and the extent sub-grid give the same answer.
+    eps
+        The requested NUFFT precision.
+    chunk_size
+        Cap on the visibilities passed to `nufft2d1` in one call, or `None` for one shot.
+
+    Returns
+    -------
+    np.ndarray
+        `[2Ny, 2Nx]` float64, wraparound-ordered, with the padding row / column zero.
+    """
+    noise_map_real = np.asarray(noise_map_real, dtype=np.float64)
+    uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
+    grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
+
+    y_shape, x_shape = (int(s) for s in shape_masked_pixels_2d)
+
+    pixel_scale_radians = _pixel_scale_radians_from(grid_radians_2d)
+
+    w = 1.0 / (noise_map_real**2)
+
+    return _type1_real_grid_from(
+        uv_wavelengths,
+        w,
+        (2 * x_shape, 2 * y_shape),
+        pixel_scale_radians,
+        eps=eps,
+        chunk_size=chunk_size,
+        centred=False,
+        zero_nyquist=True,
+    )
+
+
+def nufft_precision_operator_via_np_from(
+    noise_map_real: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    shape_masked_pixels_2d,
+    grid_radians_2d: np.ndarray,
+    *,
+    chunk_k: int = 2048,
+    show_progress: bool = False,
+    show_memory: bool = False,
+) -> np.ndarray:
+    """
+    NumPy/CPU implementation of the interferometer W-tilde curvature preload.
+
+    See `nufft_precision_operator_from` for full description.
+    """
+    if chunk_k <= 0:
+        raise ValueError("chunk_k must be a positive integer")
+
+    noise_map_real = np.asarray(noise_map_real, dtype=np.float64)
+    uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
+    grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
+
+    y_shape, x_shape = shape_masked_pixels_2d
+    grid = grid_radians_2d[:y_shape, :x_shape]
+    gy = grid[..., 0]
+    gx = grid[..., 1]
+
+    K = uv_wavelengths.shape[0]
+    n_chunks = (K + chunk_k - 1) // chunk_k
+
+    w = 1.0 / (noise_map_real**2)
+    ku = 2.0 * np.pi * uv_wavelengths[:, 0]
+    kv = 2.0 * np.pi * uv_wavelengths[:, 1]
+
+    translation_invariant_kernel = np.zeros(
+        (2 * y_shape, 2 * x_shape), dtype=np.float64
+    )
+
+    # Corner coordinates
+    y00, x00 = gy[0, 0], gx[0, 0]
+    y0m, x0m = gy[0, x_shape - 1], gx[0, x_shape - 1]
+    ym0, xm0 = gy[y_shape - 1, 0], gx[y_shape - 1, 0]
+    ymm, xmm = gy[y_shape - 1, x_shape - 1], gx[y_shape - 1, x_shape - 1]
+
+    # -------------------------------------------------
+    # Set up a single global progress bar
+    # -------------------------------------------------
+    pbar = None
+    if show_progress:
+
+        from tqdm import tqdm  # type: ignore
+
+        n_quadrants = 1
+        if x_shape > 1:
+            n_quadrants += 1
+        if y_shape > 1:
+            n_quadrants += 1
+        if (y_shape > 1) and (x_shape > 1):
+            n_quadrants += 1
+
+        pbar = tqdm(
+            total=n_chunks * n_quadrants,
+            desc="Accumulating visibilities (W-tilde preload)",
+        )
+
+    def accum_from_corner_np(y_ref, x_ref, gy_block, gx_block):
+        dy = y_ref - gy_block
+        dx = x_ref - gx_block
+
+        acc = np.zeros(gy_block.shape, dtype=np.float64)
+
+        for k0 in range(0, K, chunk_k):
+            k1 = min(K, k0 + chunk_k)
+
+            phase = dx[..., None] * ku[k0:k1] + dy[..., None] * kv[k0:k1]
+            acc += np.sum(np.cos(phase) * w[k0:k1], axis=2)
+
+            if pbar is not None:
+                pbar.update(1)
+
+            if show_memory and show_progress and "_report_memory" in globals():
+                globals()["_report_memory"](acc)
+
+        return acc
+
+    # -----------------------------
+    # Main quadrant (+,+)
+    # -----------------------------
+    translation_invariant_kernel[:y_shape, :x_shape] = accum_from_corner_np(
+        y00, x00, gy, gx
+    )
+
+    # -----------------------------
+    # Flip in x (+,-)
+    # -----------------------------
+    if x_shape > 1:
+        block = accum_from_corner_np(y0m, x0m, gy[:, ::-1], gx[:, ::-1])
+        translation_invariant_kernel[:y_shape, -1:-(x_shape):-1] = block[:, 1:]
+
+    # -----------------------------
+    # Flip in y (-,+)
+    # -----------------------------
+    if y_shape > 1:
+        block = accum_from_corner_np(ym0, xm0, gy[::-1, :], gx[::-1, :])
+        translation_invariant_kernel[-1:-(y_shape):-1, :x_shape] = block[1:, :]
+
+    # -----------------------------
+    # Flip in x and y (-,-)
+    # -----------------------------
+    if (y_shape > 1) and (x_shape > 1):
+        block = accum_from_corner_np(ymm, xmm, gy[::-1, ::-1], gx[::-1, ::-1])
+        translation_invariant_kernel[-1:-(y_shape):-1, -1:-(x_shape):-1] = block[1:, 1:]
+
+    if pbar is not None:
+        pbar.close()
+
+    return translation_invariant_kernel
+
+
+def nufft_precision_operator_via_jax_from(
+    noise_map_real: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    shape_masked_pixels_2d,
+    grid_radians_2d: np.ndarray,
+    *,
+    chunk_k: int = 2048,
+) -> np.ndarray:
+    """
+    JAX implementation of the interferometer W-tilde curvature preload.
+
+    This version is intended for performance (CPU/GPU/TPU) and therefore:
+      - uses JIT compilation internally
+      - uses a compiled for-loop (lax.fori_loop) over fixed-size visibility chunks
+      - does not support progress bars or memory reporting (those require Python loops)
+
+    See `nufft_precision_operator_from` for full description.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    if chunk_k <= 0:
+        raise ValueError("chunk_k must be a positive integer")
+
+    y_shape, x_shape = shape_masked_pixels_2d
+
+    # Device arrays; keep float64 to match NumPy path as closely as possible.
+    noise_map_real_x = jnp.asarray(noise_map_real, dtype=jnp.float64)
+    uv_wavelengths_x = jnp.asarray(uv_wavelengths, dtype=jnp.float64)
+    grid_radians_2d_x = jnp.asarray(grid_radians_2d, dtype=jnp.float64)
+
+    # Precompute weights and angular frequencies on device
+    w_x = 1.0 / (noise_map_real_x**2)
+    ku_x = 2.0 * jnp.pi * uv_wavelengths_x[:, 0]
+    kv_x = 2.0 * jnp.pi * uv_wavelengths_x[:, 1]
+
+    grid = grid_radians_2d_x[:y_shape, :x_shape]
+    gy = grid[..., 0]
+    gx = grid[..., 1]
+
+    # -----------------------------
+    # IMPORTANT: pad so dynamic_slice(chunk_k) is always legal
+    # -----------------------------
+    K = int(uv_wavelengths_x.shape[0])  # known at trace/compile time
+    n_chunks = (K + chunk_k - 1) // chunk_k
+    K_pad = n_chunks * chunk_k
+    pad_len = K_pad - K
+
+    if pad_len > 0:
+        ku_x = jnp.pad(ku_x, (0, pad_len))
+        kv_x = jnp.pad(kv_x, (0, pad_len))
+        w_x = jnp.pad(w_x, (0, pad_len))
+
+    # A fixed [chunk_k] index vector used to mask the padded tail (last chunk).
+    idx = jnp.arange(chunk_k)
+
+    def _compute_all_quadrants(gy, gx, *, chunk_k: int):
+        # Corner coordinates
+        y00, x00 = gy[0, 0], gx[0, 0]
+        y0m, x0m = gy[0, x_shape - 1], gx[0, x_shape - 1]
+        ym0, xm0 = gy[y_shape - 1, 0], gx[y_shape - 1, 0]
+        ymm, xmm = gy[y_shape - 1, x_shape - 1], gx[y_shape - 1, x_shape - 1]
+
+        def accum_from_corner_jax(y_ref, x_ref, gy_block, gx_block):
+            dy = y_ref - gy_block
+            dx = x_ref - gx_block
+
+            acc = jnp.zeros(gy_block.shape, dtype=jnp.float64)
+
+            def body(i, acc_):
+                k0 = i * chunk_k
+
+                # Always legal because ku_x/kv_x/w_x were padded to length K_pad.
+                ku_s = jax.lax.dynamic_slice(ku_x, (k0,), (chunk_k,))
+                kv_s = jax.lax.dynamic_slice(kv_x, (k0,), (chunk_k,))
+                w_s = jax.lax.dynamic_slice(w_x, (k0,), (chunk_k,))
+
+                # Mask the padded tail (only the first K entries are real).
+                valid = (idx + k0) < K
+                w_s = jnp.where(valid, w_s, 0.0)
+
+                phase = (
+                    dx[..., None] * ku_s[None, None, :]
+                    + dy[..., None] * kv_s[None, None, :]
+                )
+                return acc_ + jnp.sum(jnp.cos(phase) * w_s[None, None, :], axis=2)
+
+            return jax.lax.fori_loop(0, n_chunks, body, acc)
+
+        out = jnp.zeros((2 * y_shape, 2 * x_shape), dtype=jnp.float64)
+
+        # (+,+)
+        out = out.at[:y_shape, :x_shape].set(accum_from_corner_jax(y00, x00, gy, gx))
+
+        # (+,-) x-flip
+        if x_shape > 1:
+            block = accum_from_corner_jax(y0m, x0m, gy[:, ::-1], gx[:, ::-1])
+            out = out.at[:y_shape, -1:-(x_shape):-1].set(block[:, 1:])
+
+        # (-,+) y-flip
+        if y_shape > 1:
+            block = accum_from_corner_jax(ym0, xm0, gy[::-1, :], gx[::-1, :])
+            out = out.at[-1:-(y_shape):-1, :x_shape].set(block[1:, :])
+
+        # (-,-) x- and y-flip
+        if (y_shape > 1) and (x_shape > 1):
+            block = accum_from_corner_jax(ymm, xmm, gy[::-1, ::-1], gx[::-1, ::-1])
+            out = out.at[-1:-(y_shape):-1, -1:-(x_shape):-1].set(block[1:, 1:])
+
+        return out
+
+    _compute_all_quadrants_jit = jax.jit(
+        _compute_all_quadrants, static_argnames=("chunk_k",)
+    )
+
+    t0 = time.time()
+    translation_invariant_kernel = _compute_all_quadrants_jit(gy, gx, chunk_k=chunk_k)
+    translation_invariant_kernel.block_until_ready()  # ensure timing includes actual device execution
+    t1 = time.time()
+
+    logger.info("INTERFEROMETER - Finished W-Tilde (JAX) in %.3f seconds", (t1 - t0))
+
+    return np.asarray(translation_invariant_kernel)
+
+
+def nufft_weighted_noise_via_sparse_operator_from(
+    translation_invariant_kernel, native_index_for_slim_index
+):
+    """
+    Use the `translation_invariant_kernel` (see `nufft_precision_operator_from`) to compute
+    the `nufft_weighted_noise` efficiently.
+
+    Parameters
+    ----------
+    translation_invariant_kernel
+        The preloaded translation invariant values of the NUFFT that enable efficient computation of the
+        NUFFT weighted noise matrix.
+    native_index_for_slim_index
+        An array of shape [total_unmasked_pixels*sub_size] that maps every unmasked sub-pixel to its corresponding
+        native 2D pixel using its (y,x) pixel indexes.
+
+    Returns
+    -------
+    ndarray
+        A matrix that encodes the NUFFT values between the noise map that enables efficient calculation of the curvature
+        matrix.
+    """
+
+    slim_size = len(native_index_for_slim_index)
+
+    nufft_weighted_noise = np.zeros((slim_size, slim_size))
+
+    for i in range(slim_size):
+        i_y, i_x = native_index_for_slim_index[i]
+
+        for j in range(i, slim_size):
+            j_y, j_x = native_index_for_slim_index[j]
+
+            y_diff = j_y - i_y
+            x_diff = j_x - i_x
+
+            nufft_weighted_noise[i, j] = translation_invariant_kernel[y_diff, x_diff]
+
+    for i in range(slim_size):
+        for j in range(i, slim_size):
+            nufft_weighted_noise[j, i] = nufft_weighted_noise[i, j]
+
+    return nufft_weighted_noise
+
+
+@dataclass(frozen=True)
+class InterferometerSparseOperator:
+    """
+    Fully static FFT / geometry state for W~ curvature.
+
+    Safe to cache as long as:
+      - nufft_precision_operator is fixed
+      - mask / rectangle definition is fixed
+      - dtype is fixed
+      - batch_size is fixed
+
+    Precondition
+    ------------
+    The `nufft_precision_operator` this state is built from encodes `W~ = Re(F^H W F)` for a
+    single real-valued noise weighting, computed from the real-part noise sigma alone. It is
+    therefore exact only for datasets where every visibility has equal real and imaginary
+    noise sigma (`sigma_real == sigma_imag`); with unequal sigmas the curvature matrix
+    assembled here silently disagrees with the dense `InversionInterferometerMapping` path.
+    `Interferometer.apply_sparse_operator` enforces this precondition and raises a
+    `DatasetException` when it is violated.
+    """
+
+    nufft_precision_operator: np.ndarray  # (2y, 2x) real preload
+    dirty_image: np.ndarray
+    y_shape: int
+    x_shape: int
+    M: int
+    batch_size: int
+    w_dtype: np.dtype
+    data_term: Optional[float] = None
+    noise_normalization: Optional[float] = None
+    primary_beam_slim: Optional[np.ndarray] = None
+    """
+    Cached FFT operator state for fast interferometer curvature-matrix assembly.
+
+    This class packages *static* quantities needed to apply the interferometer
+    W~ operator efficiently using FFTs, so that repeated likelihood evaluations
+    do not redo expensive precomputation.
+
+    Conceptually, the interferometer W~ operator is a translationally-invariant
+    linear operator on a rectangular real-space grid, constructed from the
+    `nufft_precision_operator` (a 2D array of correlation values on pixel offsets).
+    By taking an FFT of this preload, the operator can be applied to batches of
+    images via elementwise multiplication in Fourier space:
+
+        apply_W(F) = IRFFT( RFFT(F_pad) * Khat )
+
+    where `F_pad` is a (2y, 2x) padded version of `F` and
+    `Khat = rfft2(nufft_precision_operator)`.
+
+    The curvature matrix for a pixelization (mapper) is then assembled from sparse
+    mapping triplets without forming dense mapping matrices:
+
+        C = A^T W A
+
+    where A is the sparse mapping from source pixels to image pixels.
+
+    Caching / validity
+    ------------------
+    Instances are safe to cache and reuse as long as all of the following remain fixed:
+
+    - `nufft_precision_operator` (hence `Khat`)
+    - the definition of the rectangular FFT grid (y_shape, x_shape)
+    - dtype / precision (float32 vs float64)
+    - `batch_size`
+
+    Backends
+    --------
+    Every public method takes an `xp` array module and branches on it: `xp=jnp` runs the
+    JAX bodies (`lax.fori_loop`, `segment_sum`, `dynamic_update_slice`), `xp=np` (the
+    default) runs NumPy/scipy bodies (`scipy.fft`, `scipy.sparse`, a Python block loop).
+    The two agree to floating-point round-off, and the backend follows the *inversion's*
+    `xp` — the dataset's `use_jax` kwarg only selects a brute-force builder for the
+    preload, never the application path.
+
+    The JAX-only state (`Khat`, `col_offsets`) is therefore built lazily, so an operator
+    constructed and applied under `xp=np` never imports JAX.
+
+    Parameters stored
+    -----------------
+    nufft_precision_operator
+        The raw real-valued (2y_shape, 2x_shape) preload the operator is built from, kept
+        (rather than discarded after the FFT) because the NumPy and numba CPU paths index
+        it directly and it is small.
+    dirty_image
+        Convenience field for associated dirty image data (not used directly in
+        curvature assembly in this method). Stored as a NumPy array to match
+        upstream interfaces.
+    y_shape, x_shape
+        Shape of the *rectangular* real-space grid (not the masked slim grid).
+    M
+        Number of rectangular pixels, M = y_shape * x_shape.
+    batch_size
+        Number of source-pixel columns assembled and operated on per block.
+        Larger batch sizes improve throughput on GPU but increase memory usage.
+    w_dtype
+        Floating-point dtype for weights and accumulations (e.g. float64).
+    data_term
+        The scalar `sum(d_r^2 / sigma_r^2) + sum(d_i^2 / sigma_i^2)` of the visibilities the
+        operator was built from, i.e. `d^T N^-1 d`. When set, `fast_chi_squared` of an
+        inversion whose interface `data` is `None` uses it for its third term, so the
+        likelihood never reduces over the visibility arrays. `None` for an operator built
+        without it (e.g. a directly constructed one); callers then fall back to the array
+        reduction.
+    noise_normalization
+        The scalar `sum(log(2 pi sigma_r^2)) + sum(log(2 pi sigma_i^2))` of the same
+        visibilities, equal to `fit_util.noise_normalization_complex_from(noise_map)`. When
+        set, `FitInterferometer.noise_normalization` reads it instead of reducing over the
+        noise-map every likelihood call. `None` falls back to the array reduction.
+    primary_beam_slim
+        The primary beam `P` of the dataset on the slim masked real-space grid, or `None`. The
+        operator itself (`W~`, the dirty image and both scalars) is independent of `P`; the
+        sparse inversion reads it to form the beamed response `A' = P A`, giving the curvature
+        matrix `A^T P W~ P A` and data vector `A^T P d~`, and `sparse_profile_terms_from`
+        applies it to profile images.
+
+    Cached properties
+    -----------------
+    Khat
+        Real FFT of the curvature preload, shape (2y_shape, x_shape + 1), complex, as a
+        JAX array. The frequency-domain representation of the W~ operator kernel used by
+        the JAX branch. Computed on first access, so it never imports JAX for a NumPy run.
+    khat_np
+        The same transform via `scipy.fft.rfft2`, used by the NumPy branch.
+    col_offsets
+        `(batch_size,)` int32 JAX column indices used to mask the final partial block of
+        the JAX branch's `fori_loop`.
+    """
+
+    @cached_property
+    def Khat(self):
+        """
+        The `rfft2` of the preload as a JAX array, of shape (2y_shape, x_shape + 1).
+
+        Lazy so that constructing the operator, and applying it with `xp=np`, never
+        imports JAX. `functools.cached_property` writes straight into the instance
+        `__dict__`, so it is compatible with `frozen=True` (which only blocks
+        `__setattr__`) and does not participate in the dataclass's fields, `__eq__` or
+        `__hash__`.
+
+        `jax.ensure_compile_time_eval()` is what makes the laziness safe. Under a trace
+        (`jit`, and the `lax.fori_loop` the JAX curvature bodies run this transform
+        inside) **every** `jax.numpy` call is staged into the jaxpr, even one whose
+        operands are all concrete -- so a first access from inside the loop body would
+        cache a `DynamicJaxprTracer` here and every later call would fail with
+        `UnexpectedTracerError`. Inside the context the transform is evaluated eagerly
+        and comes out a concrete `jax.Array`, which is both correct to cache and a
+        compile-time constant for the trace that asked for it.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        with jax.ensure_compile_time_eval():
+            return jnp.fft.rfft2(self.nufft_precision_operator)
+
+    @cached_property
+    def khat_np(self) -> np.ndarray:
+        """
+        The `rfft2` of the preload as a NumPy array, of shape (2y_shape, x_shape + 1).
+
+        `scipy.fft` rather than `numpy.fft`: it is the transform the prototype measured
+        (autolens_profiling #226) and scipy is already a hard dependency.
+        """
+        import scipy.fft
+
+        return scipy.fft.rfft2(self.nufft_precision_operator)
+
+    @cached_property
+    def col_offsets(self):
+        """
+        `(batch_size,)` int32 JAX column indices, used by the JAX branch to zero the
+        columns of the final partial block. Lazy, and evaluated eagerly, for the same
+        reason as `Khat`.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        with jax.ensure_compile_time_eval():
+            return jnp.arange(int(self.batch_size), dtype=jnp.int32)
+
+    @classmethod
+    def from_nufft_precision_operator(
+        cls,
+        nufft_precision_operator: np.ndarray,
+        dirty_image: np.ndarray,
+        *,
+        batch_size: int = 128,
+        data_term: Optional[float] = None,
+        noise_normalization: Optional[float] = None,
+        primary_beam_slim: Optional[np.ndarray] = None,
+    ):
+        """
+        Construct an `InterferometerSparseOperator` from a curvature-preload array.
+
+        This is the standard factory used in interferometer inversions.
+
+        The curvature preload is assumed to be defined on a (2y, 2x) rectangular
+        grid of pixel offsets, where y and x correspond to the *unmasked extent*
+        of the real-space grid. The preload is real, so it is transformed with a real
+        FFT (`rfft2`) to obtain a kernel of shape (2y, x + 1), which is then reused for
+        every subsequent curvature matrix build. That transform is a cached property
+        (`Khat` on JAX, `khat_np` on NumPy), computed on first use rather than here, so
+        constructing the operator imports no backend it is not asked for.
+
+        Parameters
+        ----------
+        nufft_precision_operator
+            Real-valued array of shape (2y, 2x) encoding the W~ operator in real
+            space as a function of pixel offsets. The shape must be even in both
+            axes so that y_shape = H2//2 and x_shape = W2//2 are integers.
+        dirty_image
+            The dirty image associated with the dataset (or any convenient
+            reference image). Not required for curvature computation itself,
+            but commonly stored alongside the state for debugging / plotting.
+        batch_size
+            Number of source-pixel columns processed per block when assembling
+            the curvature matrix. Higher values typically improve GPU efficiency
+            but increase intermediate memory usage.
+        primary_beam_slim
+            The dataset's primary beam on the slim masked grid, or `None` (see the class
+            docstring). Stored as a float64 NumPy array.
+
+        Returns
+        -------
+        InterferometerSparseOperator
+            Immutable cached state object containing the preload, the grid shapes and the
+            lazily built FFT kernels of shape (2y, x + 1) and complex dtype.
+
+        Raises
+        ------
+        ValueError
+            If `nufft_precision_operator` does not have even shape in both dimensions.
+        """
+        H2, W2 = nufft_precision_operator.shape
+        if (H2 % 2) != 0 or (W2 % 2) != 0:
+            raise ValueError(
+                f"nufft_precision_operator must have even shape (2y,2x). Got {nufft_precision_operator.shape}."
+            )
+
+        y_shape = H2 // 2
+        x_shape = W2 // 2
+        M = y_shape * x_shape
+
+        # C-contiguous NumPy, so the NumPy and numba CPU paths can index the preload
+        # directly. This is a no-op (the same object) for an array that is already a
+        # C-contiguous NumPy array, and materialises a JAX-built preload onto the host.
+        nufft_precision_operator = np.ascontiguousarray(nufft_precision_operator)
+
+        return InterferometerSparseOperator(
+            nufft_precision_operator=nufft_precision_operator,
+            dirty_image=dirty_image,
+            y_shape=y_shape,
+            x_shape=x_shape,
+            M=M,
+            batch_size=int(batch_size),
+            w_dtype=nufft_precision_operator.dtype,
+            data_term=None if data_term is None else float(data_term),
+            noise_normalization=(
+                None if noise_normalization is None else float(noise_normalization)
+            ),
+            primary_beam_slim=(
+                None
+                if primary_beam_slim is None
+                else np.asarray(primary_beam_slim, dtype=np.float64)
+            ),
+        )
+
+    @classmethod
+    def from_sparse_terms(
+        cls,
+        terms: "SparseTerms",
+        *,
+        real_space_mask,
+        batch_size: int = 128,
+        primary_beam_slim: Optional[np.ndarray] = None,
+    ) -> "InterferometerSparseOperator":
+        """
+        Construct an `InterferometerSparseOperator` from the per-visibility sums of a
+        `SparseTerms` record (e.g. one accumulated chunk by chunk by
+        `sparse_terms_from_chunks`).
+
+        The operator stores its dirty image in the slim (masked, 1D) representation that
+        `Interferometer.apply_sparse_operator` gives it, so the record's native dirty image is
+        slimmed through `Array2D(values=..., mask=real_space_mask)`. The two scalars
+        `data_term` and `noise_normalization` are carried over, so an inversion and fit built
+        on this operator need no visibility arrays for their likelihood terms.
+
+        Parameters
+        ----------
+        terms
+            The accumulated sums of every visibility the operator is to represent.
+        real_space_mask
+            The real-space `Mask2D` the terms were accumulated on.
+        batch_size
+            Number of source-pixel columns processed per block when assembling the curvature
+            matrix (see `from_nufft_precision_operator`).
+        primary_beam_slim
+            The dataset's primary beam on the slim masked grid, or `None`. The `SparseTerms`
+            are independent of it, so the same terms serve any primary beam.
+        """
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        dirty_image = Array2D(
+            values=np.asarray(terms.dirty_image_native), mask=real_space_mask
+        ).slim.array
+
+        return cls.from_nufft_precision_operator(
+            nufft_precision_operator=terms.nufft_precision_operator,
+            dirty_image=dirty_image,
+            batch_size=batch_size,
+            data_term=terms.data_term,
+            noise_normalization=terms.noise_normalization,
+            primary_beam_slim=primary_beam_slim,
+        )
+
+    @staticmethod
+    def _is_jax(xp) -> bool:
+        """
+        Returns `True` if `xp` is the JAX array module.
+
+        Every public method branches on this rather than on `xp is np`, so that any
+        NumPy-API-compatible module (`numpy`, and the `numpy` re-exports the library
+        passes around) takes the NumPy branch, while `jax.numpy` takes the JAX branch.
+        """
+        return xp.__name__.startswith("jax")
+
+    def apply_operator(self, Fbatch_flat, xp=np):
+        """
+        Apply the interferometer W~ operator to a batch of vectors.
+
+        Given an input matrix of shape (M, B) on the rectangular real-space
+        grid (M = y_shape * x_shape), this method computes
+
+            G = W~ Fbatch_flat
+
+        via FFT-based convolution with the cached `Khat` kernel:
+
+            apply_W(F) = IRFFT( RFFT(F_pad) * Khat )[:y, :x]
+
+        where `F_pad` is the (2y, 2x) zero-padded version of `F`.
+
+        Both the preload and the batch are real-valued, so the real-transform pair
+        (`rfft2` / `irfft2`) is exact here rather than an approximation: the discarded
+        half of the spectrum is the conjugate mirror of the half that is kept, and the
+        inverse real transform reconstructs it, so the product is identical to the
+        complex `fft2` / `ifft2` route to floating-point round-off (the old code took
+        `Re(...)` of an already-real result). It halves the transform work and the size
+        of `Khat`, measured at 1.27-1.61x faster on every backend (autolens_profiling
+        #226, `results/notes/numba_interferometer_verdict.md`).
+
+        Parameters
+        ----------
+        Fbatch_flat
+            Array of shape (M, B) representing B vectors on the rectangular grid.
+        xp
+            The array module the operator is applied with: `numpy` (default) uses
+            `scipy.fft`, `jax.numpy` uses `jax.numpy.fft`.
+
+        Returns
+        -------
+        ndarray
+            Array of shape (M, B) equal to W~ applied to the batch.
+        """
+        y_shape, x_shape = self.y_shape, self.x_shape
+        M = y_shape * x_shape
+
+        if self._is_jax(xp):
+            import jax.numpy as jnp
+
+            Khat = self.Khat
+
+            B = Fbatch_flat.shape[1]
+            F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+            F_pad = jnp.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
+            Fhat = jnp.fft.rfft2(F_pad)
+            Ghat = Fhat * Khat[None, :, :]
+            G_pad = jnp.fft.irfft2(Ghat, s=(2 * y_shape, 2 * x_shape))
+            G = G_pad[:, :y_shape, :x_shape]
+            return G.reshape((B, M)).T
+
+        import scipy.fft
+
+        Fbatch_flat = np.asarray(Fbatch_flat, dtype=np.float64)
+
+        B = Fbatch_flat.shape[1]
+
+        # The pad is written as a zeroed buffer with the block copied into its top-left
+        # corner rather than as `np.pad`, so only one (B, 2y, 2x) array is allocated.
+        F_pad = np.zeros((B, 2 * y_shape, 2 * x_shape), dtype=np.float64)
+        F_pad[:, :y_shape, :x_shape] = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+
+        Fhat = scipy.fft.rfft2(F_pad, axes=(-2, -1))
+        Fhat *= self.khat_np[None, :, :]
+        G_pad = scipy.fft.irfft2(Fhat, s=(2 * y_shape, 2 * x_shape), axes=(-2, -1))
+
+        G = G_pad[:, :y_shape, :x_shape]
+        return G.reshape((B, M)).T
+
+    def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int, xp=np):
+        """
+        Compute the diagonal (mapper-mapper) curvature matrix block F = Aᵀ W~ A.
+
+        This method mirrors `ImagingSparseOperator.curvature_matrix_diag_from`
+        and is the structural counterpart for the interferometer W~ operator.
+
+        Given a sparse mapping operator A in COO triplet form (rows, cols, vals)
+        with `S` source pixels, it computes
+
+            F = Aᵀ W~ A
+
+        in column blocks of width `batch_size`:
+
+        1) Assemble Fbatch = A[:, start:start+B] on the rectangular grid via scatter-add.
+        2) Apply W~ to the block via FFT: Gbatch = W~(Fbatch).
+        3) Project back with Aᵀ via segment_sum over `cols`.
+
+        Parameters
+        ----------
+        rows, cols, vals
+            COO triplets encoding the sparse mapping operator A.
+            - `rows`: rectangular-grid pixel indices (flat) in [0, M), shape (nnz,)
+            - `cols`: source pixel indices in [0, S), shape (nnz,)
+            - `vals`: mapping weights (interpolation + any sub-fraction normalisation),
+              shape (nnz,)
+            These should already be produced by `mapper.sparse_triplets_curvature`.
+        S
+            Number of source pixels / parameters for this mapper.
+        xp
+            The array module the block assembly runs on: `numpy` (default) assembles `A`
+            as a `scipy.sparse` CSC matrix and loops the blocks in Python, `jax.numpy`
+            runs the `fori_loop` / `segment_sum` route.
+
+        Returns
+        -------
+        ndarray
+            Curvature matrix of shape (S, S), symmetric.
+        """
+        if not self._is_jax(xp):
+            return self._curvature_matrix_diag_from_np(
+                rows=rows, cols=cols, vals=vals, S=S
+            )
+
+        import jax.numpy as jnp
+        from jax import lax
+        from jax.ops import segment_sum
+
+        rows = jnp.asarray(rows, dtype=jnp.int32)
+        cols = jnp.asarray(cols, dtype=jnp.int32)
+        vals = jnp.asarray(vals, dtype=jnp.float64)
+
+        M = self.M
+        B = self.batch_size
+
+        n_blocks = (S + B - 1) // B
+        S_pad = n_blocks * B
+
+        C0 = jnp.zeros((S, S_pad), dtype=jnp.float64)
+
+        def body(block_i, C):
+            start = block_i * B
+
+            in_block = (cols >= start) & (cols < (start + B))
+            bc = jnp.where(in_block, cols - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals, 0.0)
+
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows, bc].add(v)
+
+            G = self.apply_operator(F, xp=jnp)  # (M, B)
+
+            contrib = vals[:, None] * G[rows, :]
+            Cblock = segment_sum(contrib, cols, num_segments=S)  # (S, B)
+
+            width = jnp.minimum(B, jnp.maximum(0, S - start))
+            Cblock = Cblock * (self.col_offsets < width)[None, :]
+
+            return lax.dynamic_update_slice(C, Cblock, (0, start))
+
+        C_pad = lax.fori_loop(0, n_blocks, body, C0)
+        C = C_pad[:, :S]
+        return 0.5 * (C + C.T)
+
+    def _sparse_matrix_from(self, rows, cols, vals, *, S: int):
+        """
+        Returns the mapping operator `A` of shape (M, S) as a `scipy.sparse` CSC matrix,
+        built from its COO triplets.
+
+        `csc_matrix((vals, (rows, cols)))` *sums* duplicate `(row, col)` entries, which is
+        required: a Delaunay mapper produces one triplet per (sub-pixel, vertex) pair, so
+        several triplets can share a cell, exactly as the JAX branch's `.at[].add` scatter
+        accumulates them.
+
+        Out-of-range columns are dropped. `mapper_util.sparse_triplets_from` pads every
+        sub-pixel's interpolation stencil to the longest one, so an unused slot arrives as
+        `col = -1` with `val = 0.0`. The JAX branch drops those implicitly (its `in_block`
+        mask is false for a negative column, and `segment_sum` drops out-of-bound segment
+        ids), whereas `csc_matrix` raises on a negative index — so the same entries are
+        dropped explicitly here. They carry zero weight, so dropping them changes nothing
+        but the error.
+
+        Parameters
+        ----------
+        rows, cols, vals
+            COO triplets encoding `A`: extent-grid flat row indices, source pixel column
+            indices, and mapping weights.
+        S
+            Number of source pixels / parameters, i.e. the column count of `A`.
+        """
+        from scipy.sparse import csc_matrix
+
+        S = int(S)
+
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        vals = np.asarray(vals, dtype=np.float64)
+
+        in_range = (cols >= 0) & (cols < S)
+
+        if not in_range.all():
+            rows = rows[in_range]
+            cols = cols[in_range]
+            vals = vals[in_range]
+
+        return csc_matrix((vals, (rows, cols)), shape=(self.M, S))
+
+    def _curvature_matrix_diag_from_np(self, rows, cols, vals, *, S: int) -> np.ndarray:
+        """
+        The NumPy/scipy body of `curvature_matrix_diag_from`: `F = Aᵀ W~ A`.
+
+        `A` is assembled once as a CSC matrix, then swept in column blocks of
+        `batch_size`: each block is densified, operated on with `apply_operator`, and
+        projected back with `Aᵀ` as a sparse-dense product (the NumPy counterpart of the
+        JAX branch's `segment_sum`).
+
+        The block loop is a plain Python `for` rather than the JAX branch's `fori_loop`,
+        so no padding, masking or `dynamic_update_slice` is needed: those exist purely to
+        keep the traced shapes static.
+        """
+        A = self._sparse_matrix_from(rows=rows, cols=cols, vals=vals, S=S)
+        AT = A.T.tocsr()
+
+        S = int(S)
+        B = int(self.batch_size)
+
+        C = np.zeros((S, S), dtype=np.float64)
+
+        for start in range(0, S, B):
+            stop = min(start + B, S)
+
+            F = A[:, start:stop].toarray()
+            G = self.apply_operator(F, xp=np)
+
+            C[:, start:stop] = AT @ G
+
+        # The JAX branch symmetrises its result, so this one must too or the two disagree
+        # at round-off in the last digits rather than to the pin the tests hold.
+        return 0.5 * (C + C.T)
+
+    def curvature_matrix_off_diag_from(
+        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int, xp=np
+    ):
+        """
+        Compute the off-diagonal (mapper-mapper) curvature block F01 = A0ᵀ W~ A1.
+
+        This method mirrors `ImagingSparseOperator.curvature_matrix_off_diag_from` and is the
+        structural counterpart for the interferometer W~ operator. The difference between the two
+        is the operator itself: for imaging W = Hᵀ N⁻¹ H is a PSF correlation, whereas here
+        W~ = Re(Fᴴ W F) is the (translationally invariant) real-space operator of the non-uniform
+        Fourier transform `F`, applied via `apply_operator` on the *unmasked-extent* rectangular
+        grid (M = y_shape * x_shape).
+
+        Given two sparse mapping operators:
+
+        - A0 : (M × S0)
+        - A1 : (M × S1)
+
+        this method computes F01 = A0ᵀ W~ A1 in column blocks of width `batch_size`:
+
+        1) Assemble Fbatch = A1[:, start:start+B] on the rectangular grid via scatter-add.
+        2) Apply W~ to the block via FFT: Gbatch = W~(Fbatch).
+        3) Project back with A0ᵀ via segment_sum over `cols0`.
+
+        Parameters
+        ----------
+        rows0, cols0, vals0
+            COO triplets for A0, where `rows0` are extent-grid (flat) indices in [0, M).
+        rows1, cols1, vals1
+            COO triplets for A1, where `rows1` are extent-grid (flat) indices in [0, M).
+        S0
+            Number of source pixels / parameters for mapper 0.
+        S1
+            Number of source pixels / parameters for mapper 1.
+        xp
+            The array module the block assembly runs on: `numpy` (default) or `jax.numpy`.
+
+        Returns
+        -------
+        ndarray
+            Off-diagonal curvature block of shape (S0, S1).
+
+        Notes
+        -----
+        - The result is *not* symmetrized here because it is not square in general. The symmetric
+          counterpart is F10 = F01ᵀ, because A0 and A1 share the same W~.
+        - Padding to `S1_pad = ceil(S1/B)*B` ensures `dynamic_update_slice` is always legal
+          on the JAX branch; the NumPy branch's Python block loop needs no padding.
+        """
+        if not self._is_jax(xp):
+            return self._curvature_matrix_off_diag_from_np(
+                rows0=rows0,
+                cols0=cols0,
+                vals0=vals0,
+                rows1=rows1,
+                cols1=cols1,
+                vals1=vals1,
+                S0=S0,
+                S1=S1,
+            )
+
+        import jax.numpy as jnp
+        from jax import lax
+        from jax.ops import segment_sum
+
+        rows0 = jnp.asarray(rows0, dtype=jnp.int32)
+        cols0 = jnp.asarray(cols0, dtype=jnp.int32)
+        vals0 = jnp.asarray(vals0, dtype=jnp.float64)
+
+        rows1 = jnp.asarray(rows1, dtype=jnp.int32)
+        cols1 = jnp.asarray(cols1, dtype=jnp.int32)
+        vals1 = jnp.asarray(vals1, dtype=jnp.float64)
+
+        M = self.M
+        B = self.batch_size
+
+        n_blocks = (S1 + B - 1) // B
+        S1_pad = n_blocks * B
+
+        F01_0 = jnp.zeros((S0, S1_pad), dtype=jnp.float64)
+
+        def body(block_i, F01):
+            start = block_i * B
+
+            in_block = (cols1 >= start) & (cols1 < (start + B))
+            bc = jnp.where(in_block, cols1 - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals1, 0.0)
+
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows1, bc].add(v)
+
+            G = self.apply_operator(F, xp=jnp)  # (M, B)
+
+            contrib = vals0[:, None] * G[rows0, :]
+            block = segment_sum(contrib, cols0, num_segments=S0)
+
+            width = jnp.minimum(B, jnp.maximum(0, S1 - start))
+            block = block * (self.col_offsets < width)[None, :]
+
+            return lax.dynamic_update_slice(F01, block, (0, start))
+
+        F01_pad = lax.fori_loop(0, n_blocks, body, F01_0)
+        return F01_pad[:, :S1]
+
+    def _curvature_matrix_off_diag_from_np(
+        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int
+    ) -> np.ndarray:
+        """
+        The NumPy/scipy body of `curvature_matrix_off_diag_from`: `F01 = A0ᵀ W~ A1`.
+
+        The same block sweep as `_curvature_matrix_diag_from_np`, but over the columns of
+        `A1` and projected back with `A0ᵀ`. The result is rectangular in general, so —
+        unlike the diagonal block — it is not symmetrised.
+        """
+        A0 = self._sparse_matrix_from(rows=rows0, cols=cols0, vals=vals0, S=S0)
+        A1 = self._sparse_matrix_from(rows=rows1, cols=cols1, vals=vals1, S=S1)
+
+        A0T = A0.T.tocsr()
+
+        S0 = int(S0)
+        S1 = int(S1)
+        B = int(self.batch_size)
+
+        F01 = np.zeros((S0, S1), dtype=np.float64)
+
+        for start in range(0, S1, B):
+            stop = min(start + B, S1)
+
+            F = A1[:, start:stop].toarray()
+            G = self.apply_operator(F, xp=np)
+
+            F01[:, start:stop] = A0T @ G
+
+        return F01
+
+    def operated_matrix_slim_from(
+        self, matrix_slim, extent_index_for_masked_pixel, xp=np
+    ):
+        """
+        Apply the interferometer W~ operator to columns defined on the *slim masked* grid.
+
+        The input columns are scattered from the slim masked grid onto the unmasked-extent
+        rectangular grid (on which W~ is defined), operated on with `apply_operator`, and gathered
+        back onto the slim masked grid.
+
+        Parameters
+        ----------
+        matrix_slim
+            Array of shape (M_pix, n_cols) on the slim masked grid (e.g. the real-space
+            `mapping_matrix` of an `AbstractLinearObjFuncList`).
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
+
+        Returns
+        -------
+        ndarray
+            Array of shape (M_pix, n_cols) equal to W~ applied to each column.
+        """
+        if not self._is_jax(xp):
+            matrix_slim = np.asarray(matrix_slim, dtype=np.float64)
+            extent_index_for_masked_pixel = np.asarray(
+                extent_index_for_masked_pixel, dtype=np.int64
+            )
+
+            # A scatter-*set*, not an add: `extent_index_for_masked_pixel` is one extent
+            # cell per masked pixel and therefore has no repeats, so NumPy fancy-index
+            # assignment matches the JAX branch's `.at[].set` exactly.
+            grid_flat = np.zeros((self.M, matrix_slim.shape[1]), dtype=np.float64)
+            grid_flat[extent_index_for_masked_pixel, :] = matrix_slim
+
+            return self.apply_operator(grid_flat, xp=np)[
+                extent_index_for_masked_pixel, :
+            ]
+
+        import jax.numpy as jnp
+
+        matrix_slim = jnp.asarray(matrix_slim, dtype=jnp.float64)
+        extent_index_for_masked_pixel = jnp.asarray(
+            extent_index_for_masked_pixel, dtype=jnp.int32
+        )
+
+        grid_flat = jnp.zeros((self.M, matrix_slim.shape[1]), dtype=jnp.float64)
+        grid_flat = grid_flat.at[extent_index_for_masked_pixel, :].set(matrix_slim)
+
+        return self.apply_operator(grid_flat, xp=jnp)[extent_index_for_masked_pixel, :]
+
+    def curvature_matrix_off_diag_func_list_from(
+        self,
+        curvature_weights,  # (M_pix, n_funcs)
+        extent_index_for_masked_pixel,  # (M_pix,) slim -> extent(flat)
+        rows,
+        cols,
+        vals,  # triplets where rows are EXTENT indices
+        *,
+        S: int,
+        xp=np,
+    ):
+        """
+        Compute the mapper–linear-function off-diagonal block Aᵀ W~ B.
+
+        This is the interferometer counterpart of
+        `ImagingSparseOperator.curvature_matrix_off_diag_func_list_from`, but with one important
+        difference in what `curvature_weights` must contain.
+
+        For imaging the operator is split as W = Hᵀ N⁻¹ H, so the imaging method is passed
+        `curvature_weights = (H B) / noise²` (the forward blur and the inverse variance are folded
+        into the input) and only applies Hᵀ internally.
+
+        For an interferometer the whole operator W~ = Re(Fᴴ W F) is applied by `apply_operator`,
+        with the inverse-variance weighting *already inside* W~. Therefore `curvature_weights` is
+        the plain real-space `mapping_matrix` of the linear function list on the slim masked grid,
+        with **no** noise weighting and **no** forward operator applied.
+
+        The returned matrix is:
+
+            off_diag = Aᵀ W~ B
+
+        which has shape (S, n_funcs).
+
+        Parameters
+        ----------
+        curvature_weights
+            Array of shape (M_pix, n_funcs) on the *slim masked* grid: the un-operated,
+            un-weighted real-space mapping matrix of the linear function list.
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+            Used to scatter values onto the rectangular grid W~ is defined on.
+        rows, cols, vals
+            COO triplets for the mapper A, where:
+            - `rows` are extent-grid indices (flat), shape (nnz,)
+            - `cols` are source pixel indices, shape (nnz,)
+            - `vals` are mapping weights, shape (nnz,)
+        S
+            Number of source pixels / parameters in the mapper.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
+
+        Returns
+        -------
+        ndarray
+            Off-diagonal block of shape (S, n_funcs).
+
+        Notes
+        -----
+        - No `batch_size` sweep is required because the operator is applied to `n_funcs` columns
+          (typically a handful) rather than to all S source pixels.
+        """
+        if not self._is_jax(xp):
+            curvature_weights = np.asarray(curvature_weights, dtype=np.float64)
+            extent_index_for_masked_pixel = np.asarray(
+                extent_index_for_masked_pixel, dtype=np.int64
+            )
+
+            n_funcs = curvature_weights.shape[1]
+
+            # 1) scatter slim -> extent(flat) (a set, the indices are unique)
+            grid_flat = np.zeros((self.M, n_funcs), dtype=np.float64)
+            grid_flat[extent_index_for_masked_pixel, :] = curvature_weights
+
+            # 2) apply W~ on the extent grid
+            operated = self.apply_operator(grid_flat, xp=np)  # (M, n_funcs)
+
+            # 3) project onto the mapper's source pixels with `Aᵀ`, the sparse-matrix
+            #    counterpart of the JAX branch's `segment_sum` over `cols`.
+            A = self._sparse_matrix_from(rows=rows, cols=cols, vals=vals, S=S)
+
+            return A.T.tocsr() @ operated  # (S, n_funcs)
+
+        import jax.numpy as jnp
+        from jax.ops import segment_sum
+
+        curvature_weights = jnp.asarray(curvature_weights, dtype=jnp.float64)
+        extent_index_for_masked_pixel = jnp.asarray(
+            extent_index_for_masked_pixel, dtype=jnp.int32
+        )
+
+        rows = jnp.asarray(rows, dtype=jnp.int32)
+        cols = jnp.asarray(cols, dtype=jnp.int32)
+        vals = jnp.asarray(vals, dtype=jnp.float64)
+
+        n_funcs = curvature_weights.shape[1]
+
+        # 1) scatter slim -> extent(flat)
+        grid_flat = jnp.zeros((self.M, n_funcs), dtype=jnp.float64)
+        grid_flat = grid_flat.at[extent_index_for_masked_pixel, :].set(
+            curvature_weights
+        )
+
+        # 2) apply W~ on the extent grid
+        operated = self.apply_operator(grid_flat, xp=jnp)  # (M, n_funcs)
+
+        # 3) gather at the mapper's rows (extent coords) and accumulate to source pixels
+        contrib = vals[:, None] * operated[rows, :]
+        return segment_sum(contrib, cols, num_segments=S)  # (S, n_funcs)
+
+    def curvature_matrix_func_list_from(
+        self,
+        curvature_weights_0,  # (M_pix, n_funcs_0)
+        curvature_weights_1,  # (M_pix, n_funcs_1)
+        extent_index_for_masked_pixel,  # (M_pix,) slim -> extent(flat)
+        xp=np,
+    ):
+        """
+        Compute a linear-function–linear-function curvature block B0ᵀ W~ B1.
+
+        The imaging sparse inversion forms this block as a plain dot product of noise-weighted,
+        PSF-convolved mapping matrices, because for imaging those matrices are already in the
+        data frame. For an interferometer the equivalent dense construction would require the
+        (expensive) visibility-space transformed mapping matrix, which the sparse formalism exists
+        to avoid. Because W~ = Re(Fᴴ W F) is exact and translationally invariant on the extent
+        grid, the block is instead formed directly through the same operator used by every other
+        block, which is both cheaper and keeps every block of `F` self-consistent.
+
+        Parameters
+        ----------
+        curvature_weights_0, curvature_weights_1
+            The un-operated, un-weighted real-space `mapping_matrix` of each linear function list,
+            on the slim masked grid, of shape (M_pix, n_funcs).
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
+
+        Returns
+        -------
+        ndarray
+            Curvature block of shape (n_funcs_0, n_funcs_1).
+        """
+        if not self._is_jax(xp):
+            curvature_weights_0 = np.asarray(curvature_weights_0, dtype=np.float64)
+
+            operated = self.operated_matrix_slim_from(
+                matrix_slim=curvature_weights_1,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=np,
+            )
+
+            return curvature_weights_0.T @ operated
+
+        import jax.numpy as jnp
+
+        curvature_weights_0 = jnp.asarray(curvature_weights_0, dtype=jnp.float64)
+
+        operated = self.operated_matrix_slim_from(
+            matrix_slim=curvature_weights_1,
+            extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+            xp=jnp,
+        )
+
+        return curvature_weights_0.T @ operated
+
+
+def sparse_profile_terms_from(
+    sparse_operator: "InterferometerSparseOperator",
+    image,
+    extent_index_for_masked_pixel,
+    xp=np,
+):
+    """
+    Returns the sparse-path quantities of fitting visibilities from which the visibilities `p = F i_p` of a
+    real-space image `i_p` (e.g. the summed image of a fit's ordinary light profiles) are subtracted, computed
+    without forming `p` or touching any visibility-sized array.
+
+    With `d` the visibilities the `sparse_operator` was built from, `W = 1 / sigma^2` their (equal real and
+    imaginary) inverse variances, `d~ = Re(F^H W d)` the operator's cached `dirty_image`, `W~ = Re(F^H W F)` the
+    operator itself and `data_term = sum(|d|^2 / sigma^2)` its cached scalar, linearity gives:
+
+        Re(F^H W (d - F i_p))       = d~ - W~ i_p
+        sum(|d - F i_p|^2 / sigma^2) = data_term - 2 i_p^T d~ + i_p^T W~ i_p
+
+    The first is the dirty image a sparse inversion of the profile-subtracted visibilities forms its data vector
+    from; the second is their chi-squared data term (term 3 of `fast_chi_squared`), and on its own the
+    chi-squared of a fit whose model is only `p`. Both reuse the single product `W~ i_p` (one FFT convolution on
+    the real-space grid), so the data term costs two dot products on top of the dirty image.
+
+    The data term is a difference of large numbers at high signal-to-noise (`data_term >> chi^2`); in float64
+    this is accurate to ~1e-15 relative to `data_term`, ample for likelihood comparisons.
+
+    If the operator carries a `primary_beam_slim` `P`, the visibilities of `i_p` are `F P i_p`, so `i_p` is
+    replaced by `P i_p` throughout: `sparse_dirty_image = d~ - W~ P i_p` and
+    `data_term - 2 (P i_p)^T d~ + (P i_p)^T W~ (P i_p)`, and the returned `operated_image` is `W~ P i_p`.
+
+    Every operation is an `xp` array operation, so under `jax.jit` the returned scalar is traced with `i_p`.
+
+    Parameters
+    ----------
+    sparse_operator
+        The `InterferometerSparseOperator` of the dataset, carrying the `dirty_image` and `data_term` of the
+        visibilities it was built from.
+    image
+        The image `i_p` on the slim masked real-space grid (an `Array2D` or a plain array).
+    extent_index_for_masked_pixel
+        The `real_space_mask.extent_index_for_masked_pixel` mapping slim masked pixels to the operator's
+        rectangular extent grid.
+    xp
+        The array module (`numpy` or `jax.numpy`).
+
+    Returns
+    -------
+    operated_image
+        `W~ i_p` on the slim masked grid.
+    sparse_dirty_image
+        `d~ - W~ i_p`.
+    data_term
+        `data_term - 2 i_p^T d~ + i_p^T W~ i_p`, or `None` if the operator carries no `data_term`.
+    """
+    image = getattr(image, "array", image)
+
+    primary_beam_slim = getattr(sparse_operator, "primary_beam_slim", None)
+
+    if primary_beam_slim is not None:
+        image = image * xp.asarray(primary_beam_slim)
+
+    operated_image = sparse_operator.operated_matrix_slim_from(
+        matrix_slim=image[:, None],
+        extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+        xp=xp,
+    )[:, 0]
+
+    dirty_image = xp.asarray(sparse_operator.dirty_image)
+
+    sparse_dirty_image = dirty_image - operated_image
+
+    data_term = getattr(sparse_operator, "data_term", None)
+
+    if data_term is not None:
+        data_term = (
+            data_term - 2.0 * xp.dot(image, dirty_image) + xp.dot(image, operated_image)
+        )
+
+    return operated_image, sparse_dirty_image, data_term
+
+
+@dataclass(frozen=True)
+class SparseTerms:
+    """
+    Every quantity the sparse (w-tilde) interferometer likelihood needs from the visibilities,
+    and nothing per-visibility.
+
+    Each field is a sum over visibilities, so the terms of a union of visibility sets are the
+    field-wise sum of the terms of its parts (`__add__`). That is what lets them be accumulated
+    one chunk at a time by `sparse_terms_from_chunks`, with peak memory set by the chunk size
+    rather than the dataset size, and what makes multi-channel (MFS) terms the sum of the
+    per-channel terms.
+
+    Fields
+    ------
+    nufft_precision_operator
+        The `(2Ny, 2Nx)` real preload `sum_k w_k cos(...)` with `w_k = 1 / sigma_r,k^2`, in the
+        FFT-wrapped offset order `nufft_precision_operator_from` returns (index 0 = zero lag).
+    dirty_image_native
+        The `(Ny, Nx)` native noise-weighted dirty image `Re(F^H (d_r / sigma_r^2 + i d_i /
+        sigma_i^2))`, the adjoint `Interferometer.apply_sparse_operator` stores (masked pixels
+        zero).
+    dirty_beam_native
+        The `(Ny, Nx)` native adjoint of the weights `w = 1 / sigma_r^2` (the naturally weighted
+        dirty beam at the image pixels, unnormalised). Not used by the likelihood; kept for
+        normalised dirty images of an array-free dataset.
+    sum_weights
+        `sum(w)`, the normalisation of the naturally weighted dirty beam/image.
+    data_term
+        `sum(d_r^2 / sigma_r^2) + sum(d_i^2 / sigma_i^2)`, i.e. `d^T N^-1 d`, the third term of
+        `fast_chi_squared`.
+    noise_normalization
+        `sum(log(2 pi sigma_r^2)) + sum(log(2 pi sigma_i^2))`, equal to
+        `fit_util.noise_normalization_complex_from(noise_map)`.
+    n_vis
+        The number of visibilities summed.
+
+    Provenance
+    ----------
+    The trailing optional fields record what the terms were accumulated on, so terms built on
+    different geometries or accuracies cannot be silently summed (`__add__` raises), and so an
+    array-free `Interferometer` (built by `Interferometer.from_stream` /
+    `from_sparse_terms`) can say what produced it. `None` means "not recorded" and skips the
+    corresponding check.
+
+    shape_native, pixel_scales, origin
+        The real-space mask's native shape, pixel scales and origin.
+    eps
+        The NUFFT precision the precision operator was built with.
+    transformer_class_name
+        The class name of the transformer that formed the dirty image and beam.
+    phase_centre
+        The `(y, x)` phase-centre shift in arcseconds the visibilities were re-centred on
+        before forming the dirty image (`sparse_terms_from_chunks(phase_centre=...)`, which
+        records `(0.0, 0.0)` when no shift is applied). `None` means not recorded. Terms with
+        different phase centres have dirty images referred to different sky origins and
+        cannot be summed.
+
+    Fine grids (`sparse_terms_from_chunks(oversample=q)`)
+    ------------------------------------------------------
+    Optional, `None` unless accumulated with `oversample`. They let the terms of components that
+    are analytic in the uv-plane (a point source, a small Gaussian) at sub-pixel positions be
+    read off by interpolation: for a unit point at `p`, the cross term with image pixel `x_i` is
+    `K(x_i - p)`, the point-point term `K(p - p')` and the data term `D(p)`.
+
+    precision_operator_fine
+        `K` on a grid `q` times finer than the image pixel, `sum_k w_k cos(2 pi u_k . lag)`, in
+        the same wraparound order and orientation as `nufft_precision_operator` (index `(i, j)` is
+        the lag of `i` fine rows and `j` fine columns; index 0 = zero lag). Shape
+        `(2 (Ny + p) q, 2 (Nx + p) q)` with `(Ny, Nx)` the **full** native shape (points may sit
+        anywhere in the mask) and `p = ceil(oversample_pad * max(Ny, Nx))` pixels of extra lag
+        so that smoothing it (e.g. by a Gaussian width) does not wrap. Unlike `W~` its Nyquist
+        row and column are not zeroed: an interpolant reads across them.
+        `precision_operator_fine[i * q, j * q] == nufft_precision_operator[i, j]` within the
+        masked extent.
+    dirty_image_fine
+        `D(x) = Re sum_k c_k exp(2 pi i u_k . x)`, `c = d_r / sigma_r^2 + i d_i / sigma_i^2` (the
+        phase-shifted data, exactly as `dirty_image_native`), on a grid `q` times finer than the
+        image pixel covering **twice** the field: shape `(2 Ny q, 2 Nx q)`, centred (`x = 0, y = 0`
+        at index `[Ny q, Nx q]`), native orientation (`x` along the columns, `y` decreasing down
+        the rows). Native pixel `(r, c)` sits at fine index
+        `(Ny q - (Ny - 1) q / 2 + r q, Nx q - (Nx - 1) q / 2 + c q)`, a grid point because `q` is
+        even, where it equals `dirty_image_native[r, c]`.
+    oversample
+        The even oversampling factor `q`.
+    oversample_pad
+        The fractional lag pad the fine operator was built with (`p` above).
+
+    Both are sums over visibilities and inherit the equal-sigma assumption (`K` uses the
+    real-part weights only); with `pool_noise_map=True` they are built from the pooled
+    noise-map like every other term.
+    """
+
+    nufft_precision_operator: np.ndarray
+    dirty_image_native: np.ndarray
+    dirty_beam_native: np.ndarray
+    sum_weights: float
+    data_term: float
+    noise_normalization: float
+    n_vis: int
+    shape_native: Optional[tuple] = None
+    pixel_scales: Optional[tuple] = None
+    origin: Optional[tuple] = None
+    eps: Optional[float] = None
+    transformer_class_name: Optional[str] = None
+    phase_centre: Optional[Tuple[float, float]] = None
+    precision_operator_fine: Optional[np.ndarray] = None
+    dirty_image_fine: Optional[np.ndarray] = None
+    oversample: Optional[int] = None
+    oversample_pad: Optional[float] = None
+
+    @property
+    def has_fine_grids(self) -> bool:
+        """
+        Whether these terms carry the `oversample` fine grids (`precision_operator_fine`,
+        `dirty_image_fine`).
+        """
+        return (
+            self.precision_operator_fine is not None
+            or self.dirty_image_fine is not None
+        )
+
+    def __add__(self, other: "SparseTerms") -> "SparseTerms":
+        """
+        The field-wise sum of two `SparseTerms`.
+
+        Raises `exc.InversionException` if a provenance field (`shape_native`,
+        `pixel_scales`, `origin`, `eps`, `phase_centre`, `transformer_class_name`, `oversample`,
+        `oversample_pad`) is recorded on both sides with different values, or if exactly one
+        side carries the `oversample` fine grids (summing would silently drop or half-fill them;
+        accumulate every part with the same `oversample`, or with none).
+        The result carries, for each provenance field, the recorded value from either side
+        (the left one when both are recorded), so an unrecorded operand never erases the
+        provenance of a recorded one.
+
+        Known limit: the mask itself is not carried, so terms accumulated on two masks with
+        the same `shape_native`, `pixel_scales` and `origin` but different masked pixels
+        cannot be distinguished by provenance and are summed without error.
+        """
+        if not isinstance(other, SparseTerms):
+            return NotImplemented
+
+        if self.has_fine_grids != other.has_fine_grids:
+            raise exc.InversionException(
+                "SparseTerms can only be added when both or neither carry the `oversample` fine "
+                "grids (`precision_operator_fine`, `dirty_image_fine`): one side has fine grids "
+                f"(oversample={self.oversample if self.has_fine_grids else other.oversample!r}) "
+                "and the other does not. Accumulate every part with the same `oversample`."
+            )
+
+        if self.nufft_precision_operator.shape != other.nufft_precision_operator.shape:
+            raise ValueError(
+                "SparseTerms can only be added when accumulated on the same real-space mask: "
+                f"precision operator shapes {self.nufft_precision_operator.shape} and "
+                f"{other.nufft_precision_operator.shape} differ."
+            )
+
+        for name in (
+            "shape_native",
+            "pixel_scales",
+            "origin",
+            "eps",
+            "phase_centre",
+            "transformer_class_name",
+            "oversample",
+            "oversample_pad",
+        ):
+            value_self = getattr(self, name)
+            value_other = getattr(other, name)
+
+            if value_self is None or value_other is None:
+                continue
+
+            if isinstance(value_self, str) or isinstance(value_other, str):
+                differ = str(value_self) != str(value_other)
+            elif isinstance(value_self, numbers.Number) or isinstance(
+                value_other, numbers.Number
+            ):
+                differ = float(value_self) != float(value_other)
+            else:
+                differ = tuple(value_self) != tuple(value_other)
+
+            if differ:
+                raise exc.InversionException(
+                    "SparseTerms can only be added when accumulated with the same provenance: "
+                    f"`{name}` is {value_self!r} on one and {value_other!r} on the other. "
+                    "Terms accumulated on different real-space masks, NUFFT accuracies, "
+                    "phase centres, transformers or oversampling do not describe the same "
+                    "operator."
+                )
+
+        fine_grids = {}
+
+        if self.has_fine_grids:
+            for name in ("precision_operator_fine", "dirty_image_fine"):
+                value_self = getattr(self, name)
+                value_other = getattr(other, name)
+
+                if value_self is None or value_other is None:
+                    fine_grids[name] = _recorded(value_self, value_other)
+                    continue
+
+                if value_self.shape != value_other.shape:
+                    raise ValueError(
+                        f"SparseTerms can only be added when their fine grids match: `{name}` "
+                        f"shapes {value_self.shape} and {value_other.shape} differ."
+                    )
+
+                fine_grids[name] = value_self + value_other
+
+        return SparseTerms(
+            nufft_precision_operator=self.nufft_precision_operator
+            + other.nufft_precision_operator,
+            dirty_image_native=self.dirty_image_native + other.dirty_image_native,
+            dirty_beam_native=self.dirty_beam_native + other.dirty_beam_native,
+            sum_weights=float(self.sum_weights + other.sum_weights),
+            data_term=float(self.data_term + other.data_term),
+            noise_normalization=float(
+                self.noise_normalization + other.noise_normalization
+            ),
+            n_vis=int(self.n_vis + other.n_vis),
+            shape_native=_recorded(self.shape_native, other.shape_native),
+            pixel_scales=_recorded(self.pixel_scales, other.pixel_scales),
+            origin=_recorded(self.origin, other.origin),
+            eps=_recorded(self.eps, other.eps),
+            transformer_class_name=_recorded(
+                self.transformer_class_name, other.transformer_class_name
+            ),
+            phase_centre=_recorded(self.phase_centre, other.phase_centre),
+            oversample=_recorded(self.oversample, other.oversample),
+            oversample_pad=_recorded(self.oversample_pad, other.oversample_pad),
+            **fine_grids,
+        )
+
+    def __radd__(self, other) -> "SparseTerms":
+        """
+        Support `sum(list_of_terms)`, which starts from the integer `0`: `0 + terms` is
+        `terms`. Any other left operand is not supported.
+        """
+        if (
+            isinstance(other, (int, float))
+            and not isinstance(other, bool)
+            and other == 0
+        ):
+            return self
+
+        return NotImplemented
+
+
+def _recorded(value_left, value_right):
+    """
+    The provenance value a sum of two `SparseTerms` carries: the recorded (non-`None`) value
+    of either side, the left one when both are recorded (they are equal, or `__add__` has
+    already raised). Taking it from either side keeps `(U + A) + B` (with `U` unrecorded)
+    checking `B` against `A`'s provenance.
+    """
+    return value_left if value_left is not None else value_right
+
+
+def _complex_visibilities_from(values) -> np.ndarray:
+    """
+    Return `values` (a `Visibilities`/`VisibilitiesNoiseMap`, a complex ndarray of shape
+    `(K,)` or a real ndarray of shape `(K, 2)` of (real, imag) columns) as a 1D complex128
+    ndarray, without the per-row `np.apply_along_axis` the `Visibilities` constructor uses.
+    """
+    values = np.asarray(getattr(values, "array", values))
+
+    if not np.iscomplexobj(values):
+        if values.ndim == 2 and values.shape[1] == 2:
+            values = values[:, 0] + 1j * values[:, 1]
+
+    return np.asarray(values, dtype=np.complex128).ravel()
+
+
+def _check_oversample(oversample, oversample_pad) -> None:
+    """
+    Raise a `ValueError` unless `oversample` is a positive even integer and `oversample_pad` a
+    non-negative finite number.
+
+    `q` must be even so that the native pixel centres -- at half-integer pixel positions for an
+    even native shape -- land on fine grid points, where `dirty_image_fine` equals
+    `dirty_image_native` exactly (to NUFFT precision) rather than by interpolation.
+    """
+    if (
+        isinstance(oversample, bool)
+        or not isinstance(oversample, numbers.Integral)
+        or oversample < 2
+        or oversample % 2 != 0
+    ):
+        raise ValueError(
+            "sparse_terms_from_chunks: `oversample` must be a positive even integer (2, 4, "
+            f"8, ...), got {oversample!r}. It must be even so that the native pixel centres "
+            "land on fine grid points."
+        )
+
+    if (
+        isinstance(oversample_pad, bool)
+        or not isinstance(oversample_pad, numbers.Real)
+        or not np.isfinite(oversample_pad)
+        or oversample_pad < 0
+    ):
+        raise ValueError(
+            "sparse_terms_from_chunks: `oversample_pad` must be a non-negative fraction of the "
+            f"native field, got {oversample_pad!r}."
+        )
+
+
+def fine_grid_shapes_from(
+    shape_native, oversample: int, oversample_pad: float = 0.25
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    The shapes of the `oversample` fine grids `sparse_terms_from_chunks` accumulates on a real-space
+    mask of native shape `(Ny, Nx)`: `precision_operator_fine` is `(2 (Ny + p) q, 2 (Nx + p) q)`
+    with `p = ceil(oversample_pad * max(Ny, Nx))`, and `dirty_image_fine` is `(2 Ny q, 2 Nx q)`.
+
+    Returns
+    -------
+    (shape_precision_operator_fine, shape_dirty_image_fine)
+    """
+    n_y, n_x = (int(n) for n in shape_native)
+    q = int(oversample)
+    pad = int(math.ceil(float(oversample_pad) * max(n_y, n_x)))
+
+    return (
+        (2 * (n_y + pad) * q, 2 * (n_x + pad) * q),
+        (2 * n_y * q, 2 * n_x * q),
+    )
+
+
+def _log_fine_grid_memory(shape_operator_fine, shape_dirty_image_fine, oversample):
+    """
+    Log one line estimating the memory the `oversample` fine grids need: the two float64 grids
+    held for the whole stream, plus the largest per-call `nufftax.nufft2d1` working set (its 2x
+    upsampled complex128 grid, its complex128 output and that output's float64 real part).
+    """
+    held = 8 * (
+        int(np.prod(shape_operator_fine)) + int(np.prod(shape_dirty_image_fine))
+    )
+    largest = max(
+        int(np.prod(shape_operator_fine)), int(np.prod(shape_dirty_image_fine))
+    )
+    work = largest * (16 * 4 + 16 + 8)
+
+    logger.info(
+        "sparse_terms_from_chunks: oversample=%d fine grids precision_operator_fine %s and "
+        "dirty_image_fine %s hold %.1f MB; each NUFFT call adds up to ~%.1f MB of working "
+        "memory (peak ~%.1f MB). Two extra type-1 NUFFTs run per chunk with an FFT cost "
+        "independent of the chunk length, so use large chunks (>= ~1e6 visibilities) with "
+        "oversample.",
+        oversample,
+        tuple(shape_operator_fine),
+        tuple(shape_dirty_image_fine),
+        held / 1.0e6,
+        work / 1.0e6,
+        (held + work) / 1.0e6,
+    )
+
+
+def sparse_terms_from_chunks(
+    chunks: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    real_space_mask,
+    transformer_class: Optional[Callable] = None,
+    method: str = "nufft",
+    eps: Optional[float] = None,
+    chunk_size: Optional[int] = None,
+    chunk_k: int = 2048,
+    use_jax: bool = False,
+    show_progress: bool = False,
+    phase_centre: Optional[Tuple[float, float]] = None,
+    pool_noise_map: bool = False,
+    oversample: Optional[int] = None,
+    oversample_pad: float = 0.25,
+) -> SparseTerms:
+    """
+    Accumulate the `SparseTerms` of an interferometer dataset one chunk of visibilities at a
+    time, so the full visibility arrays never need to be resident at once.
+
+    Every term is linear in the per-visibility contributions: the precision operator is a sum
+    over visibilities of `w_k cos(...)` (the ifftshift and Nyquist zeroing inside the NUFFT
+    builder are linear, so they commute with the sum -- see
+    `test__nufft_precision_operator_via_nufft__chunked_matches_one_shot`), the dirty image and
+    beam are adjoint transforms of per-visibility values, and the scalars are plain sums. The
+    result therefore equals the one-shot terms of the concatenated chunks to summation order.
+
+    Chunk contract
+    --------------
+    `chunks` is any iterable (a list, or a generator reading from disk) of
+    `(uv_wavelengths, data, noise_map)` triples, where
+
+    - `uv_wavelengths` is a real `(K, 2)` array of (u, v) baselines in wavelengths;
+    - `data` is the `K` complex visibilities (a `Visibilities`, a complex `(K,)` array or a
+      real `(K, 2)` array of (real, imag) columns);
+    - `noise_map` is the `K` complex noise sigmas in the same forms, with equal real and
+      imaginary sigma per visibility (checked per chunk; the first offending chunk raises).
+      The sparse terms assume this equality: the precision operator and dirty beam are built
+      from the real-part sigma alone (see `check_noise_map_real_imag_equal`). With
+      `pool_noise_map=True` the check is replaced by quadrature pooling,
+      `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2`, of each chunk's noise-map before any
+      term is formed (see "Unequal real and imaginary sigma" below); alternatively pool
+      before handing the chunks over, with `noise_map_pooled_from`.
+
+    `K` may differ between chunks; empty chunks are skipped. Chunks are consumed once, in
+    order, and only one is referenced at a time.
+
+    Multi-channel (MFS) terms
+    -------------------------
+    Because every field is a sum over visibilities, the terms of several channels (or any
+    partition of the visibilities) accumulated separately on the same mask sum to the terms
+    of all of them accumulated together: `sum(per_channel_terms)` (via `SparseTerms.__add__`
+    / `__radd__`) is the multi-frequency-synthesis (MFS) terms, equal to one accumulation
+    over every channel's chunks to summation order.
+
+    Unequal real and imaginary sigma
+    --------------------------------
+    For thermal noise the real and imaginary parts of one visibility have the same variance,
+    so a measured difference usually comes from the noise estimator (1-2 % when the noise is
+    estimated by differencing adjacent visibilities). By default such a chunk raises. With
+    `pool_noise_map=True` each chunk's noise-map is replaced by `noise_map_pooled_from` --
+    `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2`, which preserves the total variance --
+    before every term (precision operator, dirty image, dirty beam, `sum_weights`,
+    `data_term`, `noise_normalization`), so all of them describe one noise model; the result
+    is bit-identical to the default call on chunks pooled beforehand. One message is logged
+    per call, from the asymmetry accumulated over every chunk: none when every chunk already
+    had equal sigmas, an info line with the median and maximum difference when the median is
+    at most 25 %, and a warning above that, where the difference may be real.
+
+    Pooling is an approximation when the sigmas genuinely differ: the exact curvature is
+    `sum wbar cos(a - b) + dw cos(a + b)` (`wbar`, `dw` the mean and half-difference of the
+    real and imaginary weights) and the precision operator holds only the `cos(a - b)` part;
+    the dense `InversionInterferometerMapping` path is exact. The pooled `noise_normalization`
+    differs from the unpooled one at second order in the asymmetry per visibility, so do not
+    compare the log-evidences of a pooled and an unpooled fit of the same data.
+
+    Fine grids for uv-analytic components (`oversample=q`)
+    ------------------------------------------------------
+    A component that is analytic in the uv-plane (a point source, a small Gaussian) needs its
+    terms at sub-pixel positions. All of them are values of two image-plane functions, so with
+    `oversample=q` (a positive even integer) two more grids are accumulated in the same pass:
+
+    - `precision_operator_fine`, `K(lag) = sum_k w_k cos(2 pi u_k . lag)` on a grid `q` times
+      finer than the image pixel, over the full native shape plus a lag pad of
+      `ceil(oversample_pad * max(Ny, Nx))` pixels (so smoothing it does not wrap), in `W~`'s
+      wraparound order with the Nyquist row/column kept;
+    - `dirty_image_fine`, `D(x) = Re sum_k c_k exp(2 pi i u_k . x)` from the same (phase-shifted,
+      noise-weighted) data as the dirty image, centred, over twice the field.
+
+    See `SparseTerms` for their exact layout. Each is one extra type-1 NUFFT per chunk
+    (`_type1_real_grid_from`), added **in place** into arrays preallocated once, so the stream
+    holds the two grids plus one NUFFT working set -- never a fresh grid per chunk. Both inherit
+    the equal-sigma assumption (`K` uses the real-part weights) and `pool_noise_map`. The fine
+    grids need the NUFFT: `oversample` with a transformer other than `TransformerNUFFT` raises.
+
+    Memory and cost. At a 400 x 400 native grid and `q = 8`, `precision_operator_fine` is 8000^2
+    float64 (512 MB) and `dirty_image_fine` 6400^2 (328 MB), and `nufftax`'s 2x upsampled complex
+    work grid adds ~4 GB during each call: plan for 5-6 GB peak (`q = 4` is ~1.5 GB; ~112 pixels
+    at `q = 8` is under 0.5 GB). One info line logs the estimate for the actual shapes. The FFT
+    part of each fine NUFFT costs the same whatever the chunk length (seconds per chunk at
+    400 / `q = 8` on a CPU), so use large chunks (>= ~1e6 visibilities) with `oversample`. Under
+    JAX each distinct chunk length compiles its own transform.
+
+    Phase-centre shift
+    ------------------
+    With `phase_centre=(y0, x0)` (arcseconds, autoarray `(y, x)` order like a mask `origin`),
+    each chunk's visibilities are multiplied by the unit phase
+
+        d' = d * exp(+2 pi i (u * l0 + v * m0)),   l0 = x0, m0 = y0 in radians,
+
+    before any data-dependent term is formed. The forward transform is
+    `V(u, v) = sum I exp(-2 pi i (u x + v y))`, so this re-centres the phase centre onto
+    `(y0, x0)`: a source at `(y0, x0)` lands at the image origin. The shifted visibilities
+    form both the dirty image and `data_term`, so every data-dependent term describes the same
+    visibilities. The precision operator, dirty beam, `sum_weights`, `noise_normalization` and
+    `n_vis` depend on the baselines and sigmas alone and are bit-identical to the unshifted
+    accumulation. `data_term` is invariant under a unit phase only when the real and imaginary
+    sigmas are exactly equal; `check_noise_map_real_imag_equal` accepts them equal to a relative
+    tolerance, so with slightly unequal sigmas it differs from the unshifted value at that
+    tolerance (it is still the correct `data_term` of the shifted data). With
+    `pool_noise_map=True` the sigmas are exactly equal after pooling, so `data_term` is
+    exactly phase-invariant. The shift is recorded
+    as `SparseTerms.phase_centre` provenance (`(0.0, 0.0)` when no shift is applied), so terms
+    with different phase centres -- including shifted and unshifted ones -- refuse to be
+    summed.
+
+    Parameters
+    ----------
+    chunks
+        The `(uv_wavelengths, data, noise_map)` chunks.
+    real_space_mask
+        The real-space `Mask2D` the terms are accumulated on.
+    transformer_class
+        A callable `transformer_class(uv_wavelengths=..., real_space_mask=...)` returning a
+        transformer (`TransformerNUFFT`, `TransformerDFT`, or a factory closing over e.g. an
+        `eps`) that is built per chunk to form the dirty image and beam. `None` is
+        `TransformerNUFFT`.
+    method, eps, chunk_size, chunk_k, use_jax, show_progress
+        Passed to `nufft_precision_operator_from` for each chunk (`chunk_size` is the NUFFT
+        builder's own inner chunk, a memory ceiling within a chunk). `eps=None` is `1e-12`.
+    phase_centre
+        The `(y, x)` phase-centre shift in arcseconds applied to every chunk's visibilities
+        before forming the dirty image (see "Phase-centre shift" above). `None` applies no
+        shift and records `(0.0, 0.0)`.
+    pool_noise_map
+        If `True`, pool every chunk's real and imaginary sigma in quadrature before forming
+        any term, instead of raising on unequal sigmas (see "Unequal real and imaginary
+        sigma" above). `False` (the default) keeps the equal-sigma check.
+    oversample
+        If set, the positive even factor `q` by which the fine grids `precision_operator_fine`
+        and `dirty_image_fine` are finer than the image pixel (see "Fine grids" above). `None`
+        (the default) accumulates no fine grids.
+    oversample_pad
+        The extra lag of `precision_operator_fine`, as a fraction of the larger native axis
+        (rounded up to whole pixels). Ignored unless `oversample` is set.
+
+    Returns
+    -------
+    SparseTerms
+        The accumulated terms, with the scalars in float64.
+
+    Raises
+    ------
+    exc.DatasetException
+        If any chunk's noise-map has unequal real and imaginary sigma and `pool_noise_map`
+        is `False`.
+    ValueError
+        If `chunks` yields no visibilities, or `oversample` is not a positive even integer.
+    exc.InversionException
+        If `oversample` is set and the transformer is not a `TransformerNUFFT`.
+    """
+    if oversample is not None:
+        _check_oversample(oversample, oversample_pad)
+
+        oversample = int(oversample)
+        oversample_pad = float(oversample_pad)
+
+        shape_operator_fine, shape_dirty_image_fine = fine_grid_shapes_from(
+            real_space_mask.shape_native, oversample, oversample_pad
+        )
+
+        # The same radian pixel scale the precision-operator builder reads off the grid.
+        pixel_scale_radians_fine = (
+            _pixel_scale_radians_from(
+                real_space_mask.derive_grid.all_false.in_radians.native.array
+            )
+            / oversample
+        )
+
+        _log_fine_grid_memory(shape_operator_fine, shape_dirty_image_fine, oversample)
+
+        precision_operator_fine = np.zeros(shape_operator_fine, dtype=np.float64)
+        dirty_image_fine = np.zeros(shape_dirty_image_fine, dtype=np.float64)
+
+    if transformer_class is None:
+        from autoarray.operators.transformer import TransformerNUFFT
+
+        transformer_class = TransformerNUFFT
+
+    from autoarray.structures.visibilities import Visibilities
+
+    if eps is None:
+        eps = 1.0e-12
+
+    shift = phase_centre is not None
+
+    if not shift:
+        phase_centre = (0.0, 0.0)
+    else:
+        from astropy import units
+
+        phase_centre = (float(phase_centre[0]), float(phase_centre[1]))
+        arcsec_to_rad = units.arcsec.to(units.rad)
+        m0 = phase_centre[0] * arcsec_to_rad
+        l0 = phase_centre[1] * arcsec_to_rad
+
+    pooling_record = _NoiseMapPoolingRecord() if pool_noise_map else None
+
+    terms = None
+
+    for uv_wavelengths, data, noise_map in chunks:
+
+        uv_wavelengths = np.asarray(
+            getattr(uv_wavelengths, "array", uv_wavelengths), dtype=np.float64
+        )
+
+        if uv_wavelengths.shape[0] == 0:
+            continue
+
+        data = _complex_visibilities_from(data)
+        noise_map = _complex_visibilities_from(noise_map)
+
+        if not (data.shape[0] == noise_map.shape[0] == uv_wavelengths.shape[0]):
+            raise ValueError(
+                "sparse_terms_from_chunks: a chunk's uv_wavelengths, data and noise_map must "
+                f"have the same length, got {uv_wavelengths.shape[0]}, {data.shape[0]} and "
+                f"{noise_map.shape[0]}."
+            )
+
+        # Pooling replaces the noise-map before every term below, so the precision operator,
+        # dirty image, beam and both scalars all describe the same (pooled) noise model.
+        if pool_noise_map:
+            pooling_record.add(noise_map)
+            noise_map = noise_map_pooled_from(noise_map)
+        else:
+            check_noise_map_real_imag_equal(noise_map)
+
+        noise_map_real = noise_map.real
+        noise_map_imag = noise_map.imag
+
+        transformer = transformer_class(
+            uv_wavelengths=uv_wavelengths, real_space_mask=real_space_mask
+        )
+
+        if oversample is not None:
+            from autoarray.operators.transformer import TransformerNUFFT
+
+            if not isinstance(transformer, TransformerNUFFT):
+                raise exc.InversionException(
+                    "sparse_terms_from_chunks: `oversample` needs the NUFFT path -- the fine "
+                    "grids are type-1 NUFFTs consistent with `TransformerNUFFT`'s dirty image -- "
+                    f"but the transformer is a {type(transformer).__name__}. Use "
+                    "`transformer_class=TransformerNUFFT` (the default) or drop `oversample`."
+                )
+
+        # The phase-centre shift is applied to the data before every data-dependent term (the
+        # dirty image and `data_term`), so all of them describe the same shifted visibilities.
+        # The precision operator, dirty beam, `sum_weights` and `noise_normalization` depend on
+        # the baselines and sigmas alone.
+        if shift:
+            data = data * np.exp(
+                2j * np.pi * (uv_wavelengths[:, 0] * l0 + uv_wavelengths[:, 1] * m0)
+            )
+
+        # The same arguments `Interferometer.psf_precision_operator_from` builds from the
+        # dataset's own transformer, so the per-chunk operators sum to the dataset's.
+        nufft_precision_operator = np.asarray(
+            nufft_precision_operator_from(
+                noise_map_real=noise_map_real,
+                uv_wavelengths=uv_wavelengths,
+                shape_masked_pixels_2d=transformer.grid.mask.shape_native_masked_pixels,
+                grid_radians_2d=transformer.grid.mask.derive_grid.all_false.in_radians.native.array,
+                method=method,
+                eps=eps,
+                chunk_size=chunk_size,
+                chunk_k=chunk_k,
+                show_progress=show_progress,
+                use_jax=use_jax,
+            ),
+            dtype=np.float64,
+        )
+
+        # The same expression `Interferometer.apply_sparse_operator` forms its dirty image from.
+        dirty_image_native = np.asarray(
+            transformer.image_from(
+                visibilities=Visibilities(
+                    visibilities=data.real * noise_map_real**-2.0
+                    + 1j * data.imag * noise_map_imag**-2.0
+                ),
+            ).native.array,
+            dtype=np.float64,
+        )
+
+        weights = noise_map_real**-2.0
+
+        # The fine grids, added in place into the preallocated arrays (never a fresh grid per
+        # chunk). `K` is the real transform of the weights in `W~`'s wraparound order. `D` is
+        # built from `conj(c)`, which turns the core's `(-x, +y)` convention into the native
+        # orientation (`x` along the columns, `y` decreasing down the rows), centred.
+        if oversample is not None:
+            _type1_real_grid_from(
+                uv_wavelengths,
+                weights,
+                (shape_operator_fine[1], shape_operator_fine[0]),
+                pixel_scale_radians_fine,
+                eps=eps,
+                chunk_size=chunk_size,
+                centred=False,
+                zero_nyquist=False,
+                out=precision_operator_fine,
+            )
+
+            _type1_real_grid_from(
+                uv_wavelengths,
+                np.conj(
+                    data.real * noise_map_real**-2.0
+                    + 1j * data.imag * noise_map_imag**-2.0
+                ),
+                (shape_dirty_image_fine[1], shape_dirty_image_fine[0]),
+                pixel_scale_radians_fine,
+                eps=eps,
+                chunk_size=chunk_size,
+                centred=True,
+                zero_nyquist=False,
+                out=dirty_image_fine,
+            )
+
+        dirty_beam_native = np.asarray(
+            transformer.image_from(
+                visibilities=Visibilities(visibilities=weights.astype(np.complex128)),
+            ).native.array,
+            dtype=np.float64,
+        )
+
+        chunk_terms = SparseTerms(
+            nufft_precision_operator=nufft_precision_operator,
+            dirty_image_native=dirty_image_native,
+            dirty_beam_native=dirty_beam_native,
+            sum_weights=float(np.sum(weights)),
+            data_term=float(
+                np.sum(data.real**2.0 / noise_map_real**2.0)
+                + np.sum(data.imag**2.0 / noise_map_imag**2.0)
+            ),
+            noise_normalization=float(
+                np.sum(np.log(2 * np.pi * noise_map_real**2.0))
+                + np.sum(np.log(2 * np.pi * noise_map_imag**2.0))
+            ),
+            n_vis=int(uv_wavelengths.shape[0]),
+            shape_native=tuple(real_space_mask.shape_native),
+            pixel_scales=tuple(real_space_mask.pixel_scales),
+            origin=tuple(real_space_mask.origin),
+            eps=float(eps),
+            transformer_class_name=type(transformer).__name__,
+            phase_centre=phase_centre,
+        )
+
+        terms = chunk_terms if terms is None else terms + chunk_terms
+
+    if terms is None:
+        raise ValueError(
+            "sparse_terms_from_chunks: `chunks` yielded no visibilities, so there is nothing "
+            "to accumulate."
+        )
+
+    if pool_noise_map:
+        pooling_record.log()
+
+    if oversample is not None:
+        terms = replace(
+            terms,
+            precision_operator_fine=precision_operator_fine,
+            dirty_image_fine=dirty_image_fine,
+            oversample=oversample,
+            oversample_pad=oversample_pad,
+        )
+
+    return terms

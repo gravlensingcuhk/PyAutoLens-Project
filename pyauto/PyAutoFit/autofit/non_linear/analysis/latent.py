@@ -1,0 +1,414 @@
+"""
+First-class latent-variable extension point and computation engine.
+
+This module holds the two halves of PyAutoFit's latent-variable machinery,
+extracted from ``Analysis`` so the concern is self-contained (mirroring how
+``Visualizer`` and ``Result`` are declared on an ``Analysis``):
+
+- :class:`Latent` — the user/library extension point. Declare it on an analysis
+  as ``Latent = MyLatent`` (just like ``Visualizer = MyVisualizer``) and override
+  :meth:`Latent.keys` / :meth:`Latent.variables` to define latent variables.
+  Methods are ``@staticmethod`` taking ``analysis`` first, matching the
+  ``Visualizer`` convention.
+
+- :func:`latent_samples_from` — the batched evaluation engine (JAX vmap/jit or
+  NumPy dispatch, global NaN masking + greedy salvage). ``Analysis.compute_latent_samples``
+  is now a thin wrapper around it.
+
+Backwards compatibility: the default :class:`Latent` delegates to the (now
+legacy) ``Analysis.LATENT_KEYS`` / ``Analysis.compute_latent_variables`` /
+``Analysis.LATENT_BATCH_MODE``, so analyses that still override those keep
+working unchanged. New code should subclass :class:`Latent` instead.
+"""
+
+import functools
+import logging
+import time
+import traceback
+from typing import Optional
+
+import numpy as np
+
+from autonerves import conf
+
+from autofit import exc
+from autofit.non_linear.jax_compile import log_on_first_compile
+from autofit.non_linear.samples.sample import Sample
+from autofit.non_linear.samples.samples import Samples
+from autofit.non_linear.samples.util import simple_model_for_kwargs
+
+logger = logging.getLogger(__name__)
+
+
+class Latent:
+    """
+    Latent-variable extension point, declared on an analysis as
+    ``Analysis.Latent = MyLatent`` (mirrors ``Visualizer`` / ``Result``).
+
+    Subclass and override :meth:`keys` and :meth:`variables` to define a
+    catalogue of latent variables. All methods are ``@staticmethod`` and take
+    the ``analysis`` as their first argument, so per-fit state (e.g.
+    ``analysis.kwargs["magzero"]``) is reachable without an instance lifecycle.
+
+    The base implementation is a **backwards-compatibility shim**: it reads the
+    legacy ``Analysis.LATENT_KEYS`` and ``Analysis.compute_latent_variables``,
+    so existing analyses that override those continue to work without declaring
+    a ``Latent``. New code should subclass this class instead.
+    """
+
+    # JAX batch strategy: "vmap" or "jit". ``None`` means "defer to
+    # ``analysis.LATENT_BATCH_MODE``" — used by the back-compat shim so that an
+    # analysis which set ``LATENT_BATCH_MODE = "jit"`` (e.g. autogalaxy's
+    # ``AnalysisDataset``) keeps that choice without declaring a ``Latent``.
+    BATCH_MODE = None
+
+    @staticmethod
+    def keys(analysis) -> list:
+        """The ordered list of enabled latent names (back-compat: ``LATENT_KEYS``)."""
+        return list(analysis.LATENT_KEYS)
+
+    @staticmethod
+    def variables(analysis, parameters, model):
+        """
+        Compute the latent values for one sample, returned as a tuple/dict
+        positionally aligned with :meth:`keys`. Back-compat default delegates
+        to ``analysis.compute_latent_variables``.
+        """
+        return analysis.compute_latent_variables(parameters, model)
+
+
+def _model_latent_parameters(samples: Samples):
+    """
+    The model's declared latent parameters over the samples, or ``None`` when
+    ``output.yaml``'s ``latent_model_parameters`` is off, no component declares
+    any, or the samples carry no model that can say.
+
+    A periodic one (an angle) keeps the range its conversion gives it rather than
+    being recentred on this fit's posterior, so the column has the same range in
+    every fit (see ``autofit/mapper/prior_model/latent_parameters.py``).
+    """
+    try:
+        if not conf.instance["output"]["latent_model_parameters"]:
+            return None
+    except KeyError:
+        pass
+    model = getattr(samples, "model", None)
+    if model is None or not hasattr(model, "latent_parameters_from"):
+        return None
+    try:
+        latent = model.latent_parameters_from(np.asarray(samples.parameter_lists))
+    except Exception:
+        logger.warning(
+            "compute_latent_samples: the model's latent parameters could not be "
+            "computed and are left out of the latent output.",
+            exc_info=True,
+        )
+        return None
+    return latent if latent.has_latent else None
+
+
+def latent_samples_from(
+    analysis, samples: Samples, batch_size: Optional[int] = None
+) -> Optional[Samples]:
+    """
+    Compute latent-variable samples for every posterior sample.
+
+    A latent variable is not a free parameter of the model but can be derived
+    from it; its values (with errors) are stored in ``latent/`` alongside
+    ``samples.csv``. The latents to compute and how to compute them come from
+    ``analysis.Latent`` (:meth:`Latent.keys` / :meth:`Latent.variables`).
+
+    Compatible with NumPy and JAX: the per-sample computation is side-effect
+    free, batched via ``jax.vmap`` or per-sample ``jax.jit`` (selected by
+    ``Latent.BATCH_MODE``), and any NaN/Inf values are masked out globally
+    (degenerate latents dropped; samples carrying a NaN in a surviving latent
+    dropped; anti-correlated NaNs salvaged by sacrificing the worst-coverage
+    latent rather than discarding everything).
+
+    Returns ``None`` when no finite latent samples remain (or no latents are
+    defined).
+
+    Raises
+    ------
+    exc.SamplesException
+        If ``samples`` is ``None``. This is the resumed-fit case: a search whose
+        fit already completed short-circuits to
+        ``NonLinearSearch.result_via_completed_fit``, which loads the samples
+        back off disk from ``samples.csv``. If that file was never written --
+        because ``output.yaml``'s ``samples: false`` (or ``general.yaml``'s
+        ``samples_to_csv: false``) disabled it -- ``result.samples`` is ``None``
+        and there is nothing to compute latents from. Latent computation needs
+        the full sample list; ``samples_summary.json`` is not a substitute.
+    """
+    if samples is None:
+        raise exc.SamplesException(
+            "Cannot compute latent samples: `samples` is None.\n\n"
+            "This usually means the fit was resumed rather than run: a completed "
+            "fit reloads its samples from `samples.csv`, and that file was not "
+            "written because samples output is disabled (`samples: false` in "
+            "`config/output.yaml`, or `samples_to_csv: false` in "
+            "`config/general.yaml`).\n\n"
+            "Latent variables are computed per posterior sample, so the full "
+            "sample list is required -- `samples_summary.json` is not enough. "
+            "Either enable samples output and re-run the fit (deleting the "
+            "existing output so it is not resumed), or pass a `Samples` object "
+            "explicitly."
+        )
+
+    batch_size = batch_size or 10
+
+    latent = analysis.Latent
+    batch_mode = (
+        latent.BATCH_MODE
+        if latent.BATCH_MODE is not None
+        else analysis.LATENT_BATCH_MODE
+    )
+    keys = latent.keys(analysis)
+
+    # The model's own latent parameters (a shear's magnitude and angle for its
+    # gamma_1 / gamma_2, declared by the component class; see
+    # ``autofit/mapper/prior_model/latent_parameters.py``) join the analysis's
+    # latents in the same output. They are vectorised over the samples and need
+    # no instance, so they are added after the per-sample loop below.
+    model_latent = _model_latent_parameters(samples)
+
+    if not keys and model_latent is None:
+        return None
+
+    try:
+
+        start_latent = time.time()
+
+        compute_latent_for_model = functools.partial(
+            latent.variables, analysis, model=samples.model
+        )
+
+        # A latent function that raises becomes a NaN row (below) so one bad
+        # sample cannot abort the batch. That must never be *silent*: a raise
+        # on every sample means the latent function is broken for this model
+        # (e.g. a `jax.jit` trace failure), and the only symptom was "no
+        # finite latent samples remained" with the cause lost. Count the
+        # failures and keep the first traceback for the warnings below.
+        failures = {"count": 0, "first_traceback": None}
+
+        def _record_failure():
+            failures["count"] += 1
+            if failures["first_traceback"] is None:
+                failures["first_traceback"] = traceback.format_exc()
+
+        if analysis.is_jax:
+            import jax
+            import jax.numpy as jnp
+
+            if batch_mode == "vmap":
+                # vmap traces `variables` once for the whole batch, so a
+                # per-sample try/except is not possible here — latent functions
+                # on the vmap path must express failures as NaN (e.g.
+                # `jnp.where`), never by raising. The `jit` and numpy paths
+                # below do guard per sample.
+                batched_compute_latent = log_on_first_compile(
+                    jax.jit(jax.vmap(compute_latent_for_model)),
+                    "latent variable function (vmap)",
+                )
+            elif batch_mode == "jit":
+                jitted_compute_latent = log_on_first_compile(
+                    jax.jit(compute_latent_for_model),
+                    "latent variable function (per-sample jit)",
+                )
+                n_latents = len(keys)
+                nan_tuple = tuple(jnp.nan for _ in range(n_latents))
+
+                def _safe_jitted(p):
+                    # A latent that raises (any exception, not just
+                    # FitException) becomes a NaN row, which the global mask
+                    # below drops — one bad sample must not abort the batch.
+                    # The raise is recorded, not swallowed: see `failures`.
+                    try:
+                        return jitted_compute_latent(p)
+                    except Exception:
+                        _record_failure()
+                        return nan_tuple
+
+                def batched_compute_latent(parameters_batch):
+                    # Per-sample jit returns one (l1, l2, ..., lN) tuple per
+                    # sample. Transpose to a tuple of N batched arrays so the
+                    # downstream `jnp.stack(latent_values_batch, axis=-1)`
+                    # works identically to the vmap path.
+                    sample_results = [_safe_jitted(p) for p in parameters_batch]
+                    n_latents = len(sample_results[0])
+                    return tuple(
+                        jnp.stack([s[i] for s in sample_results])
+                        for i in range(n_latents)
+                    )
+
+            else:
+                raise ValueError(
+                    f"Unknown LATENT_BATCH_MODE={batch_mode!r}; expected 'vmap' or 'jit'."
+                )
+        else:
+            n_latents = len(keys)
+            nan_row = np.full(n_latents, np.nan)
+
+            def _safe_compute(xx):
+                # Any exception (not just FitException) becomes a NaN row,
+                # which the global mask below drops — a single failing latent
+                # evaluation must not abort the whole post-fit latent pass.
+                # The raise is recorded, not swallowed: see `failures`.
+                try:
+                    return compute_latent_for_model(xx)
+                except Exception:
+                    _record_failure()
+                    return nan_row
+
+            def batched_compute_latent(x):
+                return np.array([_safe_compute(xx) for xx in x])
+
+        from autonerves.test_mode import inject_latent_nans
+
+        parameter_array = np.array(samples.parameter_lists)
+
+        # Compute every batch first and accumulate the raw, UN-masked latent
+        # values into one (n_samples, n_latents) array. Masking is then done
+        # ONCE, globally, after the loop (see below).
+        #
+        # Doing the finite mask per batch (the previous behaviour) was a bug:
+        # a latent that went NaN for a single sample in one batch had its whole
+        # column dropped *for that batch only*, while other batches kept it.
+        # The resulting `Sample` objects then carried inconsistent kwargs key
+        # sets, and `Samples.summary()` raised `KeyError` building its model
+        # from the first sample's keys. Masking globally guarantees every
+        # retained sample shares one identical key set.
+        all_values = []
+        all_samples = []
+        # No analysis latents: nothing is evaluated per sample, every sample is
+        # kept, and the model's latent parameters alone are written below.
+        for i in range(0, len(parameter_array) if keys else 0, batch_size):
+
+            batch = parameter_array[i : i + batch_size]
+            batch_samples = samples.sample_list[i : i + batch_size]
+
+            # batched JAX call on this chunk
+            latent_values_batch = batched_compute_latent(batch)
+
+            if analysis.is_jax:
+                import jax.numpy as jnp
+
+                latent_values_batch = jnp.stack(
+                    latent_values_batch, axis=-1
+                )  # (batch, n_latents)
+
+            # Unify to NumPy so the global masking below is a single code path
+            # for both backends (latent values are scalars, host transfer is
+            # cheap and was already forced by the downstream `float(v)`).
+            latent_values_batch = np.asarray(latent_values_batch)
+
+            # Test-only NaN injection (no-op unless PYAUTO_LATENT_NAN_INJECT set).
+            latent_values_batch = inject_latent_nans(latent_values_batch, start_index=i)
+
+            all_values.append(latent_values_batch)
+            all_samples.extend(batch_samples)
+
+        if not keys:
+            all_samples = list(samples.sample_list)
+            all_values = np.empty((len(all_samples), 0))
+        elif all_values:
+            all_values = np.concatenate(all_values, axis=0)
+        else:
+            all_values = np.empty((0, len(keys)))
+
+        # Global masking. Every retained sample must share one identical,
+        # fully-finite latent key set (a `Samples` object is a rectangular
+        # samples x latents block; NaNs anywhere break `quantile`).
+        #
+        # 1. Drop a latent column that is non-finite for EVERY sample
+        #    (genuinely degenerate, e.g. a µJy latent with no magzero).
+        kept_idx = [
+            i for i in range(all_values.shape[1]) if np.isfinite(all_values[:, i]).any()
+        ]
+
+        # 2. Keep samples that are finite across all currently-kept latents.
+        #    Normally at least one sample is finite everywhere and we stop
+        #    immediately (behaviour unchanged). But if NaNs are anti-correlated
+        #    across latents — every sample NaN in some latent — the rectangular
+        #    block is empty. Rather than discard ALL latent output, greedily
+        #    sacrifice the worst-coverage latent and retry, retaining the
+        #    maximal-coverage latents and their finite samples.
+        while kept_idx:
+            row_mask = np.isfinite(all_values[:, kept_idx]).all(axis=1)
+            if row_mask.any():
+                break
+            nan_counts = (~np.isfinite(all_values[:, kept_idx])).sum(axis=0)
+            kept_idx.pop(int(np.argmax(nan_counts)))
+
+        print(
+            f"Time to compute latent variables: {time.time() - start_latent} seconds for {len(samples)} samples."
+        )
+
+        n_samples = len(parameter_array)
+
+        if failures["count"]:
+            logger.warning(
+                "compute_latent_samples: the latent function raised on %d of "
+                "%d samples; each becomes a NaN row and is dropped. First "
+                "failure:\n%s",
+                failures["count"],
+                n_samples,
+                failures["first_traceback"],
+            )
+
+        def _warn_no_latents():
+            if n_samples and failures["count"] == n_samples:
+                logger.warning(
+                    "compute_latent_samples: no finite latent samples remained "
+                    "because the latent function raised on EVERY sample -- "
+                    "the latent function is broken for this model (see the "
+                    "traceback above), the samples are not at fault; skipping "
+                    "latent output."
+                )
+            else:
+                logger.warning(
+                    "compute_latent_samples: no finite latent samples remained "
+                    "after masking; skipping latent output."
+                )
+
+        if not kept_idx and model_latent is None:
+            _warn_no_latents()
+            return None
+
+        kept_keys = [keys[i] for i in kept_idx]
+        kept_values = all_values[:, kept_idx]
+        row_mask = np.isfinite(kept_values).all(axis=1)
+        kept_values = kept_values[row_mask]
+        kept_samples = [s for s, keep in zip(all_samples, row_mask) if keep]
+
+        if len(kept_samples) == 0:
+            _warn_no_latents()
+            return None
+
+        model_items = (
+            [(path, column[row_mask]) for path, column in model_latent.latent_items]
+            if model_latent is not None
+            else []
+        )
+
+        latent_samples = [
+            Sample(
+                log_likelihood=sample.log_likelihood,
+                log_prior=sample.log_prior,
+                weight=sample.weight,
+                kwargs={
+                    **{k: float(v) for k, v in zip(kept_keys, values)},
+                    **{path: float(column[j]) for path, column in model_items},
+                },
+            )
+            for j, (sample, values) in enumerate(zip(kept_samples, kept_values))
+        ]
+
+        return type(samples)(
+            sample_list=latent_samples,
+            model=simple_model_for_kwargs(latent_samples[0].kwargs),
+            samples_info=samples.samples_info,
+        )
+
+    except NotImplementedError:
+        return None

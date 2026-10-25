@@ -1,0 +1,610 @@
+"""
+Abstract base classes for linear light profiles in **PyAutoGalaxy**.
+
+A linear light profile behaves identically to a standard light profile (e.g. `Sersic`, `Exponential`,
+`Gaussian`) except that its `intensity` is not a free parameter — instead, it is solved for analytically via
+a linear inversion during every likelihood evaluation.
+
+This reduces the number of non-linear parameters in a model fit by one per linear profile, which can
+substantially speed up non-linear sampling without any loss of accuracy.
+
+The `LightProfileLinear` class is the abstract base from which all linear light profile variants inherit.
+The `LightProfileLinearObjFuncList` subclass additionally supports regularization, allowing the solved
+intensities to be penalized by a smoothness prior.
+"""
+
+import functools
+import inspect
+import itertools
+import numpy as np
+from typing import Dict, List, Optional
+
+from autonerves import cached_property
+import autoarray as aa
+
+from autogalaxy.profiles.light.operated.abstract import (
+    LightProfileOperated,
+)
+
+from autogalaxy.profiles.light.abstract import LightProfile
+
+from autogalaxy import exc
+
+
+@functools.lru_cache(maxsize=1)
+def _gaussian_image_2d_from():
+    """
+    The `Gaussian.image_2d_from` function object, whose body is exactly
+    `image_2d_via_radii_from(eccentric_radii_grid_from(grid))`.
+
+    `LightProfileLinearObjFuncList._shared_eccentric_radii_index_groups` compares the profile class's
+    `image_2d_from` against this to decide whether an eccentric-radius grid can be shared across the list. Identity
+    of the function object is the exact test: every subclass which inherits this implementation (the linear,
+    operated and spherical Gaussians) matches, and every subclass which overrides it (e.g. `GaussianMultipole`)
+    does not.
+
+    Imported lazily because `autogalaxy.profiles.light.standard` imports this module's base classes.
+    """
+    from autogalaxy.profiles.light.standard.gaussian import Gaussian
+
+    return Gaussian.image_2d_from
+
+
+class LightProfileLinear(LightProfile):
+    """
+    A linear light profile, which is a light profile whose `intensity` value is solved for via linear algebra
+    using an inversion.
+
+    Every standard light profile (e.g. `Serisic`, `Exponential`, etc.) has a linear light profile equivalent that
+    behaves identically, except that the `intensity` is not explicitly set by the user but instead is inferred via
+    a linear inversion.
+
+    This means that when a linear light profile is used to perform a model-fit, it reduces the number of free parameters
+    in the model-fit by 1, as the `intensity` parameter is inferred via the inversion.
+
+    The `LightProfileLinear` class is an abstract class that should be used to make specific linear light profiles.
+    This inheritance is used throughout the `galaxy.py`, `tracer.py` and other modules to extract linear light
+    profiles when performing a fit to data.
+    """
+
+    _pytree_token_counter = itertools.count()
+    __exclude_identifier_fields__ = ("pytree_token",)
+
+    # The `intensity` of a linear light profile is solved for by the inversion, not
+    # sampled by the non-linear search, so it has no prior and never appears in
+    # `model.info`. PyAutoFit's `graph_spec` reads this class attribute (the
+    # `__solved_parameters__` protocol) to draw `intensity` as a `solved` row in
+    # model figures. Subclasses (e.g. `lp_linear.Sersic`) inherit it.
+    __solved_parameters__ = ("intensity",)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pytree_token = next(LightProfileLinear._pytree_token_counter)
+
+    def __hash__(self):
+        return self.pytree_token
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, LightProfileLinear)
+            and self.pytree_token == other.pytree_token
+        )
+
+    def __getstate__(self):
+        # pytree_token is a process-local counter increment used only as a
+        # stable hash/eq identity for jax.jit flatten/unflatten round-trips.
+        # Persisting it would copy a number from one process's counter into
+        # another's — the JAX path uses register_model's attr_const which
+        # reads vars(self) directly and is unaffected by __getstate__.
+        return {k: v for k, v in self.__dict__.items() if k != "pytree_token"}
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "pytree_token" not in state:
+            self.pytree_token = next(LightProfileLinear._pytree_token_counter)
+
+    @property
+    def regularization(self):
+        return None
+
+    @property
+    def _intensity(self):
+        return 1.0
+
+    @property
+    def standard_lp_parent(self):
+        """
+        Returns the first parent class of the linear light profile which is not a linear light profile itself.
+
+        The functions below (e.g. `lp_instance_from`) are used to convert a linear light profile to its parent
+        standard light profile, where the input `intensity` is the value solved for in the linear inversion.
+
+        This function is used to determine the parent class of the linear light profile that is used to create the
+        standard light profile.
+
+        This function also maps linear light and mass profiles to their standard light and mass profile counterparts.
+        This specific mapping is required because their inheritence structure is different to the other light profiles.
+        In the future, the ugly dictionary used to do this mapping should be removed for better code.
+
+        Returns
+        -------
+        The parent class of the linear light profile that is not a linear light profile itself.
+        """
+
+        from autogalaxy.profiles import light_linear_and_mass_profiles as lmp_linear
+        from autogalaxy.profiles import light_and_mass_profiles as lmp
+
+        if isinstance(self, lmp.LightMassProfile):
+            lmp_mapping_dict = {
+                lmp_linear.Gaussian: lmp.Gaussian,
+                lmp_linear.GaussianGradient: lmp.GaussianGradient,
+                lmp_linear.SersicSph: lmp.SersicSph,
+                lmp_linear.Sersic: lmp.Sersic,
+                lmp_linear.SersicGradient: lmp.SersicGradient,
+                lmp_linear.SersicGradientSph: lmp.SersicGradientSph,
+                lmp_linear.ExponentialSph: lmp.ExponentialSph,
+                lmp_linear.Exponential: lmp.Exponential,
+                lmp_linear.ExponentialGradient: lmp.ExponentialGradient,
+                lmp_linear.ExponentialGradientSph: lmp.ExponentialGradientSph,
+                lmp_linear.DevVaucouleursSph: lmp.DevVaucouleursSph,
+                lmp_linear.DevVaucouleurs: lmp.DevVaucouleurs,
+                lmp_linear.SersicCoreSph: lmp.SersicCoreSph,
+                lmp_linear.SersicCore: lmp.SersicCore,
+            }
+
+            return lmp_mapping_dict[self.__class__]
+
+        bases = self.__class__.__bases__
+
+        if self.__class__.__name__.endswith("Sph") or isinstance(
+            self, LightProfileOperated
+        ):
+            bases = bases[0].__bases__
+
+        for cls in bases:
+            if not issubclass(cls, LightProfileLinear):
+                return cls
+
+    def parameters_dict_from(self, intensity: float) -> Dict[str, float]:
+        """
+        Returns a dictionary of the parameters of the linear light profile with the `intensity` added.
+
+        This `intenisty` will likely have come from the value inferred via the linear inversion.
+
+        Parameters
+        ----------
+        intensity
+            Overall intensity normalisation of the not linear light profile that is created (units are dimensionless
+            and derived from the data the light profile's image is compared too, which is expected to be electrons
+            per second).
+        """
+        parameters_dict = vars(self)
+        args = inspect.getfullargspec(self.standard_lp_parent).args
+        args.remove("self")
+
+        parameters_dict = {key: parameters_dict[key] for key in args}
+        parameters_dict["intensity"] = intensity
+
+        return parameters_dict
+
+    def lp_instance_from(
+        self, linear_light_profile_intensity_dict: Dict
+    ) -> LightProfile:
+        """
+        Creates an instance of a linear light profile using its parent normal light profile (e.g. the non linear
+        variant which has an `intensity` parameter).
+
+        The `intensity` value of the profile created is passed into this function and used.
+
+        Parameters
+        ----------
+        intensity
+            Overall intensity normalisation of the not linear light profile that is created (units are dimensionless
+            and derived from the data the light profile's image is compared too, which is expected to be electrons
+            per second).
+        """
+        intensity = linear_light_profile_intensity_dict[self]
+        parameters_dict = self.parameters_dict_from(intensity=intensity)
+
+        return self.standard_lp_parent(**parameters_dict)
+
+
+class LightProfileLinearObjFuncList(aa.AbstractLinearObjFuncList):
+    def __init__(
+        self,
+        grid: aa.type.Grid1D2DLike,
+        blurring_grid: aa.type.Grid1D2DLike,
+        psf: Optional[aa.Convolver],
+        light_profile_list: List[LightProfileLinear],
+        regularization=Optional[aa.reg.Regularization],
+        settings=aa.Settings(),
+        xp=np,
+    ):
+        """
+        A list of linear light profiles which fits a dataset via linear algebra using the images of each linear light
+        profile and the dataset.
+
+        By inheriting from `AbstractLinearObjFuncList` this tells the parent project PyAutoArray that this class is a
+        linear object that can be used in a linear inversion via its `Inversion` object. This means the linear light
+        profiles are used to perform a linear inversion to fit the data, which solves for the `intensity` of each light profile.
+
+        By overwriting the `mapping_matrix` function with a method that fills in each column of the matrix with the
+        image of each linear light profile, this is then passed through the `inversion` package to perform the
+        linear inversion. The API is identical to `Mapper` objects such that linear functions can easily be combined
+        with mappers.
+
+        The autoarray inversion module treats separely the `mapping_matrix` and the `operated_mapping_matrix`,
+        where the latter is the mapping matrix after all additional operations (e.g. convolution, FFT) have been applied.
+        The `operated_mapping_matrix` is used to perform the linear inversion. This class defines a function
+        `operated_mapping_matrix_override` which overrides the `operated_mapping_matrix` calculation in autoarray
+        to account for PSF convolution of the light profile images.
+
+        This is a slightly weird design, is is required because although the autoarray inversion module has
+        functionality to convolve ta `mapping_matrix` with a PSF in order to compute the `operated_mapping_matrix`,
+        it does not have functionality to account for the fact that the light profile images have flux outside the
+        masked region which is blurred into the masked region.
+
+        For example, in `PyAutoGalaxy` and `PyAutoLens` the light of galaxies is represented using `LightProfile`
+        objects, which describe the surface brightness of a galaxy as a function. By grouping lists of these linear
+        light profiles into this class, autoarray solves for their intensity's linearly.
+
+        Parameters
+        ----------
+        grid
+            The (y,x) grid aligned with the data that is fitted, which is used to evaluate the image of each light
+            profile.
+        blurring_grid
+            The blurring grid is all points whose light is outside the data's mask but close enough to the mask that
+            it may be blurred into the mask. This is also used when evaluating the image of each light profile.
+        psf
+            The psf used to blur the light profile images of each light profile, the output of which
+            makes up the columns of the `operated_mapping matrix`.
+        light_profile_list
+            A list of the linear light profiles that are used to fit the data via linear algebra.
+        regularization
+            The regularization scheme which may be applied to this linear object in order to smooth its solution.
+        """
+        for light_profile in light_profile_list:
+            if not isinstance(light_profile, LightProfileLinear):
+                raise exc.ProfileException(
+                    """
+                    A light profile that is not a LightProfileLinear object has been input into the
+                    LightProfileLinearObjFuncList object.
+
+                    Only children of the LightProfileLinear class can be used in a linear inversion.
+                    """
+                )
+
+        super().__init__(
+            grid=grid, regularization=regularization, settings=settings, xp=xp
+        )
+
+        self.blurring_grid = blurring_grid
+        self.psf = psf
+        self.light_profile_list = light_profile_list
+
+    @property
+    def params(self) -> int:
+        """
+        The `params` property is used by the autoarray inversion module to track how many parameters are solved
+        for in the linear inversion.
+
+        This is used to define the dimensions of certain matrices used in the linear algebra, for example the
+        `curvature_matrix` and `regularization_matrix`.
+
+        For this class, the number of parameters is equal to the number of light profiles in the list,
+        as each light profile contributes a single parameter to the inversion, its `intensity`.
+
+        Returns
+        -------
+        The number of parameters that are solved for in the linear inversion.
+        """
+        return len(self.light_profile_list)
+
+    @property
+    def pixels_in_mask(self) -> int:
+        """
+        The number of pixels in the mask of the grid, which is used to define the dimensions of the `mapping_matrix`
+        used in the linear inversion.
+
+        This function has two ways to return the number of pixels in the mask, depending on whether the inversion
+        is being performed on an imaging or interferometer dataset.
+
+        Returns
+        -------
+        The number of pixels in the mask of the grid.
+        """
+        return self.grid.mask.pixels_in_mask
+
+    @property
+    def mapping_matrix(self) -> np.ndarray:
+        """
+        Returns the `mapping_matrix` of the linear light profiles, where each column is the image of each light profile
+        evaluated on the grid before operations are applied (e.g. convolution, FFT).
+
+        This function iterates over each light profile in the list and evaluates its image on the grid, storing this
+        image in the `mapping_matrix`.
+
+        The standard behaviour is that this is only used for linear light profiles computed when fitting interferometer
+        data, where the `mapping_matrix` is used to compute the `operated_mapping_matrix` via a fast Fourier transform.
+        This is because the FFT does not require light outside the masked region to computed, unlike for imaging
+        data which omits this function and uses `operated_mapping_matrix_override` instead.
+
+        Returns
+        -------
+        The `mapping_matrix` of the linear light profiles.
+        """
+
+        return self._xp.stack(
+            self._image_slim_list_from(grid=self.grid, xp=self._xp), axis=1
+        )
+
+    @cached_property
+    def _shared_eccentric_radii_index_groups(self) -> List[List[int]]:
+        """
+        The light profiles grouped by the geometry they share, as lists of indices into `light_profile_list`.
+
+        Only groups of two or more `Gaussian` profiles with an identical `centre` and `ell_comps` are returned:
+        those are the groups which can share one reference-frame transform and one eccentric-radius grid. Every
+        other profile is left out of the groups and evaluated on its own.
+
+        This is the multi-Gaussian expansion (MGE) case: a basis of tens of `Gaussian` profiles which differ only
+        in their `sigma`. Every one of them would otherwise translate and rotate the same grid into the same
+        reference frame and then form the same eccentric radii from it. The transform is by far the most
+        expensive part of evaluating a Gaussian -- it costs an `arctan2`, a `sin` and a `cos` per coordinate,
+        against the single `exp` of the profile itself -- so hoisting it out of the loop is most of the cost of
+        an MGE's mapping matrix.
+
+        A basis is deliberately not required to be one group. The workspace's canonical MGE recipe stacks two
+        sets of 30 Gaussians which share a centre but carry their own `ell_comps`, and lands both sets in a
+        single `LightProfileLinearObjFuncList`; grouping serves that as two shared transforms rather than 60.
+
+        A `Gaussian`'s `image_2d_from` is exactly `image_2d_via_radii_from(eccentric_radii_grid_from(grid))`,
+        which is what makes the two shared quantities well defined. The test is the identity of the
+        `image_2d_from` function object, not `isinstance`: every subclass which inherits that implementation (the
+        linear, operated and spherical Gaussians) shares the radii, and every subclass which overrides it (e.g.
+        `GaussianMultipole`, whose multipole perturbation is applied to the radius) does not.
+
+        Other profiles are deliberately excluded even when they share a geometry. `Sersic` and its children
+        already avoid the polar transform via `_eccentric_radii_grid_from_cartesian`, which is only taken when
+        the grid handed to them is *not* pre-transformed -- so hoisting a transformed grid into them would be
+        both slower and a different floating-point expression.
+
+        Returns
+        -------
+        The index groups whose profiles share an eccentric-radius grid.
+        """
+        index_group_dict: Dict[tuple, List[int]] = {}
+
+        for index, light_profile in enumerate(self.light_profile_list):
+            if type(light_profile).image_2d_from is not _gaussian_image_2d_from():
+                continue
+
+            key = (
+                type(light_profile),
+                tuple(light_profile.centre),
+                tuple(light_profile.ell_comps),
+            )
+
+            index_group_dict.setdefault(key, []).append(index)
+
+        return [
+            index_group
+            for index_group in index_group_dict.values()
+            if len(index_group) > 1
+        ]
+
+    def _image_slim_list_from(self, grid, xp=np) -> List[np.ndarray]:
+        """
+        The `slim` image of every light profile in the list, evaluated on the input grid.
+
+        This is the per-profile loop that builds the columns of the `mapping_matrix` (and, for imaging data, of
+        the blurring mapping matrix). Profiles which form an MGE basis (see
+        `_shared_eccentric_radii_index_groups`) are evaluated a group at a time by
+        `_shared_eccentric_radii_image_slim_list_from`, which hoists the work they have in common out of the
+        loop; every other profile is evaluated independently, exactly as before.
+
+        Parameters
+        ----------
+        grid
+            The 2D (y,x) coordinates the light profile images are evaluated on.
+        xp
+            The array module used (numpy, or `jax.numpy` for the JAX calculation).
+
+        Returns
+        -------
+        A list of the `slim` image of every light profile.
+        """
+        light_profile_list = self.light_profile_list
+
+        index_groups = (
+            self._shared_eccentric_radii_index_groups
+            if xp is np and isinstance(grid, aa.Grid2D)
+            else []
+        )
+
+        if not index_groups:
+            return [
+                light_profile.image_2d_from(grid=grid, xp=xp).slim.array
+                for light_profile in light_profile_list
+            ]
+
+        image_slim_list = [None] * len(light_profile_list)
+
+        for index_group in index_groups:
+            image_slim_group = self._shared_eccentric_radii_image_slim_list_from(
+                grid=grid,
+                light_profile_list=[light_profile_list[i] for i in index_group],
+            )
+
+            for index, image_slim in zip(index_group, image_slim_group):
+                image_slim_list[index] = image_slim
+
+        for index, light_profile in enumerate(light_profile_list):
+            if image_slim_list[index] is None:
+                image_slim_list[index] = light_profile.image_2d_from(
+                    grid=grid, xp=np
+                ).slim.array
+
+        return image_slim_list
+
+    def _shared_eccentric_radii_image_slim_list_from(
+        self, grid, light_profile_list
+    ) -> List[np.ndarray]:
+        """
+        The `slim` image of every light profile in one shared-geometry group, computing the two parts of the
+        calculation which are identical for all of them -- the reference-frame transform of the over-sampled
+        grid, and the eccentric radii formed from it -- exactly once.
+
+        Both are computed by calling the same methods on the first profile of the group, with the same inputs,
+        that every profile would otherwise call on itself, so each profile is then handed a bit-identical radius
+        grid and the images returned are bit-identical to the per-profile loop.
+
+        Binning the over-sampled values back down stays a per-profile call, because
+        `OverSampler.binned_array_2d_from` takes a 1D array. Evaluating the `exp` stays a per-profile call too:
+        the arithmetic is transcendental-bound rather than overhead-bound, so stacking the profiles into one
+        (over-sampled pixels, profiles) block buys nothing and would have to be sliced column-wise to bin.
+
+        Parameters
+        ----------
+        grid
+            The 2D (y,x) coordinates the light profile images are evaluated on.
+        light_profile_list
+            One group of light profiles sharing a class, a `centre` and an `ell_comps`.
+
+        Returns
+        -------
+        A list of the `slim` image of every light profile in the group.
+        """
+        light_profile_0 = light_profile_list[0]
+
+        over_sampler = grid.over_sampler
+
+        transformed_grid = light_profile_0.transformed_to_reference_frame_grid_from(
+            grid.over_sampled, np
+        )
+
+        eccentric_radii = light_profile_0.eccentric_radii_grid_from(
+            grid=transformed_grid, xp=np
+        )
+
+        return [
+            over_sampler.binned_array_2d_from(
+                array=light_profile.image_2d_via_radii_from(eccentric_radii, np), xp=np
+            ).slim.array
+            for light_profile in light_profile_list
+        ]
+
+    @cached_property
+    def operated_mapping_matrix_override(self) -> Optional[np.ndarray]:
+        """
+        The inversion object takes the `mapping_matrix` of each linear object and combines it with the PSF
+        operator to perform a 2D convolution and compute the `operated_mapping_matrix`.
+
+        If this property is overwritten this operation is not performed, with the `operated_mapping_matrix` output this
+        property automatically used instead.
+
+        This is used for a linear light profile because the in-built mapping matrix convolution does not account for
+        how light profile images have flux outside the masked region which is blurred into the masked region. This
+        flux is outside the region that defines the `mapping_matrix` and thus this override is required to properly
+        incorporate it.
+
+        Returns
+        -------
+        A blurred mapping matrix of dimensions (total_mask_pixels, 1) which overrides the mapping matrix calculations
+        performed in the linear equation solvers.
+        """
+
+        if self.psf is None:
+            # Interferometer fits construct this object with `psf=None`: the override below is
+            # image-space and PSF-based, whereas an interferometer override must be in visibility
+            # space, so `None` keeps the standard mapping_matrix -> transformer inversion path
+            # (which is correct for both ordinary and operated light profiles).
+            return None
+
+        if isinstance(self.light_profile_list[0], LightProfileOperated):
+            return self.mapping_matrix
+
+        if (
+            self._xp is np
+            and self.psf.convolve_over_sample_size == 1
+            and self.blurring_grid is not None
+        ):
+            # Numpy fast path: convolve every light profile in one batched call
+            # instead of looping `convolved_image_from` once per profile. For an
+            # MGE of N Gaussians the loop rebuilds the `ConvolverState` and runs a
+            # separate 2D convolution N times; here the images are stacked into a
+            # single (pixels, N) mapping matrix and convolved as one (ny, nx, N)
+            # cube against the kernel.
+            #
+            # This is numerically the same operation: for `xp is np` and
+            # `convolve_over_sample_size == 1`, `convolved_image_from` itself
+            # dispatches to `convolved_image_via_real_space_np_from`, which
+            # scatters the image and blurring image into the very same
+            # `ConvolverState` frame (`state.mask` / `state.blurring_mask`) that
+            # the batched call below uses.
+            mapping_matrix = self.mapping_matrix
+
+            blurring_mapping_matrix = np.stack(
+                self._image_slim_list_from(grid=self.blurring_grid, xp=np),
+                axis=1,
+            )
+
+            return self.psf.convolved_mapping_matrix_via_real_space_np_from(
+                mapping_matrix=mapping_matrix,
+                mask=self.grid.mask,
+                blurring_mapping_matrix=blurring_mapping_matrix,
+                blurring_mask=self.blurring_grid.mask,
+            )
+
+        if self.psf.convolve_over_sample_size > 1:
+            # Retain the parent Grid2D while requesting unbinned values. A
+            # discrete profile needs the parent-pixel geometry to place its
+            # flux, whereas a bare Grid2DIrregular only contains coordinates.
+            evaluation_grid = self.grid
+            evaluation_blurring_grid = self.blurring_grid
+            convolution_mask = self.grid.mask
+        else:
+            evaluation_grid = self.grid
+            evaluation_blurring_grid = self.blurring_grid
+            convolution_mask = None
+
+        blurred_image_2d_list = []
+
+        from autogalaxy.operate.image import OperateImage
+
+        for pixel, light_profile in enumerate(self.light_profile_list):
+            if convolution_mask is not None:
+                image_2d = light_profile.image_2d_unbinned_from(
+                    grid=evaluation_grid, xp=self._xp
+                )
+                blurring_image_2d = light_profile.image_2d_unbinned_from(
+                    grid=evaluation_blurring_grid, xp=self._xp
+                )
+            else:
+                image_2d = light_profile.image_2d_from(
+                    grid=evaluation_grid, xp=self._xp
+                )
+                blurring_image_2d = light_profile.image_2d_from(
+                    grid=evaluation_blurring_grid, xp=self._xp
+                )
+
+            if convolution_mask is not None:
+                image_2d = OperateImage._binned_for_convolution(
+                    image_2d, self.grid, self.psf, xp=self._xp
+                )
+                blurring_image_2d = OperateImage._binned_for_convolution(
+                    blurring_image_2d, self.blurring_grid, self.psf, xp=self._xp
+                )
+
+            blurred_image_2d = self.psf.convolved_image_from(
+                image=image_2d,
+                blurring_image=blurring_image_2d,
+                use_mixed_precision=self.settings.use_mixed_precision,
+                mask=convolution_mask,
+                xp=self._xp,
+            )
+
+            blurred_image_2d_list.append(blurred_image_2d.array)
+
+        return self._xp.stack(blurred_image_2d_list, axis=1)

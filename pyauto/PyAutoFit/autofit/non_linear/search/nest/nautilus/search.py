@@ -1,0 +1,920 @@
+from __future__ import annotations
+
+import multiprocessing
+import numpy as np
+import logging
+import os
+import sys
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
+
+
+from autofit import exc
+from autofit.mapper.prior_model.abstract import AbstractPriorModel
+from autofit.mapper.prior.vectorized import PriorVectorized
+from autofit.non_linear.checkpoint import DillCheckpointer, NativeFileCheckpointer
+from autofit.non_linear.parallel import fork_context
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import WEIGHTED
+from autofit.non_linear.samples.nest import SamplesNest
+from autofit.non_linear.samples.adapter import RawSamples
+from autofit.non_linear.search import capabilities as cap
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+
+logger = logging.getLogger(__name__)
+
+NAUTILUS_FILENAME = "checkpoint.hdf5"
+"""
+nautilus's checkpoint file, the search's resume state.
+"""
+
+
+def _resumed_by_nautilus(path):
+    """
+    A nautilus checkpoint cannot be opened on its own: nautilus reopens it inside a
+    ``Sampler`` built with the run's prior and likelihood, which ``run`` does.
+    """
+    raise NotImplementedError(
+        f"The nautilus checkpoint {path} is resumed by nautilus.Sampler(filepath=...) "
+        "inside the search's run(ctx); it holds no samples until the fit completes."
+    )
+
+
+NAUTILUS_N_LIVE_MESSAGE = (
+    "Nautilus cannot fit this {prior_count}-parameter model with {argument}={value}: "
+    "nautilus fits an ellipsoid to the live points at its first bound, which needs "
+    "more points than dimensions (nautilus/bounds/basic.py, Ellipsoid.compute), so "
+    "the run would start and then fail. Set {argument} to at least {floor} "
+    "(n_live > n_dim, n_points_min >= n_dim + 1)."
+)
+"""
+The one message raised when a Nautilus live-point setting is below the model's floor.
+"""
+
+NAUTILUS_HDF5_LIBVER = ("v108", "latest")
+"""
+The HDF5 file-format bounds nautilus's checkpoint is opened with (see
+``_large_attribute_hdf5``).
+"""
+
+
+class _LargeAttributeH5py:
+    """
+    A stand-in for the ``h5py`` module inside ``nautilus.sampler`` whose ``File``
+    defaults to ``libver=NAUTILUS_HDF5_LIBVER`` when the caller passes none; every
+    other attribute is the real ``h5py``'s.
+    """
+
+    def __init__(self, h5py):
+        self._h5py = h5py
+
+    def File(self, *args, **kwargs):
+        kwargs.setdefault("libver", NAUTILUS_HDF5_LIBVER)
+        return self._h5py.File(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._h5py, name)
+
+
+@contextmanager
+def _large_attribute_hdf5():
+    """
+    Let nautilus write its checkpoint for models with 91 or more parameters.
+
+    nautilus-sampler 1.0.5 stores each ellipsoid bound's ``n_dim x n_dim`` matrices
+    (``A``, ``B``, ``B_inv``) as HDF5 attributes (``Ellipsoid.write``,
+    ``nautilus/bounds/basic.py`` :404-407) in a file it creates with
+    ``h5py.File(filepath, 'x')`` (``nautilus/sampler.py`` :1270), i.e. HDF5's
+    earliest file format, whose 64 KiB object-header message limit an
+    ``n_dim**2`` float64 array exceeds from ``n_dim = 91``. The first checkpoint
+    write after an ellipsoid bound then raises ``OSError: Unable to synchronously
+    create attribute (object header message is too large)``.
+
+    For the duration of the ``with`` block, ``nautilus.sampler.h5py`` is a proxy
+    whose ``File`` defaults to ``libver=('v108', 'latest')``, the HDF5 1.8 format
+    whose dense attribute storage holds attributes of any size. The checkpoint
+    round-trips and resumes; a file written this way needs HDF5 >= 1.8 to read,
+    which every supported h5py has. The real module is restored on exit.
+
+    Remove this once nautilus stores the bound matrices as datasets (or opens the
+    file with a newer libver) upstream.
+    """
+    try:
+        import nautilus.sampler as nautilus_sampler
+    except ImportError:
+        yield
+        return
+
+    h5py = getattr(nautilus_sampler, "h5py", None)
+
+    if h5py is None or isinstance(h5py, _LargeAttributeH5py):
+        yield
+        return
+
+    nautilus_sampler.h5py = _LargeAttributeH5py(h5py)
+    try:
+        yield
+    finally:
+        nautilus_sampler.h5py = h5py
+
+
+
+# How often `_LikelihoodWorkerPool.map` wakes up to check that the pool's
+# workers are the ones it was built with. Read at call time (not bound at
+# import) so tests can monkeypatch the module attribute.
+LIKELIHOOD_POOL_POLL_INTERVAL = 1.0
+
+
+class _LikelihoodWorkerPool:
+    """
+    A `multiprocessing.Pool` wrapper handed to nautilus as its likelihood pool
+    (`pool_l`), whose workers already hold the fitness function in a global set
+    by `nautilus.pool.initialize_worker` at fork time.
+
+    Nautilus calls `pool.map(self.likelihood, args)` (`nautilus/sampler.py`),
+    which for a plain pool object makes `multiprocessing` pickle the bound
+    `Fitness.call_wrap` — and therefore the whole analysis, dataset, PSF
+    convolver, sparse operator and adapt images — into every task chunk, for
+    every likelihood call. This class ignores the function it is mapped with
+    and dispatches `likelihood_worker` instead, which reads the worker-global
+    likelihood, exactly as nautilus does for a `pool=<int>` argument (#1547).
+
+    It also carries a **dead-worker watchdog**. `multiprocessing.Pool` silently
+    replaces a worker that dies (`Pool._maintain_pool` -> `_repopulate_pool`)
+    but never re-issues the task that worker was running, so a plain
+    `Pool.map` blocks forever and the whole fit hangs to the wall clock — RAL
+    job 342351_0 burned 27 hours after two likelihood workers segfaulted
+    (#1608, and the same mechanism as #1547). `map` therefore dispatches via
+    `map_async` and polls; on every poll it checks the exit code of every
+    worker captured at construction. A replacement restores the worker
+    *count*, but the original worker stays dead, so the loss is detectable,
+    and the fit fails with a diagnosable `SearchException` (naming the PID and
+    the signal) in seconds instead of hanging.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        # The construction-time worker `Process` objects. Watching *these* is
+        # what makes a `_repopulate_pool` replacement detectable: the pool
+        # restores the number of workers, so counting them proves nothing,
+        # while an original worker that died stays dead. Holding the objects
+        # (not just their PIDs) matters because the pool's maintenance thread
+        # joins and drops a dead worker from `pool._pool` within ~0.1 s; the
+        # retained object still reports its cached `exitcode` after that.
+        #
+        # `getattr` rather than `pool._pool` directly, so a pool-like test
+        # double without a `_pool` attribute still works (the watchdog then
+        # simply has nothing to watch).
+        self._workers = list(getattr(pool, "_pool", []))
+
+    @property
+    def size(self):
+        """
+        The number of worker processes, read by `nautilus.pool.NautilusPool.size`.
+        """
+        return getattr(self._pool, "_processes", None)
+
+    def map(self, func, iterable):
+        # `func` is deliberately ignored: nautilus's likelihood pool is only ever
+        # mapped with the likelihood, and dispatching the worker-global instead
+        # avoids pickling the `Fitness` (and its analysis and dataset) into every
+        # task chunk (#1547).
+        from nautilus.pool import likelihood_worker
+
+        result = self._pool.map_async(likelihood_worker, iterable)
+
+        while True:
+            try:
+                return result.get(timeout=LIKELIHOOD_POOL_POLL_INTERVAL)
+            except multiprocessing.TimeoutError:
+                # Not done yet — which is the normal case for a long chunk of
+                # likelihood evaluations, and also exactly what a hang looks
+                # like. Only the worker check can tell them apart.
+                self._check_workers_alive()
+
+    def _check_workers_alive(self):
+        """
+        Raise if any worker the pool was built with is gone.
+
+        `multiprocessing.Pool` replaces a dead worker behind our back and drops
+        its in-flight task on the floor, so the `map_async` above would never
+        complete. Detect the replacement and fail loudly instead.
+        """
+        dead = [worker for worker in self._workers if worker.exitcode is not None]
+
+        if not dead:
+            return
+
+        def _describe(worker):
+            code = worker.exitcode
+            if code < 0:
+                return f"pid {worker.pid} (exit code {code}, killed by signal {-code})"
+            return f"pid {worker.pid} (exit code {code})"
+
+        detail = ", ".join(_describe(worker) for worker in dead)
+
+        self._pool.terminate()
+
+        raise exc.SearchException(
+            f"A Nautilus likelihood worker died mid-fit: {detail}.\n\n"
+            f"A negative exit code is the signal that killed the worker "
+            f"(-11 SIGSEGV, -9 SIGKILL — typically an out-of-memory kill on a "
+            f"cluster).\n\n"
+            f"`multiprocessing.Pool` has already replaced the worker, but it "
+            f"never re-issues the task that worker was running, so the "
+            f"`Pool.map` driving this fit would otherwise block forever and the "
+            f"fit would hang to the wall clock rather than fail (RAL job "
+            f"342351_0 hung 27 hours this way). Failing now instead.\n\n"
+            f"Fix, either of:\n"
+            f"  - run the search with number_of_cores=1, which builds no pool "
+            f"at all;\n"
+            f"  - get parallelism from a vectorised JAX likelihood instead, "
+            f"`Analysis(use_jax=True)` — Nautilus then takes `fit_x1_cpu` with "
+            f"vectorized=True and no pool."
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self._pool.close()
+        else:
+            self._pool.terminate()
+        self._pool.join()
+        return False
+
+
+class Nautilus(NonLinearSearch):
+    samples_cls = SamplesNest
+
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.OPTIONAL
+    gradient = cap.Gradient.NONE
+    batched = True
+    honours_gradient_mode = False
+    posterior_kind = cap.PosteriorKind.WEIGHTED
+    produces_evidence = True
+    resumable = True
+    warm_start = cap.WarmStart.PROVIDER
+    install_extra = "optional"
+    upstream_url = "https://github.com/johannesulf/nautilus"
+    citation_keys = ("nautilus",)
+    status = cap.Status.STABLE
+    test_mode_budget = {"n_like_max": 1}
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.LOG_LIKELIHOOD, cap.CoordinateSpace.UNIT_CUBE)
+    invalid_value = -1.0e99
+    # The archive is the sampler dill-dumped without its multiprocessing pools (which
+    # cannot be pickled); the resume state is nautilus's own ``checkpoint.hdf5``,
+    # which nautilus itself reopens (``Sampler(filepath=...)``) and which is deleted
+    # once the fit completes.
+    checkpointer = DillCheckpointer(strip_attributes=("pool_l", "pool_s"))
+    resume_state = NativeFileCheckpointer(
+        NAUTILUS_FILENAME, loader=_resumed_by_nautilus
+    )
+
+    __identifier_fields__ = (
+        "n_live",
+        "n_update",
+        "enlarge_per_dim",
+        "n_points_min",
+        "split_threshold",
+        "n_networks",
+        "n_like_new_bound",
+        "seed",
+        "n_shell",
+        "n_eff",
+    )
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        n_live: int = 3000,
+        n_update: Optional[int] = None,
+        enlarge_per_dim: float = 1.1,
+        n_points_min: Optional[int] = None,
+        split_threshold: int = 100,
+        n_networks: int = 4,
+        n_batch: int = 100,
+        n_like_new_bound: Optional[int] = None,
+        vectorized: bool = False,
+        seed: Optional[int] = None,
+        f_live: float = 0.01,
+        n_shell: int = 1,
+        n_eff: int = 500,
+        n_like_max: float = float("inf"),
+        discard_exploration: bool = False,
+        verbose: bool = True,
+        iterations_per_quick_update: Optional[int] = None,
+        iterations_per_full_update: int = None,
+        number_of_cores: int = 1,
+        silence: bool = False,
+        force_x1_cpu: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        use_jax_vmap: Optional[bool] = None,
+        checkpoint: bool = True,
+        **kwargs,
+    ):
+        """
+        A Nautilus non-linear search.
+
+        Nautilus is an optional requirement and must be installed manually via the command `pip install nautilus-sampler`.
+        It is optional as it has certain dependencies which are generally straight forward to install.
+
+        For a full description of Nautilus checkout its Github and documentation webpages:
+
+        https://github.com/johannesulf/nautilus
+        https://nautilus-sampler.readthedocs.io/en/stable/index.html
+
+        Parameters
+        ----------
+        name
+            The name of the search, controlling the last folder results are output.
+        path_prefix
+            The path of folders prefixing the name folder where results are output.
+        unique_tag
+            The name of a unique tag for this model-fit, which will be given a unique entry in the sqlite database
+            and also acts as the folder after the path prefix and before the search name.
+        n_live
+            Number of live points used for sampling. Must exceed the number of free
+            parameters: nautilus fits an ellipsoid to the live points at its first
+            bound, which needs more points than dimensions. The search raises a
+            ``SearchException`` before any likelihood call when ``n_live`` is at or
+            below the model's ``prior_count``.
+        n_points_min
+            The minimum number of points each ellipsoid is fitted to (nautilus
+            defaults it to ``n_dim + 50``). When set, it must be at least
+            ``prior_count + 1``, checked like ``n_live``.
+        n_batch
+            Number of likelihood evaluations performed at each step.
+        n_like_max
+            Maximum number of likelihood evaluations before stopping.
+        f_live
+            Maximum fraction of evidence in the live set before terminating.
+        n_eff
+            Minimum effective sample size before stopping.
+        iterations_per_full_update
+            The number of iterations performed between update (e.g. output latest model to hard-disk, visualization).
+        number_of_cores
+            The number of cores sampling is performed using a Python multiprocessing Pool instance.
+
+            Not used by expectation-propagation factor searches, which refuse
+            `number_of_cores > 1` outright (`AbstractSearch.optimise`, human
+            ruling 2026-09-09): a forked worker that dies is replaced by
+            `multiprocessing.Pool` while its in-flight task is never re-issued,
+            so the fit hangs instead of failing. EP parallelism comes from a
+            JAX-vectorised likelihood (`Analysis(use_jax=True)`), which takes
+            the pool-free `fit_x1_cpu` path.
+        silence
+            If True, the default print output of the non-linear search is silenced.
+        force_x1_cpu
+            If True, force single-CPU mode even when number_of_cores > 1.
+        session
+            An SQLalchemy session instance so the results of the model-fit are written to an SQLite database.
+        checkpoint
+            If True (the default), nautilus writes its resume state, ``checkpoint.hdf5``,
+            in ``search_internal/`` and an interrupted fit resumes from it. If False, no
+            filepath is passed to nautilus, so nothing is written and an interrupted fit
+            starts again from scratch: an explicit resume-less mode, for example when
+            the checkpoint's disk I/O is unwanted. It does not change the samples, so it
+            is not an identifier field. Models with 91 or more parameters checkpoint
+            normally: the search writes the file in the HDF5 1.8 format, because
+            nautilus 1.0.5's default format cannot store their bounds
+            (``_large_attribute_hdf5``).
+        """
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=WEIGHTED.nested_initializer_for(kwargs.pop("initializer", None)),
+            iterations_per_full_update=iterations_per_full_update,
+            iterations_per_quick_update=iterations_per_quick_update,
+            number_of_cores=number_of_cores,
+            silence=silence,
+            session=session,
+            seed=seed,
+            **kwargs,
+        )
+
+        self.n_live = n_live
+        self.n_update = n_update
+        self.enlarge_per_dim = enlarge_per_dim
+        self.n_points_min = n_points_min
+        self.split_threshold = split_threshold
+        self.n_networks = n_networks
+        self.n_batch = n_batch
+        self.n_like_new_bound = n_like_new_bound
+        self.vectorized = vectorized
+
+        self.f_live = f_live
+        self.n_shell = n_shell
+        self.n_eff = n_eff
+        self.n_like_max = n_like_max
+        self.discard_exploration = discard_exploration
+        self.verbose = verbose
+
+        self.force_x1_cpu = force_x1_cpu
+        self.checkpoint = checkpoint
+        if use_jax_vmap is not None:
+            from autofit.non_linear.search.abstract_search import (
+                warn_deprecated_jax_knob,
+            )
+
+            warn_deprecated_jax_knob(
+                type(self).__name__,
+                "use_jax_vmap",
+                "a JAX analysis is evaluated through the batched objective "
+                "automatically (use_jax_vmap=False still evaluates it point by point "
+                "until the argument is removed).",
+            )
+
+        self.use_jax_vmap = use_jax_vmap
+
+        self.logger.debug("Creating Nautilus Search")
+
+    def fitness_overrides(self, analysis) -> dict:
+        """
+        The single-process path evaluates batches: a JAX analysis through the batched
+        objective, `n_batch` points per call (`force_x1_cpu` with a numpy analysis
+        evaluates point by point).
+        """
+        if self.force_x1_cpu or analysis.is_jax:
+            return {
+                "batched": self.use_jax_vmap is not False and analysis.is_jax,
+                "batch_size": self.n_batch,
+            }
+        return {}
+
+    def check_model(self, model: AbstractPriorModel):
+        """
+        Refuse a model nautilus cannot bound, before any likelihood call.
+
+        nautilus needs more live points than dimensions (``n_live > prior_count``) and,
+        when ``n_points_min`` is set, ``n_points_min >= prior_count + 1``; neither
+        nautilus nor its ``Sampler`` checks this up front, so the run otherwise
+        starts and fails at its first ellipsoid bound.
+
+        Raises
+        ------
+        exc.SearchException
+            With ``NAUTILUS_N_LIVE_MESSAGE``, naming the setting and its floor.
+        """
+        super().check_model(model=model)
+
+        if model is None:
+            return
+
+        prior_count = model.prior_count
+
+        if self.n_live <= prior_count:
+            raise exc.SearchException(
+                NAUTILUS_N_LIVE_MESSAGE.format(
+                    prior_count=prior_count,
+                    argument="n_live",
+                    value=self.n_live,
+                    floor=prior_count + 1,
+                )
+            )
+
+        if self.n_points_min is not None and self.n_points_min < prior_count + 1:
+            raise exc.SearchException(
+                NAUTILUS_N_LIVE_MESSAGE.format(
+                    prior_count=prior_count,
+                    argument="n_points_min",
+                    value=self.n_points_min,
+                    floor=prior_count + 1,
+                )
+            )
+
+    def run(self, ctx):
+        """
+        Run Nautilus (the ``run(ctx)`` hook; see ``docs/design/run_ctx.md``) and return
+        the sampler.
+
+        A JAX analysis (or ``force_x1_cpu``) runs in this process through the fit's
+        objective, batched on JAX; otherwise likelihoods are spread over the fit's pool.
+        Nautilus resumes from its own native checkpoint (``checkpoint.hdf5``).
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+        """
+        # `fit` runs the same guard; repeated here for callers that drive `run(ctx)`
+        # directly.
+        self.check_model(model=ctx.model)
+
+        if ctx.paths.supports_checkpointing and self.checkpoint_file is not None:
+            checkpoint_exists = Path(self.checkpoint_file).exists()
+        else:
+            checkpoint_exists = False
+
+        if checkpoint_exists:
+            self.logger.info(
+                "Resuming Nautilus non-linear search (previous samples found)."
+            )
+
+        else:
+            self.logger.info(
+                "Starting new Nautilus non-linear search (no previous samples found)."
+            )
+
+        if self.force_x1_cpu or ctx.pool.is_jax:
+            return self.fit_x1_cpu(
+                fitness=ctx.fitness,
+                model=ctx.model,
+                update=ctx.update,
+            )
+
+        return self.fit_multiprocessing(
+            fitness=ctx.fitness,
+            model=ctx.model,
+            pools=ctx.pool,
+            update=ctx.update,
+        )
+
+    @property
+    def sampler_cls(self):
+        try:
+            from nautilus import Sampler
+
+            return Sampler
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "\n--------------------\n"
+                "You are attempting to perform a model-fit using Nautilus. \n\n"
+                "However, the optional library Nautilus (https://nautilus-sampler.readthedocs.io/en/stable/index.html) is "
+                "not installed.\n\n"
+                "Install it via the command `pip install nautilus-sampler==1.0.5`.\n\n"
+                "----------------------"
+            )
+
+    @property
+    def checkpoint_file(self):
+        """
+        The path to the file used for checkpointing.
+
+        If autofit is not outputting results to hard-disk (e.g. paths is `NullPaths`), this function is bypassed.
+        It is None when the search was built with ``checkpoint=False``, so nautilus
+        writes no checkpoint at all.
+        """
+        if not getattr(self, "checkpoint", True):
+            return None
+        try:
+            return self.paths.search_internal_path / NAUTILUS_FILENAME
+        except TypeError:
+            pass
+
+    def fit_x1_cpu(self, fitness, model, analysis=None, update=None):
+        """
+        Perform the non-linear search, using one CPU core.
+
+        This is used if the likelihood function calls external libraries that cannot be parallelized or use
+        threading in a way that conflicts with the parallelization of the non-linear search.
+
+        Parameters
+        ----------
+        fitness
+            The function which takes a model instance and returns its log likelihood via the Analysis class
+        model
+            The model which maps parameters chosen via the non-linear search (e.g. via the priors or sampling) to
+            instances of the model, which are passed to the fitness function.
+        analysis
+            Contains the data and the log likelihood function which fits an instance of the model to the data, returning
+            the log likelihood the search maximizes.
+        """
+
+        if fitness.analysis.is_jax:
+            self.logger.info(
+                "Running search with JAX vectorization (parallelization handled by JAX)."
+            )
+        else:
+            self.logger.info(
+                "Running search where parallelization is disabled."
+            )
+
+        with _large_attribute_hdf5():
+            search_internal = self.sampler_cls(
+                prior=PriorVectorized(model=model),
+                likelihood=fitness.call_wrap,
+                n_dim=model.prior_count,
+                filepath=self.checkpoint_file,
+                pool=None,
+                vectorized=fitness.batched,
+                n_live=self.n_live,
+                n_update=self.n_update,
+                enlarge_per_dim=self.enlarge_per_dim,
+                n_points_min=self.n_points_min,
+                split_threshold=self.split_threshold,
+                n_networks=self.n_networks,
+                n_batch=self.n_batch,
+                n_like_new_bound=self.n_like_new_bound,
+                seed=self.backend_seed,
+            )
+
+            return self.call_search(
+                search_internal=search_internal,
+                model=model,
+                analysis=analysis,
+                fitness=fitness,
+                update=update,
+            )
+
+    def fit_multiprocessing(self, fitness, model, analysis=None, pools=None, update=None):
+        """
+        Perform the non-linear search, using multiple CPU cores parallelized via Python's multiprocessing module.
+
+        This uses PyAutoFit's sneaky pool class, which allows us to use the multiprocessing module in a way that plays
+        nicely with the non-linear search (e.g. exception handling, keyboard interupts, etc.).
+
+        Multiprocessing parallelization can only parallelize across multiple cores on a single device, it cannot be
+        distributed across multiple devices or computing nodes. For that, use the `fit_mpi` method.
+
+        Parameters
+        ----------
+        fitness
+            The function which takes a model instance and returns its log likelihood via the Analysis class
+        model
+            The model which maps parameters chosen via the non-linear search (e.g. via the priors or sampling) to
+            instances of the model, which are passed to the fitness function.
+        analysis
+            Contains the data and the log likelihood function which fits an instance of the model to the data, returning
+            the log likelihood the search maximizes.
+        """
+        # A pool object is passed rather than pool=<int> so the pool uses the
+        # "fork" start method (see autofit.non_linear.parallel.fork_context) —
+        # nautilus builds its internal pools from the default context.
+        #
+        # For a single core no pool may be created at all: nautilus treats
+        # pool=None (and the int 1) as fully serial, whereas a Pool(1) object
+        # forces every likelihood call into a forked worker — which deadlocks
+        # in XLA compilation when the likelihood touches JAX, since a forked
+        # child of a JAX-initialized parent cannot compile.
+        #
+        # The pool is passed as the tuple `(pool, None)` rather than as a bare
+        # `pool`, because nautilus otherwise uses the one pool for likelihood
+        # evaluations *and* for its own sampler calculations — in particular
+        # neural bound training (`nautilus/neural.py`,
+        # `NeuralNetworkEmulator.train` -> `pool.map`). A worker that dies
+        # mid-fit (e.g. a per-job OOM kill on a cluster) is silently replaced
+        # by `multiprocessing.Pool`, but the task it was running is never
+        # re-issued, so `map` blocks forever and the fit hangs — observed on
+        # RAL 2026-08-29 (#1547). `(pool, None)` keeps likelihoods parallel
+        # (`pool_l`) and makes bound training serial in the parent (`pool_s`),
+        # which is negligible: 4 small MLPs fit on at most a few hundred
+        # points.
+        #
+        # The pool is also built with nautilus's own `initialize_worker`, and is
+        # handed over wrapped in `_LikelihoodWorkerPool`, so that the likelihood
+        # is dispatched as `likelihood_worker`. Before a pool object was passed
+        # in place of `pool=<int>` (e6279c53f, #1439), nautilus did this itself;
+        # with a pool object it instead maps the bound `Fitness.call_wrap`, so
+        # `multiprocessing` pickles the entire analysis (dataset, PSF convolver,
+        # sparse operator, adapt images) into every task chunk and each worker
+        # unpickles a fresh copy for every likelihood call. Worker memory then
+        # grows by a few MB per call (8-core RAL runs reached the 96 GB cgroup
+        # limit) while the parent starves the pool serialising it (#1547).
+        pools = pools if pools is not None else self._pools()
+
+        if pools.number_of_cores <= 1:
+            pool_context = nullcontext(None)
+        else:
+            from nautilus.pool import initialize_worker
+
+            pool_context = _LikelihoodWorkerPool(
+                fork_context().Pool(
+                    pools.number_of_cores,
+                    initializer=initialize_worker,
+                    initargs=(fitness.call_wrap,),
+                )
+            )
+
+        with pool_context as pool, _large_attribute_hdf5():
+            search_internal = self.sampler_cls(
+                prior=PriorVectorized(model=model),
+                likelihood=fitness.call_wrap,
+                n_dim=model.prior_count,
+                filepath=self.checkpoint_file,
+                pool=(pool, None) if pool is not None else None,
+                n_live=self.n_live,
+                n_update=self.n_update,
+                enlarge_per_dim=self.enlarge_per_dim,
+                n_points_min=self.n_points_min,
+                split_threshold=self.split_threshold,
+                n_networks=self.n_networks,
+                n_batch=self.n_batch,
+                n_like_new_bound=self.n_like_new_bound,
+                vectorized=self.vectorized,
+                seed=self.backend_seed,
+            )
+
+            search_internal = self.call_search(
+                search_internal=search_internal,
+                model=model,
+                analysis=analysis,
+                fitness=fitness,
+                update=update,
+            )
+
+        # Drop the pool references so their finalizers don't fire at interpreter
+        # shutdown (after pickle has been torn down, causing AttributeError on
+        # Pool.__del__).
+        for pool_attr in ("pool_l", "pool_s"):
+            pool = getattr(search_internal, pool_attr, None)
+            if pool is not None:
+                try:
+                    pool.close()
+                    pool.join()
+                except Exception:
+                    pass
+                setattr(search_internal, pool_attr, None)
+
+        return search_internal
+
+    def call_search(self, search_internal, model, analysis, fitness, update=None):
+        """
+        The x1 CPU and multiprocessing searches both call this function to perform the non-linear search.
+
+        This function calls the search a reduced number of times, corresponding to the `iterations_per_full_update` of the
+        search. This allows the search to output results on-the-fly, for example writing to the hard-disk the latest
+        model and samples.
+
+        It tracks how often to do this update alongside the maximum number of iterations the search will perform.
+        This ensures that on-the-fly output is performed at regular intervals and that the search does not perform more
+        iterations than the `n_like_max` input variable.
+
+        Parameters
+        ----------
+        search_internal
+            The single CPU or multiprocessing search which is run and performs nested sampling.
+        model
+            The model which maps parameters chosen via the non-linear search (e.g. via the priors or sampling) to
+            instances of the model, which are passed to the fitness function.
+        analysis
+            Contains the data and the log likelihood function which fits an instance of the model to the data, returning
+            the log likelihood the search maximizes.
+        """
+
+        finished = False
+
+        minimum_iterations_per_full_updates = 3 * self.n_live
+
+        # The effective update interval is local to this call: the search's own
+        # `iterations_per_full_update` is a constructor argument and is never mutated.
+        iterations_per_full_update = self.iterations_per_full_update
+
+        if iterations_per_full_update < minimum_iterations_per_full_updates:
+
+            iterations_per_full_update = minimum_iterations_per_full_updates
+
+            logger.info(
+                f"""
+                The number of iterations_per_full_update is less than 3 times the number of live points, which can cause
+                issues where Nautilus loses sampling information due to stopping to output results. The number of
+                iterations per update has been increased to 3 times the number of live points, therefore a value
+                of {minimum_iterations_per_full_updates}.
+
+                To remove this warning, increase the number of iterations_per_full_update to three or more times the
+                number of live points.
+                """
+            )
+
+        while not finished:
+
+            iterations, total_iterations = self.iterations_from(
+                search_internal=search_internal,
+                iterations_per_full_update=iterations_per_full_update,
+            )
+
+            converged = search_internal.run(
+                f_live=self.f_live,
+                n_shell=self.n_shell,
+                n_eff=self.n_eff,
+                discard_exploration=self.discard_exploration,
+                verbose=self.verbose,
+                n_like_max=iterations,
+            )
+
+            iterations_after_run = self.iterations_from(search_internal=search_internal)[1]
+
+            if (
+                converged
+                or total_iterations == iterations_after_run
+                or (
+                    self.n_like_max is not None
+                    and iterations_after_run >= self.n_like_max
+                )
+            ):
+                finished = True
+
+            if not finished:
+
+                if update is not None:
+                    update(search_internal)
+                else:
+                    self.perform_update(
+                        model=model,
+                        analysis=analysis,
+                        during_analysis=True,
+                        fitness=fitness,
+                        search_internal=search_internal
+                    )
+
+        return search_internal
+
+    def iterations_from(
+        self, search_internal, iterations_per_full_update: Optional[float] = None
+    ) -> Tuple[int, int]:
+        """
+        Return the next cumulative likelihood-call budget and calls performed.
+
+        Nautilus budgets likelihood evaluations, not posterior samples. Batches
+        can overshoot a budget, so advance from the sampler's actual call count.
+
+        Parameters
+        ----------
+        search_internal
+            The Nautilus sampler.
+        iterations_per_full_update
+            The likelihood calls between full updates; defaults to the search's
+            `iterations_per_full_update`. `call_search` passes its effective value,
+            which is raised to at least three times the number of live points.
+
+        Returns
+        -------
+        The next cumulative likelihood-call limit and current likelihood count.
+        """
+
+        total_iterations = search_internal.n_like
+
+        if not self.paths.supports_checkpointing:
+            if self.n_like_max is not None and self.n_like_max != float("inf"):
+                return int(self.n_like_max), total_iterations
+            return int(1e99), total_iterations
+
+        if iterations_per_full_update is None:
+            iterations_per_full_update = self.iterations_per_full_update
+
+        iterations = total_iterations + iterations_per_full_update
+
+        if self.n_like_max is not None and self.n_like_max != float("inf"):
+            if iterations > self.n_like_max:
+                iterations = int(self.n_like_max)
+
+        return iterations, total_iterations
+
+    def samples_info_from(self, search_internal=None):
+        return {
+            "log_evidence": search_internal.log_z,
+            "total_samples": int(search_internal.n_like),
+            "total_accepted_samples": int(search_internal.n_like),
+            "time": self.timer.time if self.timer else None,
+            "number_live_points": int(search_internal.n_live),
+        }
+
+    def raw_samples_from(self, model, search_internal):
+        """
+        The nautilus posterior (``Sampler.posterior()``: points, log weights, log
+        likelihoods) as raw samples, with weights ``exp(log_w)``.
+
+        Parameters
+        ----------
+        model
+            Maps input vectors of unit parameter values to physical values and model instances via priors.
+        search_internal
+            The nautilus sampler.
+        """
+        parameters, log_weights, log_likelihoods = search_internal.posterior()
+
+        return RawSamples(
+            parameters=parameters,
+            log_likelihood=log_likelihoods,
+            weights=np.exp(log_weights),
+            info=self.info_from(search_internal),
+            label="Nautilus",
+        )
+
+    def info_from(self, internal):
+        return self.samples_info_from(search_internal=internal)
+
+    @property
+    def batch_size(self):
+        return self.n_batch
+
+    @property
+    def backend_seed(self) -> Optional[int]:
+        """
+        The seed the backend takes directly: ``seed``, made child-specific for a
+        grid-search child (``autofit.non_linear.search.seed.child_seed``).
+        """
+        from autofit.non_linear.search.seed import child_seed
+
+        return child_seed(self, self.seed)

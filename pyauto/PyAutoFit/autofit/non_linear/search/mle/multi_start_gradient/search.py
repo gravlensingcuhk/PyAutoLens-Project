@@ -1,0 +1,2424 @@
+from __future__ import annotations
+
+import inspect
+import pickle
+from types import SimpleNamespace
+from typing import Optional, Sequence, TYPE_CHECKING
+
+import numpy as np
+
+
+from autofit.mapper.prior_model.abstract import AbstractPriorModel
+from autofit.non_linear.search.abstract_search import ITERATIONS_NEVER
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import POINT
+from autofit.non_linear.fitness import Fitness
+from autofit.non_linear.objective import chunk_slices, evaluate_in_chunks
+from autofit.jax.gradient import (
+    resolve_gradient_mode,
+    validate_gradient_mode,
+    value_and_grad_from,
+)
+from autofit.non_linear.bijector import AbstractBijector, BijectorNone
+from autofit.non_linear.clipper import (
+    AbstractClipper,
+    ClipperNone,
+    ClipperPriorBoxJoint,
+)
+from autofit.non_linear.scaler import AbstractScaler, ScalerNone
+from autofit.non_linear.initializer import AbstractInitializer
+from autofit.non_linear.checkpoint import DillCheckpointer
+from autofit.non_linear.samples.adapter import RawSamples
+from autofit.non_linear.search import capabilities as cap
+from autofit.non_linear.search.mle.multi_start_gradient.convergence import (
+    MultiStartGradientConvergence,
+)
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+
+class AbstractMultiStartGradient(NonLinearSearch):
+
+    # The clipper changes where a lane can sit and therefore the result, so two
+    # runs differing only in clipper must not share an output directory. This
+    # re-keys every existing multi-start identifier (stored results are orphaned
+    # on disk, not deleted). Scoped to the clipper-consuming searches only: the
+    # nested samplers and MCMC searches never touch the clipper and their
+    # identifiers must stay byte-identical (PyAutoFit#1493).
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.REQUIRED
+    gradient = cap.Gradient.USES
+    batched = True
+    honours_gradient_mode = True
+    posterior_kind = cap.PosteriorKind.POINT
+    produces_evidence = False
+    resumable = True
+    warm_start = cap.WarmStart.PROVIDER
+    install_extra = ""
+    upstream_url = "https://github.com/google-deepmind/optax"
+    citation_keys = ("optax",)
+    status = cap.Status.STABLE
+    test_mode_budget = {"convergence.window": 1, "convergence.min_steps": 1}
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.NEG2_LOG_POSTERIOR, cap.CoordinateSpace.PHYSICAL)
+    # The value a NaN or infinite likelihood reaches the backend as: ``Fitness``
+    # replaces it with ``resample_figure_of_merit=-inf`` and the chi-squared
+    # conversion (x -2) turns that into ``+inf``. The sentinel is conditional: a
+    # ``FitException`` early return (numpy) and a failed traced assertion still return
+    # ``-inf``. Normalising it is the A3 objective adapter's job, not A1's.
+    invalid_value = float("inf")
+    # The dill written after every step is both the archive and the resume state.
+    checkpointer = DillCheckpointer()
+    resume_state = checkpointer
+
+    __identifier_fields__ = ("clipper",)
+
+    # Name of the optax update rule, resolved lazily at fit time from ``optax``
+    # then ``optax.contrib`` (so ``optax`` is only imported when a fit is
+    # actually run — it is a JAX-only optional dependency). Subclasses set this
+    # and a default learning rate for the rule; a ``_default_learning_rate`` of
+    # ``None`` means the rule is learning-rate-free (e.g. Prodigy) and is built
+    # from its own default with no learning rate supplied.
+    optax_method = None
+    _default_learning_rate = None
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        n_starts: int = 48,
+        n_steps: int = 300,
+        learning_rate: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        gradient_mode: Optional[str] = None,
+        max_consecutive_nan: int = 8,
+        start_lower_limit: float = 0.15,
+        start_upper_limit: float = 0.85,
+        resurrect: bool = False,
+        seed: Optional[int] = None,
+        convergence: Optional[MultiStartGradientConvergence] = None,
+        iterations_per_log: int = 10,
+        initializer: Optional[AbstractInitializer] = None,
+        clipper: Optional[AbstractClipper] = None,
+        scaler: Optional[AbstractScaler] = None,
+        bijector: Optional[AbstractBijector] = None,
+        reset_momentum_on_clip: bool = False,
+        record_lane_nan_history: bool = False,
+        trace_param_indices: Optional[Sequence[int]] = None,
+        iterations_per_full_update: int = None,
+        iterations_per_quick_update: int = None,
+        silence: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        **kwargs,
+    ):
+        """
+        A multi-start first-order gradient MAP optimizer (the "GIGA-Lens" recipe).
+
+        This search runs ``n_starts`` independent optimizations from broad,
+        randomly drawn starting points, all in parallel via ``jax.vmap``, using a
+        fixed self-normalised optax update rule (Adam / ADABelief / Lion). Starts
+        are *drawn* in the unit cube but are immediately mapped to **physical**
+        parameters (see ``_broad_starts``), and the rule steps in that physical
+        space — nothing constrains a step to the prior box, which is why a
+        ``clipper`` is available below. A wide population of starts is
+        what lets the method escape the many wrong basins that trap every
+        single-start, line-search or second-order optimizer on the kinked
+        likelihoods this promotes from (see the Phase-3 GPU MAP-optimizer
+        benchmark). The best-basin start is returned as the maximum-log-posterior
+        (MAP) point, with every start's final point retained as a diagnostic,
+        and each start's own best (position, figure-of-merit, step index)
+        preserved in ``search_internal`` (``lane_best_*``) for per-start basin
+        classification — a final point can leave its best basin late, die, or
+        pin to a bound after its best step.
+
+        The method is JAX-native: it requires an ``Analysis`` whose
+        ``log_likelihood_function`` is JAX-traceable (``use_jax=True``) and the
+        optional ``jax`` + ``optax`` dependencies.
+
+        Parameters
+        ----------
+        n_starts
+            The number of independent broad starts run in parallel (vmapped).
+        n_steps
+            The number of gradient-update steps each start is run for.
+        learning_rate
+            The optax learning rate. If ``None``, the rule's default is used
+            (Adam / ADABelief ``1e-2``; the sign-based Lion ``1e-3``). The
+            learning-rate-free rules (e.g. Prodigy) leave this ``None`` and are
+            built from their own default, estimating their own step scale.
+        max_consecutive_nan
+            The per-start rejected-step budget handed to ``optax.apply_if_finite``:
+            a non-finite gradient/update zeroes that start's step, and only after
+            this many *consecutive* non-finite steps does the guard error out.
+            This is the in-step guard for the measure-zero singularities (e.g.
+            ell_comps / shear at exactly 0); it does not rescue landscapes with
+            broad non-finite regions (that is the Phase-2 restart-on-death layer).
+        batch_size
+            The number of starts evaluated per compiled ``value_and_grad``
+            call. ``None`` (default) evaluates all ``n_starts`` in a single
+            ``jax.vmap`` — fastest, but it allocates the whole batched jvp at
+            once, which for a memory-heavy likelihood (e.g. a pixelized source
+            at 16 starts, ~58 GB in float64) exhausts even an 80 GB GPU.
+            Setting it sweeps the starts in ``batch_size``-wide vmapped chunks
+            from a Python loop, bounding both the memory footprint (one
+            chunk's jvp allocated at a time) and the XLA compile (one
+            chunk-shaped program, ever). The compile bound is why the sweep is
+            a Python loop and not an in-XLA scan: ``jax.lax.map`` welds the
+            whole sweep into one program, which for a multi-band
+            ``FactorGraphModel`` objective is intractable to compile (>1 hour
+            cold on CPU), while the same-width chunk alone compiles in
+            minutes.
+
+            This is purely an **implementation-level tiling**: it is numerically
+            inert (identical results, only the allocation and dispatch change).
+            That makes it unlike ``af.Nautilus``'s ``n_batch``, which is Nautilus's own
+            algorithmic knob (how many points it proposes per iteration) that
+            autofit merely forwards. Here ``n_starts`` is the algorithm; this
+            only decides how many of those starts are evaluated at a time.
+        gradient_mode
+            How the objective is differentiated: ``"reverse"``
+            (``jax.value_and_grad``) or ``"forward"`` (``jax.jacfwd`` over the
+            flat parameter vector). ``None`` (default) uses the analysis's
+            declared ``Analysis.gradient_mode`` -- ``"reverse"`` for every
+            analysis except those that declare otherwise, e.g.
+            ``autolens.AnalysisPoint`` declares ``"forward"`` because its
+            source-plane likelihood carries an inner forward-mode lensing
+            Hessian (autolens_profiling #327/#331). Pass a value to override
+            the declaration for this search. Both modes give the same gradient
+            and so the same fit; only speed, compile time and memory differ.
+
+            Memory caveat, alongside ``batch_size`` above: forward mode carries
+            one tangent per free parameter, so under the vmap over starts its
+            memory scales with ``n_starts * n_params`` (a ``batch_size``-wide
+            chunk's worth when batching). If a forward-mode fit exhausts memory,
+            set ``batch_size`` or override with ``gradient_mode="reverse"``.
+        start_lower_limit, start_upper_limit
+            The unit-cube bounds broad starts are drawn uniformly from. The
+            interior default ``(0.15, 0.85)`` avoids the prior edges where many
+            transforms (e.g. ``arctan2`` / ``sqrt`` at exactly 0) are singular.
+        clipper
+            Enforcement of prior support, applied to the parameters after every
+            update (see :mod:`autofit.non_linear.clipper`). Because the rule steps
+            in physical space against an objective that folds in the prior, a step
+            that leaves a hard-edged prior box makes the figure of merit ``-inf``;
+            the gradient there is the *finite* likelihood gradient, since
+            ``log_prior = -inf`` is constant outside the box and contributes
+            nothing, so ``apply_if_finite`` never fires and the lane keeps stepping
+            at full cost with its output discarded, for the rest of the run.
+            ``ClipperPriorBox`` projects such a lane back inside instead.
+
+            Default ``ClipperNone`` — a no-op, so behaviour is unchanged. Turning
+            enforcement on moves where the search converges and would shift every
+            stored multi-start benchmark, so the default flip is deliberately a
+            separate, re-baselined change.
+
+            ``ClipperPriorBoxJoint`` additionally projects onto the balls the
+            model's classes declare (the ``ell_comps`` disk being the canonical
+            one). It composes with ``scaler`` / ``bijector`` **per ball pair**,
+            not wholesale: a pair both of whose members the map merely rescales
+            by one common linear factor ``s`` is still a disk in the stepped
+            coordinates, of radius ``R / s``, and is projected onto normally; a
+            pair a ``log`` / ``logit`` kind or two unequal scales touch is not a
+            disk at all and raises. That check runs once against the model at
+            the start of ``run`` — not at construction, where there is no model
+            to ask — and always before the first likelihood evaluation.
+        scaler
+            A per-parameter step scale derived from the priors, applied as a
+            change of variables so the rule steps in ``phi = theta / scale`` while
+            the objective is still evaluated at the physical ``theta = scale *
+            phi`` (see :mod:`autofit.non_linear.scaler`).
+
+            It exists because this rule steps in **physical** space with a single
+            global step scale, while prior widths across one model routinely span
+            orders of magnitude (40x on the reference lens cell), so a step that
+            is sensible for the widest parameter is a wall-crossing for the
+            narrowest. Every other search family already handles this — the
+            nested samplers propose in the unit cube, Emcee is affine-invariant,
+            NUTS adapts a mass matrix, L-BFGS accumulates curvature — and this
+            family is the sole exception, because the Adam rules normalise by
+            *gradient* magnitude rather than *parameter* scale and Prodigy's
+            estimate is a single global scalar.
+
+            Default ``ScalerNone`` — a no-op that is skipped rather than applied
+            as a multiply by ones, so the default path and its compiled step are
+            both unchanged.
+
+            Complementary to ``clipper``, not a replacement for it: scaling makes
+            reaching a wall rarer, never impossible, and where the likelihood
+            genuinely prefers a value outside the prior only clipping can express
+            the resulting MAP.
+        bijector
+            A per-parameter change of variables (see
+            :mod:`autofit.non_linear.bijector`), applied instead of ``scaler``:
+            the rule steps in ``phi = bijector.forward(theta)`` while the
+            objective is still evaluated at the physical
+            ``theta = bijector.inverse(phi)``. Where ``scaler`` only ever
+            rescales linearly, a bijector may additionally reparameterise a
+            coordinate through ``log`` (for a coordinate whose natural step is
+            multiplicative, e.g. a ``LogUniformPrior``) or ``logit`` (secondary;
+            see :class:`~autofit.non_linear.bijector.BijectorLogit`). Mutually
+            exclusive with ``scaler`` -- passing both non-default raises
+            ``ValueError`` at construction, since they are two different
+            changes of variables for the same step.
+
+            No Jacobian is added to the objective for the same reason none is
+            added under ``scaler``: composing through a bijection relabels
+            points without changing the objective's value set, so the MAP is
+            unaffected (see the module docstring's equivalence argument).
+
+            Default ``BijectorNone`` -- a no-op, skipped entirely rather than
+            applied as an identity, so the default path and its compiled step
+            are both unchanged.
+
+            Composable with ``ClipperPriorBoxJoint`` where the map leaves each
+            declared ball pair identity-mapped under one common scale — so a
+            model wanting ``log`` on (say) an ``einstein_radius`` while its
+            ``ell_comps`` step linearly gets both the reparameterisation and
+            the disk. See ``clipper`` above for the condition and where it is
+            checked.
+        resurrect
+            Restart-on-death. When ``True``, any start whose objective goes
+            non-finite is redrawn each step (fresh params from the start band +
+            its per-start optimizer state reinitialised), leaving alive starts
+            untouched. Default ``False`` — the parametric (MGE-class) cell has
+            only the measure-zero singularity, so the ``apply_if_finite`` guard
+            suffices and behaviour/results are unchanged. Turn it on for
+            likelihoods with broad non-finite regions (pixelized sources), where
+            every trajectory otherwise walks into a wall within ~25–50 steps and
+            ``apply_if_finite`` alone latches the start *at* the cliff edge;
+            resurrection keeps the population alive and makes the landscape
+            searchable at all. (Even so, on such landscapes a nested sampler
+            still wins decisively — resurrection makes gradient MAP *viable*
+            there, not competitive.)
+        seed
+            Seeds the two random draws this search owns: the broad starting
+            points (``_broad_starts``) and, when ``resurrect`` is on, the redraw
+            of dead lanes. Default ``None`` reproduces the historical fixed
+            seeds exactly, so an existing fit is bit-identical and this argument
+            is purely additive.
+
+            It exists because without it the search cannot be varied *or*
+            genuinely repeated: both draws were hardcoded, so every run of the
+            same model produced the **same** starting population no matter what
+            the caller seeded. Seeding ``random`` / ``numpy`` globally does not
+            reach them — that only perturbs the initializer — which makes a
+            multi-seed study silently a single-seed one. Note the scope: this
+            seeds *this search's* draws, not the whole framework (the
+            initializer and any sampler-owned generator are separate, still-open
+            sources of non-reproducibility).
+        reset_momentum_on_clip
+            Zero the optimizer's momentum on the coordinates a ``clipper`` just
+            clipped. Default ``False``, so the clipping path is unchanged unless
+            asked for.
+
+            It exists because projection alone leaves a lane holding the exact
+            velocity that carried it out of the prior box, so the next step
+            drives it into the same wall and it is re-projected onto the same
+            bound indefinitely — counted as alive, permanently pinned, and still
+            paying a full likelihood-and-gradient evaluation every step. The
+            reset is per-coordinate: a lane clipped in one parameter keeps its
+            momentum in all the others.
+
+            Note that a pinned lane is not automatically a failure. Where the
+            likelihood genuinely prefers a value outside the prior, sitting on
+            the bound is the correct MAP answer under the declared prior, and
+            this flag would then be discarding useful state. It is a knob for
+            the case where pinning is an artefact of momentum rather than a
+            statement about the data.
+        record_lane_nan_history
+            Record ``lane_value_nan_history`` / ``lane_grad_nan_history`` --
+            one bit per lane per step, ``bitpacked`` to ``(n_steps,
+            ceil(n_starts / 8))`` via ``numpy.packbits`` -- alongside the
+            existing lifetime totals. The totals (``n_value_nan_lane_steps``,
+            ``n_grad_nan_lane_steps``) answer "how much"; this answers "when,
+            and which lane" at the cost of ``O(n_steps * n_starts)`` bits of
+            ``search_internal``, which is why it defaults ``False``. Uses the
+            same short-circuit style as ``has_scaler`` / ``has_clipper`` above,
+            so a default run's step loop is unchanged.
+        trace_param_indices
+            Optional physical-parameter indices (into
+            ``model.priors_ordered_by_id``) to record a full per-step trace
+            for, as ``trace_history`` -- shape ``(n_steps, n_starts, k)``,
+            PHYSICAL units. ``None`` (default) records nothing, at zero cost to
+            the step loop, the same short-circuit as
+            ``record_lane_nan_history``. Intended for post-hoc basin/step
+            diagnostics on a small, deliberately chosen set of coordinates --
+            recording every parameter for every step is the
+            ``(n_steps, n_starts, n_params)`` array this knob exists to avoid
+            paying for by default.
+        convergence
+            Auto-convergence (early-stopping) settings. When
+            ``check_for_convergence`` is ``True`` (the default) the search stops
+            early once the global-best figure-of-merit has plateaued, so users do
+            not have to hand-tune ``n_steps`` — which remains a hard ceiling / max
+            budget (the search never runs forever). ``None`` builds the default
+            ``MultiStartGradientConvergence()``. The check is deliberately skipped
+            when ``resurrect=True`` (the pixelized regime, whose best-fom climbs in
+            breakthrough jumps that a plateau check would false-stop on); there the
+            search leans on the ``n_steps`` ceiling.
+        iterations_per_log
+            How many steps pass between progress lines on the search log. The
+            step loop is otherwise entirely silent between "Starting new ..." and
+            "... sampling complete", which on a long fit leaves a user unable to
+            tell a live search from a hung one.
+
+            The framework's usual progress channels need help to reach this
+            search, which is why it has its own: ``iterations_per_full_update``
+            defaults to the never-sentinel, so the whole run is a single chunk
+            whose lone ``perform_update`` is (correctly) suppressed as duplicated
+            work; and ``Fitness``'s own quick-update counter is Python state
+            mutated inside ``fitness.call``, which is traced under
+            ``jax.jit(jax.vmap(…))`` here — it would run once at trace time and
+            never again, so the step loop feeds the quick-update cadence itself
+            (see ``iterations_per_quick_update`` below). The samplers dodge
+            the problem entirely by delegating to their own library's progress bar
+            (emcee ``progress=True``, dynesty ``print_progress``); a search that
+            owns its step loop has to report for itself.
+
+            The first step always logs regardless of this cadence, because that
+            line is what tells the user the XLA compile finished and stepping has
+            begun — the longest unexplained wait in a real run. A log line rather
+            than a progress bar: ``n_steps`` is a ceiling that auto-convergence
+            routinely stops short of, so a bar's ETA would mislead, and lines
+            survive SLURM/HPC log capture where bars do not.
+        iterations_per_quick_update
+            How many **gradient steps** pass between on-the-fly quick updates
+            of the maximum likelihood model (``analysis.perform_quick_update``
+            on the current global-best point: the fast max-likelihood
+            visualization, e.g. a ``fit.png``, plus the live display paths
+            below). The unit is deliberately NOT the per-evaluation counting
+            ``Fitness`` does for the searches that count inside
+            ``Fitness.call_wrap`` — there a batch of ``n_starts`` evaluations
+            advances the counter by ``n_starts``, so a cadence of 50 with 48
+            starts would fire roughly every second step. Here one gradient
+            step (which evaluates all ``n_starts`` lanes at once) advances the
+            counter by exactly one, driven from the host-side step loop via
+            ``_manage_quick_update_step`` because the traced
+            ``fitness.call`` cannot count (see ``iterations_per_log`` above).
+            Terminal steps skip the quick update — the framework performs the
+            full final update unconditionally when ``run`` returns.
+        live_visual_update
+            If ``True``, each quick update also refreshes a live view of the
+            fit (a matplotlib window in script mode, an in-place refreshed
+            cell in a notebook), through the same LiveDisplay /
+            BackgroundQuickUpdate machinery every other search uses. Requires
+            a finite ``iterations_per_quick_update``.
+        """
+
+        self.clipper = POINT.clipper_for(clipper)
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=POINT.initializer_for(initializer),
+            iterations_per_quick_update=iterations_per_quick_update,
+            iterations_per_full_update=iterations_per_full_update,
+            silence=silence,
+            session=session,
+            seed=seed,
+            **kwargs,
+        )
+
+        self.n_starts = n_starts
+        self.n_steps = n_steps
+        self.batch_size = batch_size
+        # Validated at construction so a mistyped mode fails here rather than
+        # at the first compile; resolved against the analysis at fit time
+        # (``_resolved_gradient_mode``), since no analysis exists yet.
+        self.gradient_mode = validate_gradient_mode(gradient_mode)
+        self.max_consecutive_nan = max_consecutive_nan
+        self.learning_rate = (
+            learning_rate if learning_rate is not None else self._default_learning_rate
+        )
+        self.start_lower_limit = start_lower_limit
+        self.start_upper_limit = start_upper_limit
+        self.resurrect = resurrect
+        # Resolved here rather than on ``AbstractMLE`` beside ``clipper``,
+        # deliberately. The clipper is shared because LBFGS genuinely uses it
+        # (it hands the bounds to scipy); a scaler has no meaning for a search
+        # that does not own its step loop, and hanging an inert knob off LBFGS
+        # would be a knob that silently does nothing.
+        self.scaler = scaler or ScalerNone()
+        self.bijector = bijector or BijectorNone()
+
+        # Rejected at construction, not at fit time: `scaler` and `bijector`
+        # are two different changes of variables for the same step (linear
+        # rescale vs. a general per-coordinate bijection), and letting both be
+        # non-default would mean silently picking one over the other rather
+        # than surfacing the conflict to the caller who set both.
+        if not isinstance(self.scaler, ScalerNone) and not isinstance(
+            self.bijector, BijectorNone
+        ):
+            raise ValueError(
+                f"{type(self).__name__} received both a non-default `scaler` "
+                f"({type(self.scaler).__name__}) and a non-default `bijector` "
+                f"({type(self.bijector).__name__}). They are two different "
+                "changes of variables for the same step -- pass exactly one. "
+                "(A plain diagonal scale can be expressed as a bijector via "
+                "`autofit.BijectorDiagonal(scaler)` if both are wanted at "
+                "once.)"
+            )
+
+        # A `ClipperPriorBoxJoint` alongside a scaler/bijector is NOT rejected
+        # here, deliberately, even though the pair above is. Whether the two
+        # compose is a question about the MODEL -- which coordinate pairs carry
+        # a ball, and how the map treats each of them -- and no model exists at
+        # construction. A ball survives a common linear rescale of both its
+        # members and nothing else, so the same search+clipper+bijector triple
+        # is perfectly well defined on one model and undefinable on the next.
+        # The check is made once in `run` (`_step_functions`), as soon as the bijector has been
+        # resolved against the model and before any step is compiled, so a bad
+        # combination still dies before the first likelihood evaluation.
+
+        self.reset_momentum_on_clip = reset_momentum_on_clip
+        self.record_lane_nan_history = bool(record_lane_nan_history)
+        self.trace_param_indices = (
+            list(trace_param_indices) if trace_param_indices is not None else None
+        )
+        self.convergence = (
+            convergence if convergence is not None else MultiStartGradientConvergence()
+        )
+
+        # Rejected here rather than clamped, and at construction rather than at
+        # the first step: a sub-1 cadence makes ``total_steps % cadence`` either
+        # raise (0) or log every step (negative, since the modulo is never 0),
+        # and a user who mistyped the knob is better served by an immediate error
+        # than by a schedule they never asked for. Mirrors the reasoning on
+        # ``AbstractSearch._check_step_count``, which it reuses.
+        self._check_step_count(iterations_per_log, "iterations_per_log")
+        self.iterations_per_log = int(iterations_per_log)
+
+        self.logger.debug(f"Creating {self.optax_method} MultiStartGradient Search")
+
+    def _resolved_gradient_mode(self, analysis) -> str:
+        """
+        The gradient mode this fit uses: the search's ``gradient_mode`` if set,
+        otherwise the analysis's declaration. ``getattr`` because a search
+        unpickled from before the keyword existed carries no attribute and must
+        defer to the analysis.
+        """
+        return resolve_gradient_mode(
+            analysis, override=getattr(self, "gradient_mode", None)
+        )
+
+    def _is_final_boundary(self, converged: bool, total_steps: int) -> bool:
+        """
+        Whether the chunk boundary just reached ends the search — either the
+        auto-convergence check fired, or the ``n_steps`` ceiling was hit.
+
+        ``run`` must not emit a ``perform_update`` at a terminal boundary:
+        ``start_resume_fit`` performs the final update unconditionally the
+        moment ``run`` returns, so one here is duplicated work. Flipping
+        ``during_analysis`` does not avoid that — ``SearchUpdater.update``
+        rebuilds the samples, recomputes the summary and re-runs likelihood
+        profiling on every call regardless of the flag.
+
+        A named predicate rather than an inline expression so the rule can be
+        tested directly; ``run`` itself needs jax + optax + a JAX-traceable
+        ``Analysis`` and cannot be driven from the NumPy-only library suite.
+        """
+        return bool(converged) or total_steps >= self.n_steps
+
+    @property
+    def quick_update_message(self) -> str:
+        """
+        The base-class message calls the cadence unit "iterations", which for
+        the searches that count inside ``Fitness.call_wrap`` means likelihood
+        evaluations — counted per batch, so ``n_starts`` at a time. This search
+        drives the cadence from its own host-side step loop instead (see
+        ``_manage_quick_update_step``), where the unit is **gradient steps**,
+        each of which evaluates all ``n_starts`` lanes at once. Saying so keeps
+        the startup line honest: before PyAutoFit#1552 this line announced a
+        cadence these searches then silently ignored, and a unit the search
+        does not count in is only a smaller version of the same false claim.
+        """
+        iterations = self.iterations_per_quick_update
+
+        if not np.isfinite(iterations) or iterations >= ITERATIONS_NEVER:
+            return super().quick_update_message
+
+        return (
+            "On-the-fly updates of the maximum likelihood model every "
+            f"{int(iterations)} gradient steps (each step evaluates all "
+            f"{self.n_starts} starts; progress log lines follow the separate "
+            "`iterations_per_log` cadence)."
+        )
+
+    def _manage_quick_update_step(self, fitness: Fitness, best_params, best_fom):
+        """
+        Feed one gradient step into ``Fitness``'s quick-update machinery.
+
+        ``fitness.call`` is traced under ``jax.jit(jax.vmap(...))`` here, so
+        the usual counting in ``Fitness.call_wrap`` can never run — the
+        Python-side counter would tick once at trace time and never again,
+        which is why these searches ignored ``iterations_per_quick_update``
+        entirely before PyAutoFit#1552. The step loop is plain host Python
+        (the same seam ``iterations_per_log`` uses), so the cadence is driven
+        from it instead: one call per step, passing the current global-best
+        point as a single scalar evaluation, which makes
+        ``Fitness.quick_update_count`` count **gradient steps** — each of
+        which evaluates all ``n_starts`` lanes — rather than the
+        per-evaluation batch counting the ``call_wrap`` searches get. The two
+        countings never mix: this search's evaluations bypass ``call_wrap``
+        by construction, so this is the sole feeder of the counter. The fire
+        path itself (``analysis.perform_quick_update``, the results text,
+        LiveDisplay / BackgroundQuickUpdate) runs unmodified.
+
+        Skipped while the global best is not yet finite: there is no model
+        worth visualizing before the first finite evaluation, and firing would
+        hand ``instance_from_vector`` a ``None``. In practice
+        ``_broad_starts`` filters the initial draws to finite objectives, so
+        the guard only bites on a run whose every lane dies immediately.
+
+        Parameters
+        ----------
+        fitness
+            The fit's ``Fitness`` (``ctx.fitness``), carrying the quick-update
+            cadence and display machinery.
+        best_params
+            The global-best parameter vector, in PHYSICAL units (the loop
+            maintains that invariant for ``samples_via_internal_from``).
+        best_fom
+            The global-best figure of merit (``-2 * log_posterior``).
+        """
+        if fitness.iterations_per_quick_update is None:
+            return
+
+        if not np.isfinite(best_fom):
+            return
+
+        log_likelihood = fitness.log_likelihood_from(
+            figure_of_merit=best_fom, parameters=best_params
+        )
+        fitness.manage_quick_update(
+            parameters=best_params, log_likelihood=float(log_likelihood)
+        )
+
+    @staticmethod
+    def _nan_lane_counts(foms, grad_finite):
+        """
+        Split one step's non-finite lanes into the two failure modes, and return
+        the alive mask the caller needs anyway.
+
+        Two distinct things go wrong per lane, and conflating them hides the
+        second:
+
+        - **value-NaN** — the likelihood is *undefined* at this point. This is
+          the lane death ``resurrect`` already triggers on.
+        - **gradient-NaN** — the likelihood is defined but *not differentiable*.
+          Nothing detects this today: ``optax.apply_if_finite`` zeroes the
+          update, so the lane silently freezes in place while still counting as
+          alive. A frozen lane looks exactly like a converged one in the
+          figure-of-merit trace.
+
+        The two counts are **disjoint by construction**: a lane that is
+        non-finite in both is one value-NaN, not one of each. A dead lane's
+        gradient is almost always non-finite too, so counting them independently
+        would double-report the ordinary case and drown the interesting one.
+
+        Returns ``(alive, n_value_nan, n_grad_nan)``. ``alive`` is returned
+        rather than recomputed by the caller so the finiteness test on ``foms``
+        happens once per step.
+
+        Pure NumPy and free of search state so it can be tested directly;
+        ``run`` itself needs jax + optax + a JAX-traceable ``Analysis`` and
+        cannot be driven from the NumPy-only library suite (same reasoning as
+        ``_is_final_boundary`` above).
+        """
+        alive = np.isfinite(np.asarray(foms))
+        grad_finite = np.asarray(grad_finite).astype(bool)
+
+        n_value_nan = int(np.count_nonzero(~alive))
+        n_grad_nan = int(np.count_nonzero(alive & ~grad_finite))
+
+        return alive, n_value_nan, n_grad_nan
+
+    @staticmethod
+    def _lane_best_update(
+        lane_best_params,
+        lane_best_foms,
+        lane_best_steps,
+        foms_np,
+        gather_physical,
+        step,
+    ):
+        """
+        Update the per-lane best records (in place) for one step.
+
+        Diagnostics only — never gates a redraw or a step, the same rule as
+        :meth:`_nan_lane_counts`. ``foms_np`` is the alive-masked
+        figure-of-merit vector (dead lanes carry ``inf``), so a dead lane can
+        never improve on its record. The comparison is strict, so a tie keeps
+        the EARLIEST best step — a plateaued lane does not creep its step
+        index forward.
+
+        ``gather_physical`` maps improved lane indices to their PHYSICAL
+        parameter rows and is called only when some lane improved — in
+        ``run`` it is the device->host copy (plus the scaler multiply), which
+        this laziness keeps off the no-improvement steps.
+
+        Pure NumPy and free of search state so it can be tested directly;
+        ``run`` itself needs jax + optax + a JAX-traceable ``Analysis`` and
+        cannot be driven from the NumPy-only library suite (same reasoning as
+        ``_nan_lane_counts`` above).
+        """
+        improved = foms_np < lane_best_foms
+        if improved.any():
+            improved_idx = np.flatnonzero(improved)
+            lane_best_params[improved_idx] = gather_physical(improved_idx)
+            lane_best_foms[improved_idx] = foms_np[improved_idx]
+            lane_best_steps[improved_idx] = step
+
+    @staticmethod
+    def _constrained_lane_count(alive, grad_finite, constraint_violation):
+        """
+        Count the lanes sitting outside a declared model constraint.
+
+        This is the third failure mode, disjoint from the two above and invisible
+        to both. A lane can walk into a saturating region of the model — the
+        ``ell_comps`` magnitude clamp is the reference case — where the
+        likelihood is finite and the gradient is finite but carries **no
+        component along the saturated direction**. There is no restoring force,
+        so the lane can never leave, and because its figure of merit is finite
+        and flat it looks exactly like a converged one.
+
+        Detecting this by inspecting the gradient does not work. The clamp kills
+        only the radial derivative; the angle stays differentiable, so in general
+        position both ``ell_comps`` components carry a large non-zero gradient
+        while their radial projection is zero only to floating-point residue. A
+        component-wise ``== 0`` test finds nothing. The detector therefore reads
+        the model's own declared constraint (see
+        :mod:`autofit.mapper.prior_model.constraint`), which states the valid
+        region exactly rather than inferring it from the gradient.
+
+        Disjoint by construction, on the same "one lane, one bucket" rule as
+        :meth:`_nan_lane_counts`: a lane already counted as value-NaN or
+        gradient-NaN is not counted here as well.
+
+        Measurement only — this never gates a redraw and never changes stepping,
+        exactly like the gradient-NaN count above.
+
+        Pure NumPy and free of search state so it can be tested directly; ``run``
+        needs jax + optax + a JAX-traceable ``Analysis`` and cannot be driven from
+        the NumPy-only library suite.
+        """
+        violation = np.asarray(constraint_violation)
+        eligible = np.asarray(alive) & np.asarray(grad_finite).astype(bool)
+        return int(np.count_nonzero(eligible & (violation > 0.0)))
+
+    @staticmethod
+    def _stop_reason_on_resume(stop_reason):
+        """
+        The ``stop_reason`` a resumed run should start from, given the one
+        restored from its previous ``search_internal``.
+
+        ``"converged"`` survives: the step loop's guard uses it to refuse
+        resuming a converged search into further steps. Every other reason
+        describes a run that is now over — keeping it would stamp a stale
+        ``"max_steps"`` on every intermediate checkpoint of a search that is in
+        fact still running, which is exactly what raising ``n_steps`` (the
+        documented way to extend a budget) does. It is re-derived at each chunk
+        boundary, so it starts clear.
+        """
+        return stop_reason if stop_reason == "converged" else None
+
+    def _should_log_progress(self, total_steps: int, converged: bool) -> bool:
+        """
+        Whether the step just completed should emit a progress line.
+
+        Three ways to qualify: the first step (the compile is over and the search
+        is genuinely moving — the single most useful line in the run), every
+        ``iterations_per_log``-th step thereafter, and the step that converged
+        (which lands off-cadence far more often than not, and is the one step a
+        user most wants to see).
+
+        ``silence`` suppresses all of them, matching how the samplers gate their
+        own progress output (e.g. Dynesty's ``print_progress=not self.silence``).
+
+        A named predicate rather than an inline condition so the cadence rule can
+        be tested directly; ``run`` needs jax + optax + a JAX-traceable
+        ``Analysis`` and cannot be driven from the NumPy-only library suite.
+        """
+        if self.silence:
+            return False
+
+        return (
+            bool(converged)
+            or total_steps <= 1
+            or total_steps % self.iterations_per_log == 0
+        )
+
+    def _compile_message(self, batched: bool) -> str:
+        """
+        The notice logged immediately before a step that will trigger an XLA
+        compile, so the ensuing wait is explained rather than silent.
+
+        Two distinct compiles block a fresh run, hence the ``batched`` switch:
+        the single-point ``value_and_grad`` that ``_broad_starts`` calls per draw,
+        and the vmapped (or ``batch_size``-chunked) one the step loop calls. Both
+        can run to minutes on a multi-band objective, and neither is reachable by
+        the ``Fitness._jit`` / ``_vmap`` / ``_grad`` compile notices — this search
+        builds its transforms straight off ``fitness.call``.
+
+        Phrased to match the sampler-wide compile message rather than inventing a
+        second dialect for the same event.
+        """
+        if not batched:
+            return (
+                "JAX: jit compiling the single-point objective used to draw "
+                f"{self.n_starts} broad starts, could take seconds or minutes..."
+            )
+
+        over = (
+            f"batches of {self.batch_size} starts"
+            if self.batch_size is not None
+            else f"all {self.n_starts} starts at once"
+        )
+
+        return (
+            f"JAX: jit compiling the vmapped objective over {over}, "
+            "could take seconds or minutes..."
+        )
+
+    def _progress_message(
+        self,
+        total_steps: int,
+        best_fom: float,
+        previous_fom: Optional[float],
+        n_alive: int,
+        n_constrained: int = 0,
+        estim_lr=None,
+    ) -> str:
+        """
+        The one-line progress report for a single step.
+
+        Compact and pipe-delimited rather than prose: unlike the one-shot notices
+        this line repeats tens of times per run, and sentences would bury the
+        numbers that carry the signal.
+
+        Reports the log posterior, not the raw figure of merit. ``best_fom`` is
+        ``-2 * log_posterior`` (what the search minimises), so the sign-and-halve
+        conversion here is the same one ``samples_via_internal_from`` applies —
+        a user comparing the log to their results should not have to do it in
+        their head.
+
+        Parameters
+        ----------
+        total_steps
+            Steps completed, reported against the ``n_steps`` ceiling.
+        best_fom
+            The global best figure-of-merit. Non-finite until some start finds a
+            finite basin, which is reported plainly rather than as ``inf``.
+        previous_fom
+            The global best at the previous progress line, used for the gain
+            since. ``None`` on the first line, and skipped while either end of
+            the comparison is non-finite (a first finite basin is an arrival, not
+            an improvement, and ``inf - x`` would print as ``inf``).
+        n_alive
+            Starts whose objective is currently finite, against ``n_starts`` —
+            the population-health signal that a falling best-fom alone hides.
+        n_constrained
+            Starts currently outside a declared model constraint. Omitted when
+            zero, so the line is unchanged for models declaring no constraint.
+            These starts are counted in ``n_alive`` as well: they are finite and
+            differentiable, which is exactly why they are otherwise invisible.
+        estim_lr
+            Per-start self-estimated step scale, for the learning-rate-free rules
+            that carry one (Prodigy's ``d``). ``None`` for the fixed-rate Adam
+            family, whose optimizer state has no such field; the field is then
+            omitted rather than rendered empty.
+        """
+        parts = [f"{self.optax_method} step {total_steps}/{self.n_steps}"]
+
+        if np.isfinite(best_fom):
+            parts.append(f"best log_post {-0.5 * best_fom:.4f}")
+
+            if previous_fom is not None and np.isfinite(previous_fom):
+                # fom is -2*log_posterior, so a fom drop of d is a log-posterior
+                # gain of d/2.
+                parts.append(f"gained {0.5 * (previous_fom - best_fom):.4f}")
+        else:
+            parts.append("best log_post — (no finite basin yet)")
+
+        parts.append(f"alive {n_alive}/{self.n_starts}")
+
+        if n_constrained:
+            parts.append(f"constrained {n_constrained}/{self.n_starts}")
+
+        if estim_lr is not None:
+            lr = np.asarray(estim_lr, dtype=float)
+            parts.append(
+                f"d {np.nanmin(lr):.2e} / {np.nanmedian(lr):.2e} / {np.nanmax(lr):.2e}"
+            )
+
+        return " | ".join(parts)
+
+    def _memory_budget_bytes(self):
+        """
+        Bytes available to the batched jvp, or ``None`` if not determinable.
+
+        Prefers the JAX device's own limit (the GPU case this guard mainly
+        exists for) and falls back to free host RAM.
+        """
+        try:
+            import jax
+
+            stats = jax.devices()[0].memory_stats() or {}
+            for key in ("bytes_limit", "bytes_reservable_limit"):
+                if stats.get(key):
+                    return int(stats[key])
+        except Exception:
+            pass
+
+        try:
+            import psutil
+
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            return None
+
+    def _warn_if_unbatched_exceeds_memory(self, model, analysis):
+        """
+        Warn, before compiling the full ``n_starts`` vmap, when its batched jvp
+        is projected to exceed available memory — naming the ``batch_size`` that
+        would fit.
+
+        Without this the only signal is XLA's ``RESOURCE_EXHAUSTED: Out of
+        memory allocating N bytes``, raised from inside the compiled program
+        with nothing pointing at the knob that fixes it. That cost two nightly
+        release runs in 2026-07 (PyAutoFit#1452).
+
+        This only ever *warns*. ``batch_size`` is numerically inert, so
+        auto-applying the suggestion would be safe in principle, but silently
+        changing the execution shape of every existing run on the strength of a
+        projection is not a trade this should make on its own.
+
+        **CPU is skipped deliberately.** Each probe is a full, throwaway XLA
+        compile of the batched ``value_and_grad`` (at batch 1 and batch 2), and
+        on a release-sized lens model those two compiles can cost more than
+        the fit itself. This was once skipped by accident, because
+        ``memory_analysis`` reported 0 on CPU; from jax 0.10.2 it reports a
+        non-zero value, both compiles ran, and one of them drew the slow CPU
+        compile mode (~54 min), pushing ``imaging/start_here.py`` to a 3605 s
+        TIMEOUT in release-integrate run 36226772178 (2026-09-26). The guard
+        exists for device-memory OOM on GPU (PyAutoFit#1452), so the CPU path
+        is left to the (unfiltered) traceback. The memory budget is also read
+        before any probe, so an undeterminable budget never pays a compile.
+
+        Any failure here is swallowed: a memory projection must never be the
+        reason a fit does not start.
+        """
+        try:
+            probe = getattr(analysis, "batched_memory_bytes", None)
+            if probe is None or self.n_starts is None or self.n_starts <= 1:
+                return
+
+            import jax
+
+            # Each probe below is a full model compile; never pay for them on
+            # CPU (see the docstring).
+            if jax.default_backend() == "cpu":
+                return
+
+            budget = self._memory_budget_bytes()
+            if not budget:
+                return
+
+            bytes_at_1 = probe(model=model, batch_size=1, gradient=True)
+            if not bytes_at_1:  # None (not on JAX) or 0 (unmeasurable)
+                return
+
+            bytes_at_2 = probe(model=model, batch_size=2, gradient=True)
+            if not bytes_at_2:
+                return
+
+            fixed, per_start = batch_memory_model(bytes_at_1, bytes_at_2)
+            suggested = batch_size_within_budget(
+                fixed, per_start, self.n_starts, budget
+            )
+            if suggested is None:
+                return
+
+            projected = fixed + self.n_starts * per_start
+            gb = 1024**3
+            self.logger.warning(
+                f"{type(self).__name__} is set to evaluate all "
+                f"{self.n_starts} starts in one jax.vmap (batch_size=None). "
+                f"Its batched value_and_grad is projected to need "
+                f"~{projected / gb:.1f} GB against ~{budget / gb:.1f} GB "
+                f"available, so this fit is likely to fail with an XLA "
+                f"RESOURCE_EXHAUSTED error. Pass batch_size={suggested} (or "
+                f"lower) to sweep the starts in chunks instead — the result is "
+                f"numerically identical, only the allocation and dispatch "
+                f"change."
+            )
+        except Exception:
+            return
+
+    def fitness_overrides(self, analysis) -> dict:
+        """
+        The quick-update cadence the ``Fitness`` is built with.
+
+    # ``fitness.call`` is differentiated inside ``jax.jit(jax.vmap(...))``
+    # below, so the per-evaluation quick-update counting that fires from
+    # ``Fitness.call_wrap`` can never run here — the step loop drives the
+    # cadence itself via ``_manage_quick_update_step`` (one count per
+    # gradient step). The kwargs are still forwarded so ``Fitness`` owns
+    # the LiveDisplay / BackgroundQuickUpdate setup through the exact path
+    # every other search uses. The never-sentinel maps to ``None`` so a
+    # disabled cadence is disabled *inside* ``Fitness`` too: no
+    # visualization warm-up at construction, and
+    # ``_manage_quick_update_step`` short-circuits to zero per-step work.
+        """
+        return {
+            "iterations_per_quick_update": (
+                None
+                if not np.isfinite(self.iterations_per_quick_update)
+                or self.iterations_per_quick_update >= ITERATIONS_NEVER
+                else self.iterations_per_quick_update
+            )
+        }
+
+    def run(self, ctx):
+        """
+        Fit a model by running ``n_starts`` broad optax optimizations in parallel
+        (vmapped) and returning the best-basin (maximum-log-posterior) start (the
+        ``run(ctx)`` hook; see ``docs/design/run_ctx.md``).
+
+        The objective minimized is ``Fitness.call`` with
+        ``fom_is_log_likelihood=False`` and ``convert_to_chi_squared=True``, which
+        returns ``-2 * log_posterior``; invalid / NaN models map to ``+inf`` so
+        they are never selected as the best basin.
+
+        The run is split into its phases: the step objectives
+        (``_step_functions``), the starting state, restored from the archived
+        ``search_internal`` (``_restored_state``) or drawn fresh
+        (``_fresh_state``), and the step loop (``_step_loop``).
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+        """
+        try:
+            import jax
+            import jax.numpy as jnp
+            import optax
+            import optax.contrib  # noqa: F401  — makes optax.contrib rules resolvable
+        except ImportError as e:
+            raise ImportError(
+                f"{type(self).__name__} requires the `jax` and `optax` "
+                "dependencies. These are installed by default except on platforms "
+                "without JAX wheels (e.g. Intel macOS); install them with "
+                "`pip install jax optax`."
+            ) from e
+
+        step = self._step_functions(
+            model=ctx.model, fitness=ctx.fitness, jax=jax, jnp=jnp
+        )
+
+        # The optax rule (resolved from optax / optax.contrib), guarded by
+        # apply_if_finite, with a jitted per-start (vmapped) update step. Built
+        # once, identically, on both the fresh and resume paths so a loaded
+        # opt_state (itself a vmapped pytree) round-trips.
+        optimizer, step_update = self._build_optimizer(optax=optax, jax=jax)
+
+        try:
+            state = self._restored_state(
+                paths=ctx.paths, step=step, optax=optax, jnp=jnp
+            )
+
+            self.logger.info(
+                "Resuming MultiStartGradient search (previous samples found)."
+            )
+
+        # ``EOFError``/``UnpicklingError``/``ValueError`` join the original
+        # three so that a CORRUPT ``search_internal`` starts a fresh run rather
+        # than killing this one. A dill truncated by an interrupted write is
+        # the same situation as an absent one -- there is no state to resume
+        # from -- but it raised out of this guard instead of falling into the
+        # fresh-start branch below, and it kept doing so on every rerun of the
+        # same search name, because nothing rewrites the file until a run
+        # finishes. ``save_search_internal`` is atomic now, so this is the
+        # belt to that braces: it also covers files left by older versions,
+        # killed processes and full disks.
+        except (
+            FileNotFoundError,
+            TypeError,
+            KeyError,
+            EOFError,
+            ValueError,
+            pickle.UnpicklingError,
+        ) as e:
+
+            if not isinstance(e, FileNotFoundError):
+                self.logger.warning(
+                    f"Could not restore the previous MultiStartGradient state "
+                    f"({type(e).__name__}: {e}); starting a fresh run. This "
+                    f"usually means an earlier run was interrupted while "
+                    f"writing its output."
+                )
+
+            state = self._fresh_state(
+                model=ctx.model,
+                step=step,
+                optimizer=optimizer,
+                jax=jax,
+                jnp=jnp,
+            )
+
+        search_internal = self._step_loop(
+            ctx=ctx,
+            step=step,
+            state=state,
+            optimizer=optimizer,
+            step_update=step_update,
+            optax=optax,
+            jax=jax,
+            jnp=jnp,
+        )
+
+        self.logger.info(f"{self.optax_method} MultiStartGradient sampling complete.")
+
+        # The step loop above is the sole feeder of the quick-update counter
+        # (the traced ``fitness.call`` bypasses ``call_wrap``), but the final
+        # update's likelihood profiling calls ``fitness.call_wrap`` directly
+        # after ``run`` returns — and those evaluations would keep advancing
+        # the counter and could fire a quick update the unconditional final
+        # update supersedes. Disabling the cadence here closes that path; the
+        # display machinery is shut down separately by ``start_resume_fit``
+        # via ``shutdown_quick_update``.
+        ctx.fitness.iterations_per_quick_update = None
+
+        return search_internal
+
+    def _step_functions(self, model, fitness, jax, jnp):
+        """
+        The objectives the step loop differentiates, built once per fit on the fit's
+        unjitted scalar objective (``fitness.objective("scalar", compile=False)``):
+        the physical ``value_and_grad`` (``_broad_starts`` filters its draws with
+        it), the batched stepped objective with its fused finiteness and
+        constraint outputs, and the scaler / bijector / clipper set-up they need.
+
+        Returns
+        -------
+        A namespace of ``gradient_mode``, ``has_scaler``, ``has_bijector``,
+        ``has_clipper``, ``scale``, ``scale_jnp``, ``value_and_grad``,
+        ``to_physical`` and ``batched_value_and_grad``.
+        """
+        analysis = fitness.analysis
+
+        # -2 * log_posterior, to MINIMIZE. value_and_grad over every start.
+        #
+        # Unbatched we vmap all starts at once — fastest, but it allocates the
+        # whole batched jvp, which for a memory-heavy likelihood (e.g. a
+        # pixelized source at 16 starts, ~58 GB in float64) exhausts even an
+        # 80 GB GPU. When `batch_size` is set we sweep the starts in
+        # `batch_size`-wide vmapped chunks from a Python loop. Only one
+        # chunk-shaped function is ever XLA-compiled (the jit cache keys on the
+        # `(batch_size, ndim)` shape; the ragged final chunk is padded to that
+        # shape and the padded rows discarded), so the compile cost is that of
+        # a single chunk regardless of `n_starts`. An in-XLA scan over the
+        # chunks (`jax.lax.map`) instead welds the whole sweep into one
+        # program, which for a multi-band `FactorGraphModel` objective is
+        # intractable to compile (>1 hour cold on CPU, and memory-explosive to
+        # compile) while the chunk alone compiles in minutes. The tiling is
+        # numerically identical to the vmap; `batch_size` never changes
+        # results, it only bounds memory and compile.
+        #
+        # The AD mode (``gradient_mode``) is resolved once here, against the
+        # analysis's declaration and this search's override, and used for both
+        # objectives below. Forward and reverse give the same ``(value, grad)``;
+        # everything downstream of the two builders is mode-agnostic.
+        gradient_mode = self.execution_settings(analysis).gradient_mode
+        if not self.silence:
+            source = (
+                "search override"
+                if getattr(self, "gradient_mode", None) is not None
+                else f"declared by {type(analysis).__name__}"
+            )
+            self.logger.info(
+                f"MultiStartGradient gradient mode: {gradient_mode} ({source})."
+            )
+
+        # Built on the shared unjitted scalar objective (``fitness.call``): this
+        # search keeps its own transformed-coordinate builder on top of it.
+        objective = fitness.objective("scalar", compile=False)
+
+        _value_and_grad = value_and_grad_from(objective, gradient_mode)
+
+        # Per-start gradient finiteness is reduced *inside* the jitted call, as a
+        # third output, rather than by a separate op on its result. The reduction
+        # itself is trivially cheap either way; what costs is dispatch. Fused,
+        # XLA folds the ``isfinite``/``all`` into the backward pass and the step
+        # returns one extra ``(n_starts,)`` bool alongside the foms it already
+        # syncs on — no extra kernel launch, no extra device->host round-trip.
+        # Reducing eagerly outside the jit instead measured ~+3% per step against
+        # a ~1.5% noise floor (worse than pulling the whole ``(n_starts, ndim)``
+        # gradient to host, which is what it was meant to avoid); fused it is
+        # +0.05%, below noise. See
+        # ``autolens_profiling/scripts/misc/searches/multi_start_nan_accounting_overhead.py``.
+        #
+        # ``_value_and_grad`` is deliberately left as a 2-tuple: the single-point
+        # initial-draw path below jits it directly and unpacks two values.
+        # The declared model constraint rides the same fused call, for the same
+        # reason and at the same class of cost: it is a fixed handful of ops on
+        # the parameter vector (independent of likelihood cost) returning one
+        # more ``(n_starts,)`` array on a device->host sync that already happens.
+        # Nothing flows *up* through the likelihood — the constraint is a pure
+        # function of the vector, so it is evaluated beside
+        # ``fitness.call``, which is untouched.
+        has_constraint = bool(model.constrained_model_tuples())
+
+        # Same short-circuit shape as ``has_constraint``: the default clipper is a
+        # no-op, and testing for it here keeps the projection out of the step loop
+        # entirely rather than applying an identity every step.
+        has_clipper = not isinstance(self.clipper, ClipperNone)
+
+        # Per-parameter step scaling (see ``autofit.non_linear.scaler``). The
+        # step loop runs in ``phi = theta / scale``; everything OUTSIDE it —
+        # ``_broad_starts``, ``best_params``, ``search_internal`` — stays in
+        # physical parameters, so the only thing that ever sees ``phi`` is the
+        # optimizer. Same short-circuit as above: under the default ``ScalerNone``
+        # ``scale`` is ``None`` and no multiply is traced at all, so the compiled
+        # step is byte-for-byte what it was.
+        has_scaler = not isinstance(self.scaler, ScalerNone)
+        scale = self.scaler.scale_from_model(model=model) if has_scaler else None
+        scale_jnp = jnp.asarray(scale) if has_scaler else None
+
+        # Per-parameter change of variables (see ``autofit.non_linear.bijector``).
+        # Mutually exclusive with the scaler (enforced at construction), so at
+        # most one of ``has_scaler`` / ``has_bijector`` is ever true. Resolved
+        # ONCE here -- ``from_model`` bakes the per-coordinate kind arrays onto
+        # ``self.bijector`` -- so ``forward`` / ``inverse`` below need no model
+        # argument and trace to a fixed program under ``jax.jit``. Same
+        # short-circuit as ``has_scaler``: under the default ``BijectorNone``
+        # nothing here is even resolved, and the compiled step is unchanged.
+        has_bijector = not isinstance(self.bijector, BijectorNone)
+        if has_bijector:
+            self.bijector.from_model(model=model)
+
+        # The joint clipper's ball is declared in PHYSICAL coordinates, and it
+        # is still a ball in the stepped ones only where the map rescales both
+        # its members by one common linear factor (see
+        # `ClipperPriorBoxJoint.pairs_in_stepped_coordinates`). Resolved HERE:
+        # this is the first moment both halves are known -- the bijector was
+        # resolved against the model one line above, and the model is what says
+        # which pairs carry a ball at all -- and it is still before `_vmapped`
+        # is built, so an unresolvable combination dies without a single
+        # likelihood evaluation rather than a minute into a multi-hour fit.
+        # Its return value is discarded: the step loop calls `clipper.project`,
+        # which re-derives the same restated pairs itself. What is wanted here
+        # is only the raise.
+        if isinstance(self.clipper, ClipperPriorBoxJoint) and (
+            has_scaler or has_bijector
+        ):
+            self.clipper.pairs_in_stepped_coordinates(
+                pairs=model.ball_constraint_index_pairs(),
+                scale=scale if has_scaler else None,
+                bijector=self.bijector if has_bijector else None,
+            )
+
+        def _to_physical(vector):
+            if scale_jnp is not None:
+                return vector * scale_jnp
+            if has_bijector:
+                return self.bijector.inverse(vector, xp=jnp)
+            return vector
+
+        # The objective the OPTIMIZER differentiates. Composed as
+        # ``fitness.call(phi * scale)``, so what is optimised remains the
+        # PHYSICAL-space posterior evaluated at the transformed point, and JAX's
+        # chain rule produces the gradient with respect to ``phi`` for free —
+        # there is no manual gradient rescaling anywhere in this file, which is
+        # the entire reason the scale is applied here rather than to the update.
+        #
+        # Optimising the density OF ``phi`` instead would fold a Jacobian into the
+        # objective and move the MAP, and it would do so SILENTLY: every counter,
+        # every diagnostic and the wall time would all look healthy. For a
+        # constant diagonal map the Jacobian is a constant, so composing this way
+        # provably cannot move the answer — ``test_scaler.py`` pins that.
+        #
+        # ``_value_and_grad`` itself is deliberately left as the physical
+        # objective: ``_broad_starts`` below jits it directly to filter candidate
+        # draws, and those draws are, and stay, physical.
+        _value_and_grad_stepped = (
+            value_and_grad_from(
+                lambda phi: objective(_to_physical(phi)), gradient_mode
+            )
+            if (has_scaler or has_bijector)
+            else _value_and_grad
+        )
+
+        def _value_and_grad_finite(vector):
+            fom, grad = _value_and_grad_stepped(vector)
+            violation = (
+                # Evaluated at the PHYSICAL vector: a declared model constraint is
+                # a statement about the model's parameters, not about whatever
+                # coordinates the optimizer happens to be stepping in.
+                model.model_constraint_from_vector(_to_physical(vector), xp=jnp)
+                if has_constraint
+                else jnp.asarray(0.0)
+            )
+            return fom, grad, jnp.all(jnp.isfinite(grad)), violation
+
+        _vmapped = jax.jit(jax.vmap(_value_and_grad_finite))
+
+        if self.batch_size is None:
+            self._warn_if_unbatched_exceeds_memory(model=model, analysis=analysis)
+            batched_value_and_grad = _vmapped
+        else:
+            batch_size = self.batch_size
+
+            def batched_value_and_grad(params):
+                # The shared batching helper: chunks of ``batch_size`` rows,
+                # the ragged final chunk padded to that shape and its padded
+                # rows discarded, so one chunk shape is ever compiled.
+                return evaluate_in_chunks(
+                    _vmapped, params, batch_size=batch_size, xp=jnp
+                )
+
+        return SimpleNamespace(
+            gradient_mode=gradient_mode,
+            has_scaler=has_scaler,
+            has_bijector=has_bijector,
+            has_clipper=has_clipper,
+            scale=scale,
+            scale_jnp=scale_jnp,
+            value_and_grad=_value_and_grad,
+            to_physical=_to_physical,
+            batched_value_and_grad=batched_value_and_grad,
+        )
+
+    def _restored_state(self, paths, step, optax, jnp) -> dict:
+        """
+        The step loop's state restored from the archived ``search_internal`` of an
+        interrupted run (``search_internal["params"]`` mapped into the stepped
+        coordinates). Raises what loading or reading it raises (``run`` falls back
+        to ``_fresh_state``).
+        """
+        has_scaler = step.has_scaler
+        has_bijector = step.has_bijector
+        scale_jnp = step.scale_jnp
+
+        search_internal = paths.load_search_internal()
+
+        # ``search_internal["params"]`` is PHYSICAL, always — see the write
+        # site below for why — so it is mapped into the stepped coordinates
+        # here rather than being trusted to already be in them. That is what
+        # lets a run written without a scaler resume WITH one, and the other
+        # way round, instead of the file's meaning depending on a search knob
+        # that does not enter the identifier.
+        params = jnp.asarray(search_internal["params"])
+        if has_scaler:
+            params = params / scale_jnp
+        elif has_bijector:
+            params = self.bijector.forward(params, xp=jnp)
+        opt_state = optax.tree_utils.tree_get(search_internal, "opt_state")
+        best_params = np.asarray(search_internal["best_params"])
+        best_fom = float(search_internal["best_fom"])
+        fom_history = list(search_internal["fom_history"])
+        # ``.get``: a ``search_internal`` written before the alive history
+        # existed has no such key, and a resumed run must not KeyError on
+        # it. An older run's curve is unrecoverable, so it resumes empty
+        # rather than being back-filled with a fabricated population.
+        alive_history = list(search_internal.get("alive_history", []))
+        total_steps = int(search_internal["total_steps"])
+        n_resurrections = int(search_internal.get("n_resurrections", 0))
+        # ``.get`` with a default: a ``search_internal`` written before the
+        # NaN accounting existed has neither key, and a resumed run must not
+        # KeyError on it. The restored totals are lifetime counts, so a
+        # resumed run continues accumulating rather than restarting at zero.
+        n_value_nan_lane_steps = int(
+            search_internal.get("n_value_nan_lane_steps", 0)
+        )
+        n_grad_nan_lane_steps = int(search_internal.get("n_grad_nan_lane_steps", 0))
+        n_constrained_lane_steps = int(
+            search_internal.get("n_constrained_lane_steps", 0)
+        )
+        n_clipped_lane_steps = int(search_internal.get("n_clipped_lane_steps", 0))
+        stop_reason = search_internal.get("stop_reason", None)
+
+        # ``.get``: a ``search_internal`` written before per-lane best
+        # tracking existed has none of these keys, and a resumed run must
+        # not KeyError on it. The old run's per-lane history is
+        # unrecoverable, so tracking re-seeds (params from the restored
+        # finals — PHYSICAL, like everything in the file — with ``inf``
+        # foms) rather than being back-filled, the same doctrine as
+        # ``alive_history`` above.
+        # ``np.array`` (copies), not ``np.asarray``: the update writes in
+        # place, and a zero-copy view would be READ-ONLY for a device
+        # array and would alias the loaded dict's own array for the
+        # legacy-fallback seed.
+        lane_best_params = np.array(
+            search_internal.get("lane_best_params", search_internal["params"])
+        )
+        lane_best_foms = np.array(
+            search_internal.get(
+                "lane_best_foms", np.full(len(lane_best_params), np.inf)
+            ),
+            dtype=float,
+        )
+        lane_best_steps = np.array(
+            search_internal.get(
+                "lane_best_steps", np.zeros(len(lane_best_params), dtype=int)
+            ),
+            dtype=int,
+        )
+
+        # ``.get`` defaults, same doctrine as above: a ``search_internal``
+        # written before these histories existed (or by a run with the
+        # recording flags off) has none of these keys. Restored as a list
+        # of per-step rows so the step loop can keep appending to them;
+        # re-stacked into an array at the next write-back.
+        _lane_value_nan_history = search_internal.get("lane_value_nan_history")
+        lane_value_nan_rows = (
+            list(_lane_value_nan_history)
+            if _lane_value_nan_history is not None
+            else []
+        )
+        _lane_grad_nan_history = search_internal.get("lane_grad_nan_history")
+        lane_grad_nan_rows = (
+            list(_lane_grad_nan_history)
+            if _lane_grad_nan_history is not None
+            else []
+        )
+        _trace_history = search_internal.get("trace_history")
+        trace_rows = list(_trace_history) if _trace_history is not None else []
+
+        return dict(
+            params=params,
+            opt_state=opt_state,
+            best_params=best_params,
+            best_fom=best_fom,
+            fom_history=fom_history,
+            alive_history=alive_history,
+            total_steps=total_steps,
+            n_resurrections=n_resurrections,
+            n_value_nan_lane_steps=n_value_nan_lane_steps,
+            n_grad_nan_lane_steps=n_grad_nan_lane_steps,
+            n_constrained_lane_steps=n_constrained_lane_steps,
+            n_clipped_lane_steps=n_clipped_lane_steps,
+            stop_reason=stop_reason,
+            lane_best_params=lane_best_params,
+            lane_best_foms=lane_best_foms,
+            lane_best_steps=lane_best_steps,
+            lane_value_nan_rows=lane_value_nan_rows,
+            lane_grad_nan_rows=lane_grad_nan_rows,
+            trace_rows=trace_rows,
+            # Returned as-is by a resumed run that is already converged (the
+            # step loop then takes no step).
+            search_internal=search_internal,
+        )
+
+    def _fresh_state(self, model, step, optimizer, jax, jnp) -> dict:
+        """
+        The step loop's starting state for a fresh run: the broad starting
+        population (``_broad_starts``, drawn physical on ``_seed_for(0)`` and mapped
+        into the stepped coordinates) with one optimizer state per start.
+        """
+        has_scaler = step.has_scaler
+        has_bijector = step.has_bijector
+        scale_jnp = step.scale_jnp
+        _value_and_grad = step.value_and_grad
+
+        if not self.silence:
+            self.logger.info(self._compile_message(batched=False))
+
+        # Drawn PHYSICAL and mapped into the stepped coordinates afterwards,
+        # so the draw band, the finite-gradient filter and the RNG stream are
+        # all untouched by scaling — the starting POPULATION is identical
+        # with and without it, which is what makes an A/B measure the
+        # stepping and nothing else.
+        params = self._broad_starts(
+            model=model,
+            value_and_grad_single=jax.jit(_value_and_grad),
+            jnp=jnp,
+        )
+
+        best_params = np.asarray(params[0])
+
+        # Per-lane best tracking (position, figure-of-merit, step index).
+        # Diagnostics only — never gates a redraw or a step, the same rule
+        # as the NaN-lane counters. Seeded here while ``params`` is still
+        # PHYSICAL (the scaler divide happens below), so the array is in
+        # the same units as ``best_params`` from step zero; ``inf`` foms
+        # mark "no finite evaluation captured yet". ``np.array`` (a copy),
+        # not ``np.asarray``: a zero-copy view of a device array is
+        # READ-ONLY and the update writes in place.
+        lane_best_params = np.array(params)
+        lane_best_foms = np.full(self.n_starts, np.inf)
+        lane_best_steps = np.zeros(self.n_starts, dtype=int)
+
+        if has_scaler:
+            params = params / scale_jnp
+        elif has_bijector:
+            params = self.bijector.forward(params, xp=jnp)
+
+        # Per-start optimizer state: one independent state per start, so
+        # learning-rate-free rules never share a global scalar estimate.
+        # Built AFTER the rescale, so a rule that seeds its state from the
+        # initial parameters (Prodigy anchors ``params0`` there) anchors it in
+        # the coordinates it will actually step in.
+        opt_state = jax.vmap(optimizer.init)(params)
+        best_fom = np.inf
+        fom_history = []
+        alive_history = []
+        total_steps = 0
+        n_resurrections = 0
+        n_value_nan_lane_steps = 0
+        n_grad_nan_lane_steps = 0
+        n_constrained_lane_steps = 0
+        n_clipped_lane_steps = 0
+        lane_value_nan_rows = []
+        lane_grad_nan_rows = []
+        trace_rows = []
+        stop_reason = None
+
+        self.logger.info(
+            f"Starting new {self.optax_method} MultiStartGradient search "
+            f"({self.n_starts} starts, no previous samples found)."
+        )
+
+        return dict(
+            params=params,
+            opt_state=opt_state,
+            best_params=best_params,
+            best_fom=best_fom,
+            fom_history=fom_history,
+            alive_history=alive_history,
+            total_steps=total_steps,
+            n_resurrections=n_resurrections,
+            n_value_nan_lane_steps=n_value_nan_lane_steps,
+            n_grad_nan_lane_steps=n_grad_nan_lane_steps,
+            n_constrained_lane_steps=n_constrained_lane_steps,
+            n_clipped_lane_steps=n_clipped_lane_steps,
+            stop_reason=stop_reason,
+            lane_best_params=lane_best_params,
+            lane_best_foms=lane_best_foms,
+            lane_best_steps=lane_best_steps,
+            lane_value_nan_rows=lane_value_nan_rows,
+            lane_grad_nan_rows=lane_grad_nan_rows,
+            trace_rows=trace_rows,
+        )
+
+    def _step_loop(
+        self, ctx, step, state, optimizer, step_update, optax, jax, jnp
+    ) -> dict:
+        """
+        Step every start until the ``n_steps`` ceiling or convergence, archiving the
+        ``search_internal`` dict and updating the fit at every
+        ``iterations_per_full_update`` boundary, and return the last
+        ``search_internal``.
+        """
+        model = ctx.model
+        fitness = ctx.fitness
+
+        gradient_mode = step.gradient_mode
+        has_scaler = step.has_scaler
+        has_bijector = step.has_bijector
+        has_clipper = step.has_clipper
+        scale = step.scale
+        _to_physical = step.to_physical
+        batched_value_and_grad = step.batched_value_and_grad
+
+        params = state["params"]
+        opt_state = state["opt_state"]
+        best_params = state["best_params"]
+        best_fom = state["best_fom"]
+        fom_history = state["fom_history"]
+        alive_history = state["alive_history"]
+        total_steps = state["total_steps"]
+        n_resurrections = state["n_resurrections"]
+        n_value_nan_lane_steps = state["n_value_nan_lane_steps"]
+        n_grad_nan_lane_steps = state["n_grad_nan_lane_steps"]
+        n_constrained_lane_steps = state["n_constrained_lane_steps"]
+        n_clipped_lane_steps = state["n_clipped_lane_steps"]
+        stop_reason = state["stop_reason"]
+        lane_best_params = state["lane_best_params"]
+        lane_best_foms = state["lane_best_foms"]
+        lane_best_steps = state["lane_best_steps"]
+        lane_value_nan_rows = state["lane_value_nan_rows"]
+        lane_grad_nan_rows = state["lane_grad_nan_rows"]
+        trace_rows = state["trace_rows"]
+        search_internal = state.get("search_internal")
+
+        # Deterministic RNG for redrawing dead starts (only used when
+        # ``resurrect`` is on); seeded independently of the broad-start draw.
+        resurrect_rng = np.random.default_rng(self._seed_for(1))
+
+        stop_reason = self._stop_reason_on_resume(stop_reason)
+
+        # The vmapped objective compiles on its first call below, not here, so
+        # the notice is emitted at the call site the first time round. Resumed
+        # runs pay it too (a fresh process has no live trace cache), which is why
+        # the flag is set here rather than only on the fresh path.
+        awaiting_compile = True
+
+        # The global best at the previous progress line, so each line can report
+        # the gain since the last one rather than since the previous *step* —
+        # over a cadence of ``iterations_per_log`` steps that is the number a
+        # user can actually act on.
+        previous_logged_fom = None
+
+        # ``n_steps`` is the hard ceiling / max budget; ``stop_reason`` becomes
+        # ``"converged"`` if the auto-convergence check stops the search early
+        # (this also short-circuits the loop on a resumed, already-converged run).
+        while total_steps < self.n_steps and stop_reason != "converged":
+
+            iterations = ctx.schedule.next_budget(total_steps, self.n_steps)
+
+            # Convergence is assessed every step (``fom_history`` updates every
+            # step) rather than only at the ``iterations_per_full_update`` boundary,
+            # so early-stopping works even with the default single-chunk update
+            # cadence (``iterations_per_full_update=None``). Checkpointing and the
+            # expensive ``perform_update`` still happen only at the boundary (or on
+            # convergence), so the extra work per step is a cheap NumPy plateau
+            # check. The check is skipped when ``resurrect`` is on (pixelized
+            # regime), where a plateau does not mean converged.
+            converged = False
+
+            for _ in range(iterations):
+                if awaiting_compile:
+                    if not self.silence:
+                        self.logger.info(self._compile_message(batched=True))
+                    awaiting_compile = False
+
+                foms, grads, grad_finite, violation = batched_value_and_grad(params)
+
+                # Measurement only — this accounting never gates a redraw. A
+                # gradient-NaN lane is *not* resurrected here: doing so would
+                # change search behaviour and shift every existing benchmark,
+                # so the policy question waits on what these counts show. The
+                # counters are accumulated unconditionally, outside the
+                # ``self.resurrect`` guard below, because with ``resurrect``
+                # off ``n_resurrections`` stays zero and this is then the only
+                # record that lanes died at all.
+                alive, n_value_nan, n_grad_nan = self._nan_lane_counts(
+                    foms=foms, grad_finite=grad_finite
+                )
+                n_value_nan_lane_steps += n_value_nan
+                n_grad_nan_lane_steps += n_grad_nan
+                n_constrained = self._constrained_lane_count(
+                    alive=alive,
+                    grad_finite=grad_finite,
+                    constraint_violation=violation,
+                )
+                n_constrained_lane_steps += n_constrained
+
+                foms_np = np.where(alive, np.asarray(foms), np.inf)
+                best_index = int(np.argmin(foms_np))
+                if foms_np[best_index] < best_fom:
+                    best_fom = float(foms_np[best_index])
+                    # Mapped back to PHYSICAL on capture, not on the way out.
+                    # ``best_params`` is read by ``samples_via_internal_from`` and
+                    # by the resume path, neither of which knows a scaler exists;
+                    # converting at every read instead of once here is how one of
+                    # them eventually gets missed.
+                    best_params = np.asarray(params[best_index])
+                    if has_scaler:
+                        best_params = best_params * scale
+                    elif has_bijector:
+                        best_params = np.asarray(
+                            self.bijector.inverse(best_params, xp=np)
+                        )
+
+                # Per-lane best capture, PHYSICAL for the same reason as
+                # ``best_params`` just above. The step index is the
+                # pre-increment ``total_steps``, which is exactly this step's
+                # index into ``fom_history`` — including across resumes.
+                self._lane_best_update(
+                    lane_best_params=lane_best_params,
+                    lane_best_foms=lane_best_foms,
+                    lane_best_steps=lane_best_steps,
+                    foms_np=foms_np,
+                    gather_physical=lambda idx: (
+                        np.asarray(params[idx]) * scale
+                        if has_scaler
+                        else (
+                            np.asarray(
+                                self.bijector.inverse(np.asarray(params[idx]), xp=np)
+                            )
+                            if has_bijector
+                            else np.asarray(params[idx])
+                        )
+                    ),
+                    step=total_steps,
+                )
+
+                fom_history.append(best_fom)
+
+                # Optional per-step lane-death and trace diagnostics, both off
+                # by default (``record_lane_nan_history`` /
+                # ``trace_param_indices``) and both skipped entirely rather
+                # than computed and discarded, the same short-circuit style as
+                # ``has_scaler`` / ``has_clipper``. Packed to one bit per lane
+                # (``numpy.packbits``) rather than kept as bool arrays: at
+                # ``n_starts=48`` and a multi-thousand-step run this is an 8x
+                # reduction in ``search_internal`` size for a feature whose
+                # whole point is being cheap to turn on.
+                if self.record_lane_nan_history:
+                    lane_value_nan_rows.append(np.packbits(~alive))
+                    lane_grad_nan_rows.append(
+                        np.packbits(alive & ~np.asarray(grad_finite).astype(bool))
+                    )
+                if self.trace_param_indices:
+                    physical_row = np.asarray(_to_physical(params))
+                    trace_rows.append(
+                        np.asarray(physical_row)[:, self.trace_param_indices]
+                    )
+
+                # The size of the living population at this step. Recorded as a
+                # history because the cumulative lane counters above are
+                # survival INTEGRALS: a dead lane keeps adding to them every
+                # subsequent step, so the same death curve reads ~60% at 150
+                # steps and ~75% at 300 and two runs at different budgets cannot
+                # be compared on the scalar at all. The curve is the
+                # budget-independent quantity, and until now it existed only in
+                # the progress log at ``iterations_per_log`` cadence — visible
+                # to a human reading stdout, unavailable to any analysis.
+                alive_history.append(int(np.count_nonzero(alive)))
+
+                # Restart-on-death: redraw any start whose objective went
+                # non-finite (fresh params + reinitialised per-start optimizer
+                # state), leaving alive starts untouched. best_* is captured
+                # above, from the pre-redraw alive population. The (old,
+                # non-finite) grads of a dead start are zeroed for one step by
+                # apply_if_finite on its fresh state, so a redrawn start simply
+                # waits a step before descending.
+                if self.resurrect and not alive.all():
+                    dead_idx = np.flatnonzero(~alive)
+                    n_resurrections += int(dead_idx.size)
+                    params, opt_state = self._reinit_dead_starts(
+                        params=params,
+                        opt_state=opt_state,
+                        dead_idx=dead_idx,
+                        model=model,
+                        optimizer=optimizer,
+                        jax=jax,
+                        jnp=jnp,
+                        rng=resurrect_rng,
+                        scale=scale,
+                        bijector=self.bijector if has_bijector else None,
+                    )
+                    # A resurrected slot is a NEW start: its per-lane record
+                    # resets rather than conflating two starts' basins in one
+                    # slot (the record answers "which basin did this start
+                    # find", not "what is the best this slot ever held" — the
+                    # global ``best_*`` already keeps the latter). NaN params
+                    # + ``inf`` fom mark "no finite eval since redraw" without
+                    # paying a device->host copy of the fresh draws here.
+                    lane_best_params[dead_idx] = np.nan
+                    lane_best_foms[dead_idx] = np.inf
+                    lane_best_steps[dead_idx] = total_steps
+
+                updates, opt_state = step_update(grads, opt_state, params, foms)
+                params = optax.apply_updates(params, updates)
+
+                # Prior-support enforcement, applied to the updated parameters
+                # before they are evaluated again. Skipped entirely rather than
+                # applied as a no-op under the default ``ClipperNone``, so that
+                # the default path is bit-identical and its compiled step is
+                # unchanged — the same short-circuit ``has_constraint`` makes for
+                # the declared-constraint measure above.
+                #
+                # ``project`` broadcasts the ``(n_params,)`` bounds against the
+                # ``(n_starts, n_params)`` batch, so no vmap is needed here.
+                #
+                # ``scale`` is handed through rather than the parameters being
+                # round-tripped to physical and back: the bounds are a constant
+                # ``(n_params,)`` vector divided once, whereas the round trip
+                # would multiply and divide the whole ``(n_starts, n_params)``
+                # batch every step and reintroduce floating-point drift into
+                # coordinates the clipper had just placed exactly on a bound.
+                if has_clipper:
+                    params, clipped_mask = self.clipper.project(
+                        vector=params,
+                        model=model,
+                        xp=jnp,
+                        scale=scale,
+                        bijector=self.bijector if has_bijector else None,
+                    )
+                    # Per-LANE, not per-coordinate: a lane clipped in three
+                    # parameters at once is one clipped lane-step, matching how
+                    # the NaN and constrained counters above are read.
+                    n_clipped_lane_steps += int(
+                        np.count_nonzero(np.asarray(jnp.any(clipped_mask, axis=-1)))
+                    )
+
+                    # Optionally zero the optimizer's momentum on the clipped
+                    # coordinates. Without it a clipped lane keeps the velocity
+                    # that pushed it out of the box, so it is re-projected onto
+                    # the same bound every step: alive in the counters, pinned
+                    # to the wall, and still spending a full likelihood-and-
+                    # gradient evaluation per step.
+                    if self.reset_momentum_on_clip:
+                        opt_state = self._reset_clipped_momentum(
+                            opt_state=opt_state, clipped_mask=clipped_mask, jnp=jnp
+                        )
+
+                total_steps += 1
+
+                if not self.resurrect and self.convergence.check_if_converged(
+                    fom_history
+                ):
+                    converged = True
+
+                # Logged before the ``converged`` break so the terminating step
+                # reports itself; it is the one step a user most wants to see and
+                # it lands off-cadence more often than not.
+                if self._should_log_progress(
+                    total_steps=total_steps, converged=converged
+                ):
+                    # Prodigy et al. carry a self-estimated step scale; the Adam
+                    # family's state has no such field and ``tree_get`` returns
+                    # None, which the message renders by omission. Read only on a
+                    # logging step: it is an (n_starts,) device->host copy, which
+                    # merely pulls forward the sync the next iteration's
+                    # ``np.asarray(foms)`` would force anyway.
+                    #
+                    # Under a scaler OR a bijector this ``d`` is in whatever
+                    # coordinates the rule is stepping in (SCALED, or the
+                    # bijector's ``phi``), not physical units — and under a
+                    # bijector mixing ``identity`` and ``log`` coordinates it is
+                    # a single global scalar spanning units that are not even
+                    # the same KIND across coordinates (a linear step size for
+                    # one, a multiplicative log-step for another). It is
+                    # reported as the rule's own estimate rather than converted,
+                    # since there is no single physical value to convert it to
+                    # either way — this is Prodigy's own design (one global
+                    # ``d`` estimated from whole-tree norms), unmodified by
+                    # either knob and not something this feature attempts to
+                    # fix. Do not compare ``d`` across arms that step in
+                    # different coordinates; compare the clip rate instead.
+                    estim_lr = optax.tree_utils.tree_get(opt_state, "estim_lr")
+
+                    self.logger.info(
+                        self._progress_message(
+                            total_steps=total_steps,
+                            best_fom=best_fom,
+                            previous_fom=previous_logged_fom,
+                            n_alive=int(alive.sum()),
+                            n_constrained=n_constrained,
+                            estim_lr=estim_lr,
+                        )
+                    )
+                    previous_logged_fom = best_fom
+
+                # On-the-fly quick updates, at ``iterations_per_quick_update``
+                # cadence in GRADIENT STEPS (see ``_manage_quick_update_step``).
+                # Skipped at a terminal step for the same reason
+                # ``perform_update`` is skipped at a terminal boundary below:
+                # ``start_resume_fit`` performs the final update unconditionally
+                # the moment ``run`` returns, so one here is duplicated work.
+                if not self._is_final_boundary(
+                    converged=converged, total_steps=total_steps
+                ):
+                    self._manage_quick_update_step(
+                        fitness=fitness,
+                        best_params=best_params,
+                        best_fom=best_fom,
+                    )
+
+                if converged:
+                    break
+
+            if converged:
+                stop_reason = "converged"
+            elif total_steps >= self.n_steps:
+                stop_reason = "max_steps"
+
+            # ``params`` is written back in PHYSICAL parameters even when the
+            # search stepped in scaled/transformed ones. Neither the scaler nor
+            # the bijector enters the search identifier, so the same output
+            # directory can be written by a scaled/transformed run and read by
+            # an untransformed one; a file whose units depended on a knob that
+            # is invisible to the identifier would resume as a silently wrong
+            # population rather than as an error. ``samples_via_internal_from``
+            # reads this array directly for the per-start parameters too, and it
+            # has no scaler/bijector to consult. The scale vector / bijector
+            # kinds ride along so a reader can see what was used without
+            # inferring it.
+            if has_scaler:
+                params_physical = np.asarray(params) * scale
+            elif has_bijector:
+                params_physical = np.asarray(self.bijector.inverse(params, xp=np))
+            else:
+                params_physical = np.asarray(params)
+
+            search_internal = {
+                "params": params_physical,
+                "scale": scale,
+                "bijector": self.bijector.kinds if has_bijector else None,
+                # The AD mode this process ran with, resolved against the
+                # analysis (which ``samples_via_internal_from`` cannot see).
+                "gradient_mode": gradient_mode,
+                "opt_state": opt_state,
+                "best_params": best_params,
+                "best_fom": best_fom,
+                # Per-lane bests, PHYSICAL like ``params``/``best_params``
+                # above; ``lane_best_steps`` indexes into ``fom_history``.
+                "lane_best_params": lane_best_params,
+                "lane_best_foms": lane_best_foms,
+                "lane_best_steps": lane_best_steps,
+                "fom_history": np.asarray(fom_history),
+                "alive_history": np.asarray(alive_history),
+                "total_steps": total_steps,
+                "n_resurrections": n_resurrections,
+                "n_value_nan_lane_steps": n_value_nan_lane_steps,
+                "n_grad_nan_lane_steps": n_grad_nan_lane_steps,
+                "n_constrained_lane_steps": n_constrained_lane_steps,
+                "n_clipped_lane_steps": n_clipped_lane_steps,
+                "stop_reason": stop_reason,
+                # Optional per-step diagnostics (off by default -- see
+                # ``record_lane_nan_history`` / ``trace_param_indices``).
+                # ``None`` when off, rather than an empty array, so a reader can
+                # tell "not recorded" from "recorded, zero steps so far".
+                "lane_value_nan_history": (
+                    np.stack(lane_value_nan_rows)
+                    if self.record_lane_nan_history and lane_value_nan_rows
+                    else None
+                ),
+                "lane_grad_nan_history": (
+                    np.stack(lane_grad_nan_rows)
+                    if self.record_lane_nan_history and lane_grad_nan_rows
+                    else None
+                ),
+                "trace_history": (
+                    np.stack(trace_rows)
+                    if self.trace_param_indices and trace_rows
+                    else None
+                ),
+                "trace_param_indices": (
+                    list(self.trace_param_indices)
+                    if self.trace_param_indices
+                    else None
+                ),
+            }
+
+            # Update only at *intermediate* boundaries. ``start_resume_fit``
+            # performs the final update unconditionally the moment ``run``
+            # returns, so any update emitted here at a terminal boundary is pure
+            # duplicated work — and flipping ``during_analysis`` does not avoid
+            # it: ``SearchUpdater.update`` rebuilds the samples, recomputes the
+            # summary and re-runs likelihood profiling on *every* call,
+            # regardless of the flag. The previous ``during_analysis=not
+            # is_final`` was worse still, running the whole final pass twice
+            # including final visualization and latents.
+            #
+            # Nothing is lost by skipping: the checkpoint is
+            # the checkpoint save (``ctx.update`` at an intermediate boundary, ``ctx.checkpointer.save`` at the terminal one), and the ``search_internal`` dict
+            # this loop just built (carrying ``stop_reason``, ``converged`` and
+            # ``fom_history``) is what ``run`` returns and what that final
+            # update is computed from.
+            if not self._is_final_boundary(
+                converged=converged, total_steps=total_steps
+            ):
+                ctx.update(search_internal)
+            else:
+                ctx.checkpointer.save(ctx.paths, search_internal)
+
+            if converged:
+                self.logger.info(
+                    f"{self.optax_method} MultiStartGradient converged early at "
+                    f"step {total_steps} (best figure-of-merit plateaued)."
+                )
+
+        return search_internal
+
+    def _resolve_optax_rule(self, optax):
+        """
+        Resolve ``self.optax_method`` to an optax update-rule factory, looked up
+        first in ``optax`` (the built-in Adam family) and then in
+        ``optax.contrib`` (the learning-rate-free / experimental rules such as
+        ``prodigy``). Raises if neither module provides it.
+        """
+        rule = getattr(optax, self.optax_method, None)
+        if rule is None:
+            rule = getattr(optax.contrib, self.optax_method, None)
+        if rule is None:
+            raise ValueError(
+                f"{type(self).__name__}: optax update rule "
+                f"'{self.optax_method}' was not found in `optax` or "
+                "`optax.contrib`. Check the `optax_method` name and that the "
+                "installed optax version provides it."
+            )
+        return rule
+
+    def _build_optimizer(self, optax, jax):
+        """
+        Build the guarded optimizer and its jitted per-start update step.
+
+        Per-start ``jax.vmap`` over ``init`` / ``update`` is load-bearing: the
+        learning-rate-free rules estimate a *global scalar* step scale from
+        whole-tree norms (Prodigy / D-Adapt ``d``, DoG ``max_dist``, Mechanic's
+        scale, MoMo's Polyak step). The stacked-``(n_starts, ndim)`` state that
+        is safe for the elementwise Adam family would silently couple every
+        start into one shared estimate, so each start carries its own state.
+
+        ``optax.apply_if_finite`` is the per-start in-step guard: a non-finite
+        gradient/update zeroes that start's step rather than NaN-poisoning the
+        whole population. MoMo-family rules additionally consume the loss each
+        step via ``value=``; this is detected on the *unwrapped* rule, since
+        ``apply_if_finite`` hides ``value`` behind ``**extra_args`` (it does
+        forward it, for optax >= 0.2.5).
+        """
+        rule = self._resolve_optax_rule(optax)
+        base = rule() if self.learning_rate is None else rule(self.learning_rate)
+
+        needs_value = "value" in inspect.signature(base.update).parameters
+
+        optimizer = optax.apply_if_finite(
+            base, max_consecutive_errors=self.max_consecutive_nan
+        )
+
+        if needs_value:
+
+            @jax.jit
+            def step_update(grads, opt_state, params, values):
+                return jax.vmap(lambda g, s, p, v: optimizer.update(g, s, p, value=v))(
+                    grads, opt_state, params, values
+                )
+
+        else:
+
+            @jax.jit
+            def step_update(grads, opt_state, params, values):
+                del values
+                return jax.vmap(optimizer.update)(grads, opt_state, params)
+
+        return optimizer, step_update
+
+    def _reinit_dead_starts(
+        self,
+        params,
+        opt_state,
+        dead_idx,
+        model,
+        optimizer,
+        jax,
+        jnp,
+        rng,
+        scale=None,
+        bijector=None,
+    ):
+        """
+        Redraw the dead starts (``dead_idx``) and reinitialise their per-start
+        optimizer state, leaving the alive starts untouched — the restart-on-
+        death recovery step.
+
+        Each dead row's params are redrawn uniformly from the start band and
+        mapped to physical parameters; a fresh vmapped optimizer state is built
+        and merged into the live state pytree with a boolean mask (``jnp.where``
+        per leaf). ``np.asarray`` of a JAX array is read-only, so the redraw
+        happens in an ``np.array`` copy.
+
+        ``params`` is in whatever coordinates the caller is stepping in. When
+        ``scale`` is given those are the scaled ones, so the redraw — which is
+        necessarily physical, since ``vector_from_unit_vector`` returns physical
+        parameters — is divided by it before it is written back into the row.
+        When ``bijector`` is given instead, the redraw is mapped through its
+        ``forward`` the same way. ``scale`` and ``bijector`` are mutually
+        exclusive, enforced by the caller's constructor. Redrawing into the
+        wrong coordinates would place a resurrected lane at a point the prior
+        never proposed, and it would do so only on lanes that had already died,
+        which is exactly where nobody looks.
+        """
+        n = params.shape[0]
+
+        params_np = np.array(params)  # writable copy (jax arrays are read-only)
+        for k in dead_idx:
+            unit_vector = rng.uniform(
+                self.start_lower_limit, self.start_upper_limit, size=model.prior_count
+            )
+            redrawn = np.asarray(
+                model.vector_from_unit_vector(unit_vector=list(unit_vector), xp=jnp)
+            )
+            if scale is not None:
+                params_np[k] = redrawn / scale
+            elif bijector is not None:
+                params_np[k] = np.asarray(bijector.forward(redrawn, xp=np))
+            else:
+                params_np[k] = redrawn
+        params = jnp.asarray(params_np)
+
+        fresh_state = jax.vmap(optimizer.init)(params)
+
+        mask = np.zeros(n, dtype=bool)
+        mask[dead_idx] = True
+        mask_j = jnp.asarray(mask)
+
+        def merge(old, fresh):
+            m = mask_j.reshape((n,) + (1,) * (fresh.ndim - 1))
+            return jnp.where(m, fresh, old)
+
+        opt_state = jax.tree.map(merge, opt_state, fresh_state)
+
+        return params, opt_state
+
+    # The optax moment accumulators — the "momentum" a clip should forget.
+    # Named explicitly rather than matched by shape, because shape matching is
+    # actively wrong here: Prodigy's ``params0`` and ``grad_sum`` carry the same
+    # ``(n_starts, n_params)`` shape as the moments, and ``params0`` is the
+    # reference point of its learning-rate estimate. Zeroing that would not
+    # reset momentum, it would corrupt the step-size estimate for the rest of
+    # the run. Anything not named here (``params0``, ``grad_sum``, ``estim_lr``,
+    # ``numerator_weighted``, ``count``) is deliberately left intact.
+    _MOMENTUM_FIELDS = frozenset({"mu", "nu", "exp_avg", "exp_avg_sq", "trace"})
+
+    @classmethod
+    def _reset_clipped_momentum(cls, opt_state, clipped_mask, jnp):
+        """Zero the optimizer moments wherever a coordinate was clipped.
+
+        ``clipped_mask`` is ``(n_starts, n_params)``, so the reset is
+        per-coordinate: a lane clipped in one parameter keeps its momentum in
+        every other parameter and only forgets the direction that took it out of
+        the box.
+        """
+
+        def rebuild(node):
+            fields = getattr(node, "_fields", None)
+            if fields is not None:
+                return type(node)(
+                    **{
+                        name: (
+                            jnp.where(clipped_mask, jnp.zeros_like(value), value)
+                            if name in cls._MOMENTUM_FIELDS
+                            and getattr(value, "shape", None) == clipped_mask.shape
+                            else rebuild(value)
+                        )
+                        for name, value in zip(fields, node)
+                    }
+                )
+            if isinstance(node, tuple):
+                return tuple(rebuild(child) for child in node)
+            if isinstance(node, list):
+                return [rebuild(child) for child in node]
+            return node
+
+        return rebuild(opt_state)
+
+    def _seed_for(self, stream: int):
+        """Seed material for one of this search's random draws.
+
+        ``stream`` identifies the draw: ``0`` the broad starting points, ``1``
+        the resurrection redraws. They must not share a stream — resurrection
+        would otherwise replay the starting population.
+
+        ``seed=None`` returns the bare stream index, which is exactly the
+        historical hardcoded seed at each site (``default_rng(0)`` /
+        ``default_rng(1)``), so the default path is bit-identical.
+
+        With a seed set, the pair is derived through ``SeedSequence`` rather
+        than by offsetting the seed. ``seed + stream`` looks equivalent and is
+        not: it makes seed 0's resurrection stream the same sequence as seed 1's
+        start stream, so nominally independent seeds in a multi-seed study share
+        draws. ``SeedSequence`` spreads each ``(seed, stream)`` pair over the
+        full state space instead.
+
+        A grid-search child (one with a spawn key, ``autofit.non_linear.search.seed``)
+        adds its key to the sequence, so the cells of a grid draw independent broad
+        starts and resurrections. Without a spawn key both paths above are unchanged.
+        """
+        from autofit.non_linear.search.seed import spawn_key
+
+        key = spawn_key(self)
+        if self.seed is None:
+            if not key:
+                return stream
+            return np.random.SeedSequence(stream, spawn_key=key)
+        return np.random.SeedSequence([self.seed, stream], spawn_key=key)
+
+    def _broad_starts(self, model, value_and_grad_single, jnp):
+        """
+        Draw ``n_starts`` broad starting points in the unit cube, map them to
+        physical parameters, and keep only those with a finite objective and a
+        finite gradient (degenerate points such as ell_comps / shear at exactly 0
+        have NaN gradients and must be filtered out).
+
+        ``value_and_grad_single`` is the jitted single-point objective built
+        once in ``run``: one XLA compile (persistently cached) serves every
+        draw. Evaluating the draws eagerly instead re-pays the un-compiled AD
+        cost per draw, which on a multi-band ``FactorGraphModel`` objective
+        dominated the whole fit (~13 minutes for 16 draws, cache or no cache).
+        """
+        rng = np.random.default_rng(self._seed_for(0))
+
+        starts = []
+        max_tries = self.n_starts * 30
+        tries = 0
+        while len(starts) < self.n_starts and tries < max_tries:
+            tries += 1
+            unit_vector = rng.uniform(
+                self.start_lower_limit, self.start_upper_limit, size=model.prior_count
+            )
+            vector = jnp.asarray(
+                model.vector_from_unit_vector(unit_vector=list(unit_vector), xp=jnp)
+            )
+            fom, grad = value_and_grad_single(vector)
+            if np.isfinite(float(fom)) and np.all(np.isfinite(np.asarray(grad))):
+                starts.append(vector)
+
+        if len(starts) == 0:
+            raise ValueError(
+                f"{type(self).__name__} could not draw any finite-gradient starting "
+                f"points in {tries} attempts. Check the model / analysis are "
+                "JAX-traceable and the prior ranges are not everywhere singular."
+            )
+
+        if len(starts) < self.n_starts:
+            self.logger.warning(
+                f"Only collected {len(starts)}/{self.n_starts} finite-gradient "
+                f"starts (from {tries} draws)."
+            )
+
+        return jnp.stack(starts)
+
+    def raw_samples_from(self, model: AbstractPriorModel, search_internal):
+        """
+        The MultiStartGradient internal results as raw samples.
+
+        The best-basin (maximum-log-posterior) start is the first sample (weight 1);
+        every start's final point is retained as a diagnostic sample (weight 0, log
+        likelihood NaN) so per-start basin spread can be inspected downstream.
+        """
+        best_params = np.asarray(search_internal["best_params"])
+        per_start_params = np.asarray(search_internal["params"])
+        total_steps = int(search_internal["total_steps"])
+        # ``stop_reason`` is persisted by the fit loop ("converged" | "max_steps");
+        # older search_internal files (pre-auto-convergence) have neither it nor a
+        # ``fom_history``, so both are read defensively.
+        stop_reason = search_internal.get("stop_reason")
+        fom_history = search_internal.get("fom_history")
+
+        parameter_lists = [list(best_params)] + [list(p) for p in per_start_params]
+
+        log_prior_list = model.log_prior_list_from(parameter_lists=parameter_lists)
+
+        # Fitness.call returns -2 * log_posterior, so log_posterior = -0.5 * fom.
+        best_log_posterior = -0.5 * float(search_internal["best_fom"])
+        log_likelihood_list = [best_log_posterior - log_prior_list[0]]
+        log_likelihood_list += [np.nan for _ in range(len(parameter_lists) - 1)]
+
+        weight_list = [1.0] + [0.0] * (len(parameter_lists) - 1)
+
+        samples_info = {
+            "n_starts": self.n_starts,
+            "n_steps": self.n_steps,
+            "batch_size": self.batch_size,
+            # The RESOLVED AD mode (search override, else the analysis's
+            # declaration), read from ``search_internal`` because the analysis
+            # is not available here. Falls back to the search's own setting
+            # (possibly ``None`` = "the analysis's declaration, unrecorded") for
+            # a ``search_internal`` written before the mode was persisted.
+            "gradient_mode": search_internal.get(
+                "gradient_mode", getattr(self, "gradient_mode", None)
+            ),
+            "total_steps": total_steps,
+            "optax_method": self.optax_method,
+            "learning_rate": self.learning_rate,
+            "max_consecutive_nan": self.max_consecutive_nan,
+            "resurrect": self.resurrect,
+            "n_resurrections": int(search_internal.get("n_resurrections", 0)),
+            # Per-step non-finite accounting, split by failure mode. Value-NaN
+            # is an undefined likelihood; gradient-NaN is a defined but
+            # non-differentiable one, counted only for lanes still alive by
+            # value so the two are disjoint. ``.get`` for the same
+            # legacy-``search_internal`` reason as ``n_resurrections``.
+            "n_value_nan_lane_steps": int(
+                search_internal.get("n_value_nan_lane_steps", 0)
+            ),
+            "n_constrained_lane_steps": int(
+                search_internal.get("n_constrained_lane_steps", 0)
+            ),
+            "n_grad_nan_lane_steps": int(
+                search_internal.get("n_grad_nan_lane_steps", 0)
+            ),
+            # Prior-support enforcement (PyAutoFit#1477). The clipper's NAME
+            # rather than a bool, so the summary can say which strategy ran and
+            # so a later strategy needs no schema change here.
+            #
+            # ``n_clipped_lane_steps`` is per-LANE, matching the counters above:
+            # a lane clipped in three parameters on one step is one clipped
+            # lane-step, which keeps all four directly comparable. It is
+            # restored from ``search_internal`` as a lifetime total, so a
+            # resumed run reports the whole run's clipping and not just the
+            # current process's share — the same reasoning as the ``.get``
+            # defaults above.
+            "clipper": type(self.clipper).__name__,
+            # Per-parameter step scaling (PyAutoFit#1483), recorded by NAME for
+            # the same reasons as the clipper. It is recorded ALWAYS, including
+            # the ``ScalerNone`` default, because neither knob enters the search
+            # identifier: two arms differing only in the scaler write to the same
+            # output directory, and a result file that omitted the key when the
+            # feature was off would be indistinguishable from one written before
+            # the feature existed.
+            "scaler": type(self.scaler).__name__,
+            # Per-parameter bijector (see ``autofit.non_linear.bijector``),
+            # recorded by NAME for the same reasons as the scaler, plus the
+            # resolved per-coordinate KINDS -- read from ``search_internal``
+            # (persisted at write-back) rather than from ``self.bijector``
+            # directly, so this is correct even when called on a
+            # ``search_internal`` loaded in a process that never ran ``run``
+            # (and so never called ``self.bijector.from_model``).
+            "bijector": type(self.bijector).__name__,
+            "bijector_kinds": search_internal.get("bijector"),
+            "reset_momentum_on_clip": self.reset_momentum_on_clip,
+            "n_clipped_lane_steps": int(search_internal.get("n_clipped_lane_steps", 0)),
+            # The seed this search's own draws used, so a result file says which
+            # member of a multi-seed study produced it. ``None`` records the
+            # default (historical fixed seeds) rather than being omitted, so a
+            # seeded and an unseeded run are distinguishable downstream instead
+            # of both reading as "no seed key".
+            "seed": self.seed,
+            # Auto-convergence outcome: whether the run stopped on the plateau
+            # check ("converged") or exhausted the ``n_steps`` ceiling
+            # ("max_steps"), the settings that produced it, and the global-best
+            # figure-of-merit trace so the plateau can be inspected downstream.
+            "stop_reason": stop_reason,
+            "converged": stop_reason == "converged",
+            "convergence": {
+                "check_for_convergence": self.convergence.check_for_convergence,
+                "window": self.convergence.window,
+                "rtol": self.convergence.rtol,
+                "atol": self.convergence.atol,
+                "min_steps": self.convergence.min_steps,
+            },
+            "fom_history": (
+                [float(x) for x in np.asarray(fom_history)]
+                if fom_history is not None
+                else None
+            ),
+            "time": self.timer.time if self.timer else None,
+        }
+
+        return RawSamples(
+            parameters=parameter_lists,
+            log_likelihood=log_likelihood_list,
+            log_prior=log_prior_list,
+            weights=weight_list,
+            info=samples_info,
+            label=type(self).__name__,
+        )
+
+
+def batch_memory_model(bytes_at_1, bytes_at_2):
+    """
+    Split a measured batched-jvp footprint into its fixed and per-start parts.
+
+    Two probe points are enough because the footprint is affine in the batch
+    width: ``bytes(n) = fixed + n * per_start``. ``per_start`` is the slope
+    (what one extra start costs), ``fixed`` the intercept (buffers shared by
+    the whole batch, e.g. the dataset and any persistent operator).
+
+    Measuring *both* is the point. Guidance in the workspaces has claimed VRAM
+    "does not scale with batch size for the persistent buffers, so if it fits
+    at ``batch_size=1`` you can push it up" — true only when ``per_start`` is
+    small next to ``fixed``. For an interferometer likelihood under
+    ``value_and_grad`` it is not: the 2026-07-30 release failure projected to
+    ~1.79 GB *per start*, so 48 starts wanted ~86 GB and the single-start
+    probe that "fit" said nothing useful (PyAutoFit#1452).
+
+    Returns ``(fixed, per_start)``, both clamped at 0 — a non-monotonic or
+    noisy pair of measurements must never yield a negative slope and so a
+    nonsensically large batch suggestion.
+    """
+    per_start = max(0, bytes_at_2 - bytes_at_1)
+    fixed = max(0, bytes_at_1 - per_start)
+    return fixed, per_start
+
+
+def batch_size_within_budget(fixed, per_start, n_starts, budget_bytes):
+    """
+    The largest batch width whose projected footprint fits ``budget_bytes``.
+
+    Returns ``None`` when the full ``n_starts`` batch already fits — the
+    caller should then leave ``batch_size=None`` and keep today's single-vmap
+    fast path. Otherwise returns an int in ``[1, n_starts)``.
+
+    A budget that cannot fit even one start still returns 1: tiling to a
+    single start is the most this knob can do, and a hard failure is the
+    search's to report, not this projection's to pre-empt.
+    """
+    if budget_bytes <= 0 or n_starts <= 1:
+        return None
+
+    def projected(n):
+        return fixed + n * per_start
+
+    if projected(n_starts) <= budget_bytes:
+        return None
+
+    if per_start <= 0:
+        # Fixed cost alone blows the budget; tiling cannot help, but a
+        # single start is still the smallest thing we can ask for.
+        return 1
+
+    return max(1, min(n_starts - 1, int((budget_bytes - fixed) // per_start)))
+
+
+def _chunk_slices(n_rows, batch_size):
+    """
+    The ``(lo, hi, pad)`` chunk bounds of the batched ``value_and_grad`` sweep;
+    see ``autofit.non_linear.objective.chunk_slices``, where it now lives.
+    """
+    return chunk_slices(n_rows, batch_size)
+
+
+class MultiStartAdam(AbstractMultiStartGradient):
+    """
+    Multi-start gradient MAP search using the Adam optax update rule.
+
+    Adam was the certified best method in the Phase-3 GPU MAP-optimizer
+    benchmark — no line-search or second-order optimizer beat wide multi-start
+    Adam on the kinked (NNLS active-set) lens likelihood.
+    """
+
+    optax_method = "adam"
+    _default_learning_rate = 1.0e-2
+
+
+class MultiStartADABelief(AbstractMultiStartGradient):
+    """
+    Multi-start gradient MAP search using the ADABelief optax update rule, which
+    tied Adam for best in the Phase-3 benchmark.
+    """
+
+    optax_method = "adabelief"
+    _default_learning_rate = 1.0e-2
+    status = cap.Status.EXPERIMENTAL
+
+
+class MultiStartLion(AbstractMultiStartGradient):
+    """
+    Multi-start gradient MAP search using the Lion optax update rule. Lion is
+    sign-based, so it wants a ~10x smaller learning rate than Adam / ADABelief.
+    """
+
+    optax_method = "lion"
+    _default_learning_rate = 1.0e-3
+    status = cap.Status.EXPERIMENTAL
+
+
+class MultiStartProdigy(AbstractMultiStartGradient):
+    """
+    Multi-start gradient MAP search using the learning-rate-free Prodigy update
+    rule (``optax.contrib.prodigy``).
+
+    Prodigy estimates its own step scale, so it takes **no** learning rate
+    (``_default_learning_rate = None``, resolved from ``optax.contrib``). On the
+    parametric MGE cell it is bit-identical to hand-tuned Adam (best log
+    posterior +31787.84, same winning start) with the ``learning_rate``
+    hyperparameter deleted at zero cost — the headline learning-rate-free result
+    from the #101 experiment. Its global distance estimate ``d`` is per-start
+    (the base class vmaps optimizer state over starts), so starts do not share
+    one estimate.
+    """
+
+    optax_method = "prodigy"
+    _default_learning_rate = None
+    upstream_url = "https://github.com/konstmish/prodigy"
+    citation_keys = ("optax", "prodigy")

@@ -32,11 +32,11 @@ import os
 import sys
 from os import path
 
-from autoconf import jax_wrapper  # noqa: F401  (sets JAX env before other imports)
+from autonerves import jax_wrapper  # noqa: F401  (sets JAX env before other imports)
 
 import autofit as af
 import autolens as al
-from autoconf import conf
+from autonerves import conf
 import numpy as np
 
 from slam_pipeline.subhalo import tiling

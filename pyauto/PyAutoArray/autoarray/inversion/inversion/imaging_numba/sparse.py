@@ -1,0 +1,815 @@
+import hashlib
+import os
+import pickle
+
+import numpy as np
+from typing import Dict, List, Optional, Union
+
+from autonerves import cached_property
+
+from autoarray.dataset.imaging.dataset import Imaging
+from autoarray.inversion.inversion.dataset_interface import DatasetInterface
+from autoarray.inversion.inversion.imaging.abstract import AbstractInversionImaging
+from autoarray.inversion.linear_obj.linear_obj import LinearObj
+from autoarray.settings import Settings
+from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
+from autoarray.inversion.mappers.abstract import Mapper
+from autoarray.structures.arrays.uniform_2d import Array2D
+
+from autoarray.inversion.inversion.imaging_numba import inversion_imaging_numba_util
+
+# Cross-evaluation memo for linear-func operated mapping matrices (the MGE
+# lens-light PSF-convolved images). A sampler builds fresh linear-func objects
+# for every likelihood evaluation, so when the light profiles are FIXED in the
+# model the identical ~60-Gaussian convolution stack is recomputed each call —
+# ~0.5 s of a ~2.4 s euclid-resolution numba CPU evaluation (autolens_profiling
+# issue #151). Entries are keyed by a fingerprint of the linear-func object's
+# full pickled state (profiles + grids + PSF), so the memo engages only when
+# the profile parameters are genuinely unchanged; any varying parameter changes
+# the key and the matrix is recomputed exactly as before. Failure modes are
+# misses, never stale hits. Scoped to this numba inversion module on purpose —
+# no other path is touched. Disable with AUTOARRAY_NUMBA_OPERATED_MEMO=0.
+_operated_mapping_matrix_memo: Dict[str, np.ndarray] = {}
+
+_OPERATED_MAPPING_MATRIX_MEMO_MAX_ENTRIES = 8
+
+
+def _operated_mapping_matrix_memo_key(linear_func) -> Optional[str]:
+    """
+    Fingerprint a linear-func object's state for the cross-evaluation memo,
+    or None if it cannot be fingerprinted (unpicklable), in which case the
+    caller falls back to the uncached computation.
+
+    Must be called before the object's own cached properties are populated:
+    a fingerprint taken afterwards would include the cached arrays and never
+    match the pre-computation fingerprint of the next evaluation (a
+    miss-every-time cache, still never a stale one).
+    """
+    try:
+        state = pickle.dumps(linear_func, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return None
+    return hashlib.sha256(state).hexdigest()
+
+
+class InversionImagingSparseNumba(AbstractInversionImaging):
+    def __init__(
+        self,
+        dataset: Union[Imaging, DatasetInterface],
+        linear_obj_list: List[LinearObj],
+        settings: Settings = None,
+        xp=np,
+    ):
+        """
+        Constructs linear equations (via vectors and matrices) which allow for sets of simultaneous linear equations
+        to be solved (see `inversion.inversion.abstract.AbstractInversion`) for a full description.
+
+        A linear object describes the mappings between values in observed `data` and the linear object's model via its
+        `mapping_matrix`. This class constructs linear equations for `Imaging` objects, where the data is an image
+        and the mappings may include a convolution operation described by the imaging data's PSF.
+
+        This class uses the w-tilde formalism, which speeds up the construction of the simultaneous linear equations by
+        bypassing the construction of a `mapping_matrix`.
+
+        Parameters
+        ----------
+        dataset
+            The dataset containing the image data, noise-map and psf which is fitted by the inversion.
+        linear_obj_list
+            The linear objects used to reconstruct the data's observed values. If multiple linear objects are passed
+            the simultaneous linear equations are combined and solved simultaneously.
+        """
+
+        super().__init__(
+            dataset=dataset,
+            linear_obj_list=linear_obj_list,
+            settings=settings,
+            xp=xp,
+        )
+
+    @property
+    def sparse_operator(self):
+        return self.dataset.sparse_operator
+
+    @cached_property
+    def psf_weighted_data(self):
+        return inversion_imaging_numba_util.psf_weighted_data_from(
+            image_native=np.array(self.data.native.array),
+            noise_map_native=self.noise_map.native.array,
+            kernel_native=self.psf.kernel.native.array,
+            native_index_for_slim_index=self.data.mask.derive_indexes.native_for_slim,
+        )
+
+    @cached_property
+    def linear_func_operated_mapping_matrix_dict(self) -> Dict:
+        """
+        The parent property, wrapped in two caches specific to this numba CPU
+        inversion:
+
+        1. `cached_property` — the dict is built once per inversion instead of
+           on every access (this inversion reads it from several matrices).
+        2. A module-level cross-evaluation memo — when a linear func's full
+           state (light profiles + grids + PSF) fingerprints identically to a
+           previous evaluation's, its operated mapping matrix (the PSF-convolved
+           MGE image stack, ~0.5 s/eval at euclid resolution) is reused instead
+           of recomputed. Fixed-profile models hit every evaluation; models with
+           free profile parameters change the fingerprint and recompute exactly
+           as before. See the memo's module docstring for the safety argument.
+
+        Memoized matrices are returned read-only; every consumer in this class
+        copies or derives from them (`np.array(...)`, divisions), never mutates.
+        """
+        parent_fget = (
+            AbstractInversionImaging.linear_func_operated_mapping_matrix_dict.func
+        )
+
+        if os.environ.get("AUTOARRAY_NUMBA_OPERATED_MEMO", "1") == "0":
+            return parent_fget(self)
+
+        linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
+
+        key_list = [
+            _operated_mapping_matrix_memo_key(linear_func)
+            for linear_func in linear_func_list
+        ]
+
+        if any(key is None for key in key_list):
+            return parent_fget(self)
+
+        operated_mapping_matrix_dict = {}
+
+        for linear_func, key in zip(linear_func_list, key_list):
+            operated_mapping_matrix = _operated_mapping_matrix_memo.get(key)
+
+            if operated_mapping_matrix is None:
+                operated_mapping_matrix = linear_func.operated_mapping_matrix_override
+                if operated_mapping_matrix is None:
+                    operated_mapping_matrix = self.psf.convolved_mapping_matrix_from(
+                        mapping_matrix=self._mapping_matrix_for_convolution_from(
+                            linear_func
+                        ),
+                        mask=self.mask,
+                        xp=self._xp,
+                    )
+
+                # A copy, not a view: the memo owns its buffer outright, so
+                # marking it read-only cannot leak onto the linear func's own
+                # cached override array.
+                operated_mapping_matrix = np.array(operated_mapping_matrix)
+                operated_mapping_matrix.setflags(write=False)
+
+                while (
+                    len(_operated_mapping_matrix_memo)
+                    >= _OPERATED_MAPPING_MATRIX_MEMO_MAX_ENTRIES
+                ):
+                    _operated_mapping_matrix_memo.pop(
+                        next(iter(_operated_mapping_matrix_memo))
+                    )
+
+                _operated_mapping_matrix_memo[key] = operated_mapping_matrix
+
+            operated_mapping_matrix_dict[linear_func] = operated_mapping_matrix
+
+        return operated_mapping_matrix_dict
+
+    @property
+    def _data_vector_mapper(self) -> np.ndarray:
+        """
+        Returns the `data_vector` of all mappers, a 1D vector whose values are solved for by the simultaneous
+        linear equations constructed by this object. The object is described in full in the method `data_vector`.
+
+        This method is used to compute part of the `data_vector` if there are also linear function list objects
+        in the inversion, and is separated into a separate method to enable preloading of the mapper `data_vector`.
+        """
+
+        if not self.has(cls=Mapper):
+            return None
+
+        data_vector = np.zeros(self.total_params)
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+        mapper_param_range = self.param_range_list_from(cls=Mapper)
+
+        for mapper_index, mapper in enumerate(mapper_list):
+
+            data_vector_mapper = (
+                inversion_imaging_numba_util.data_vector_via_psf_weighted_data_from(
+                    psf_weighted_data=self.psf_weighted_data,
+                    data_to_pix_unique=np.array(
+                        mapper.unique_mappings.data_to_pix_unique
+                    ),
+                    data_weights=np.array(mapper.unique_mappings.data_weights),
+                    pix_lengths=np.array(mapper.unique_mappings.pix_lengths),
+                    pix_pixels=mapper.params,
+                )
+            )
+            param_range = mapper_param_range[mapper_index]
+
+            data_vector[param_range[0] : param_range[1],] = data_vector_mapper
+
+        return data_vector
+
+    @cached_property
+    def data_vector(self) -> np.ndarray:
+        """
+        Returns the `data_vector`, a 1D vector whose values are solved for by the simultaneous linear equations
+        constructed by this object.
+
+        The linear algebra is described in the paper https://arxiv.org/pdf/astro-ph/0302587.pdf), where the
+        data vector is given by equation (4) and the letter D.
+
+        If there are multiple linear objects a `data_vector` is computed for ech one, which are concatenated
+        ensuring their values are solved for simultaneously.
+
+        The calculation is described in more detail in `inversion_util.psf_weighted_data_from`.
+        """
+        if self.has(cls=AbstractLinearObjFuncList):
+            return self._data_vector_func_list_and_mapper
+        elif self.total(cls=Mapper) == 1:
+            return self._data_vector_x1_mapper
+        return self._data_vector_multi_mapper
+
+    @property
+    def _data_vector_x1_mapper(self) -> np.ndarray:
+        """
+        Returns the `data_vector`, a 1D vector whose values are solved for by the simultaneous linear equations
+        constructed by this object. The object is described in full in the method `data_vector`.
+
+        This method computes the `data_vector` whenthere is a single mapper object in the `Inversion`,
+        which circumvents `np.concatenate` for speed up.
+        """
+        linear_obj = self.linear_obj_list[0]
+
+        return inversion_imaging_numba_util.data_vector_via_psf_weighted_data_from(
+            psf_weighted_data=self.psf_weighted_data,
+            data_to_pix_unique=linear_obj.unique_mappings.data_to_pix_unique,
+            data_weights=linear_obj.unique_mappings.data_weights,
+            pix_lengths=linear_obj.unique_mappings.pix_lengths,
+            pix_pixels=linear_obj.params,
+        )
+
+    @property
+    def _data_vector_multi_mapper(self) -> np.ndarray:
+        """
+        Returns the `data_vector`, a 1D vector whose values are solved for by the simultaneous linear equations
+        constructed by this object. The object is described in full in the method `data_vector`.
+
+        This method computes the `data_vector` when there are multiple mapper objects in the `Inversion`,
+        which computes the `data_vector` of each object and concatenates them.
+        """
+
+        data_vector_list = []
+
+        for mapper in self.cls_list_from(cls=Mapper):
+
+            rows, cols, vals = mapper.sparse_triplets_data
+
+            data_vector_mapper = (
+                inversion_imaging_numba_util.data_vector_via_psf_weighted_data_from(
+                    psf_weighted_data=self.psf_weighted_data,
+                    rows=rows,
+                    cols=cols,
+                    vals=vals,
+                    S=mapper.params,
+                )
+            )
+
+            data_vector_list.append(data_vector_mapper)
+
+        return np.concatenate(data_vector_list)
+
+    @property
+    def _data_vector_func_list_and_mapper(self) -> np.ndarray:
+        """
+        Returns the `data_vector`, a 1D vector whose values are solved for by the simultaneous linear equations
+        constructed by this object. The object is described in full in the method `data_vector`.
+
+        This method computes the `data_vector` when there are one or more mapper objects in the `Inversion`,
+        which are combined with linear function list objects.
+
+        The `data_vector` corresponding to all mapper objects is computed first, in a separate function. This
+        separation of functions enables the `data_vector` to be preloaded in certain circumstances.
+        """
+
+        data_vector = np.array(self._data_vector_mapper)
+
+        linear_func_param_range = self.param_range_list_from(
+            cls=AbstractLinearObjFuncList
+        )
+
+        for linear_func_index, linear_func in enumerate(
+            self.cls_list_from(cls=AbstractLinearObjFuncList)
+        ):
+            operated_mapping_matrix = self.linear_func_operated_mapping_matrix_dict[
+                linear_func
+            ]
+
+            diag = inversion_imaging_numba_util.data_vector_via_blurred_mapping_matrix_from(
+                blurred_mapping_matrix=np.array(operated_mapping_matrix),
+                image=self.data.array,
+                noise_map=self.noise_map.array,
+            )
+
+            param_range = linear_func_param_range[linear_func_index]
+
+            data_vector[param_range[0] : param_range[1]] = diag
+
+        return data_vector
+
+    @cached_property
+    def curvature_matrix(self) -> np.ndarray:
+        """
+        Returns the `curvature_matrix`, a 2D matrix which uses the mappings between the data and the linear objects to
+        construct the simultaneous linear equations.
+
+        The linear algebra is described in the paper https://arxiv.org/pdf/astro-ph/0302587.pdf, where the
+        curvature matrix given by equation (4) and the letter F.
+
+        This function computes F using the sparse_operator formalism, which is faster as it precomputes the PSF convolution
+        of different noise-map pixels (see `curvature_matrix_via_sparse_operator_from`).
+
+        If there are multiple linear objects the curvature_matrices are combined to ensure their values are solved
+        for simultaneously. In the w-tilde formalism this requires us to consider the mappings between data and every
+        linear object, meaning that the linear alegbra has both on and off diagonal terms.
+
+        Every block of F is written into the matrix already symmetrized: the mapper x mapper blocks are
+        folded and mirrored inside `curvature_matrix_via_sparse_operator_from`, and the off-diagonal
+        blocks (mapper x mapper, mapper x linear-func, linear-func x linear-func) are each placed
+        together with their transpose. A global symmetrizing pass over the assembled matrix would
+        therefore be a no-op, and is not run.
+
+        `curvature_matrix` is a cached property, and `curvature_reg_matrix` adds the regularization
+        matrix to it out-of-place, so the cached F is never overwritten by that addition.
+        """
+        if self.has(cls=AbstractLinearObjFuncList):
+            curvature_matrix = self._curvature_matrix_func_list_and_mapper
+        elif self.total(cls=Mapper) == 1:
+            curvature_matrix = self._curvature_matrix_x1_mapper
+        else:
+            curvature_matrix = self._curvature_matrix_multi_mapper
+
+        if len(self.no_regularization_index_list) > 0:
+            curvature_matrix = (
+                inversion_imaging_numba_util.curvature_matrix_with_added_to_diag_from(
+                    curvature_matrix=curvature_matrix,
+                    value=self.settings.no_regularization_add_to_curvature_diag_value,
+                    no_regularization_index_list=self.no_regularization_index_list,
+                )
+            )
+
+        return curvature_matrix
+
+    @property
+    def _curvature_matrix_mapper_diag(self) -> Optional[np.ndarray]:
+        """
+        Returns the diagonal regions of the `curvature_matrix`, a 2D matrix which uses the mappings between the data
+        and the linear objects to construct the simultaneous linear equations. The object is described in full in
+        the method `curvature_matrix`.
+
+        This method computes the diagonal entries of all mapper objects in the `curvature_matrix`. It is separate from
+        other calculations to enable preloading of this calculation.
+        """
+
+        if not self.has(cls=Mapper):
+            return None
+
+        curvature_matrix = np.zeros((self.total_params, self.total_params))
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+        mapper_param_range_list = self.param_range_list_from(cls=Mapper)
+
+        for i in range(len(mapper_list)):
+            mapper_i = mapper_list[i]
+            mapper_param_range_i = mapper_param_range_list[i]
+
+            diag = inversion_imaging_numba_util.curvature_matrix_via_sparse_operator_from(
+                psf_precision_operator=self.sparse_operator.psf_precision_operator_sparse,
+                psf_precision_indexes=self.sparse_operator.indexes,
+                psf_precision_lengths=self.sparse_operator.lengths,
+                data_to_pix_unique=mapper_i.unique_mappings.data_to_pix_unique,
+                data_weights=mapper_i.unique_mappings.data_weights,
+                pix_lengths=mapper_i.unique_mappings.pix_lengths,
+                pix_pixels=mapper_i.params,
+            )
+
+            curvature_matrix[
+                mapper_param_range_i[0] : mapper_param_range_i[1],
+                mapper_param_range_i[0] : mapper_param_range_i[1],
+            ] = diag
+
+            if self.total(cls=Mapper) == 1:
+                return curvature_matrix
+
+        return curvature_matrix
+
+    def _curvature_matrix_off_diag_from(
+        self, mapper_0: Mapper, mapper_1: Mapper
+    ) -> np.ndarray:
+        """
+        The `curvature_matrix` is a 2D matrix which uses the mappings between the data and the linear objects to
+        construct the simultaneous linear equations.
+
+        The linear algebra is described in the paper https://arxiv.org/pdf/astro-ph/0302587.pdf, where the
+        curvature matrix given by equation (4) and the letter F.
+
+        This function computes the off-diagonal terms of F using the sparse_operator formalism.
+        """
+
+        curvature_matrix_off_diag_0 = inversion_imaging_numba_util.curvature_matrix_off_diags_via_sparse_operator_from(
+            psf_precision_operator=self.sparse_operator.psf_precision_operator_sparse,
+            psf_precision_indexes=self.sparse_operator.indexes,
+            psf_precision_lengths=self.sparse_operator.lengths,
+            data_to_pix_unique_0=mapper_0.unique_mappings.data_to_pix_unique,
+            data_weights_0=mapper_0.unique_mappings.data_weights,
+            pix_lengths_0=mapper_0.unique_mappings.pix_lengths,
+            pix_pixels_0=mapper_0.params,
+            data_to_pix_unique_1=mapper_1.unique_mappings.data_to_pix_unique,
+            data_weights_1=mapper_1.unique_mappings.data_weights,
+            pix_lengths_1=mapper_1.unique_mappings.pix_lengths,
+            pix_pixels_1=mapper_1.params,
+        )
+
+        curvature_matrix_off_diag_1 = inversion_imaging_numba_util.curvature_matrix_off_diags_via_sparse_operator_from(
+            psf_precision_operator=self.sparse_operator.psf_precision_operator_sparse,
+            psf_precision_indexes=self.sparse_operator.indexes,
+            psf_precision_lengths=self.sparse_operator.lengths,
+            data_to_pix_unique_0=mapper_1.unique_mappings.data_to_pix_unique,
+            data_weights_0=mapper_1.unique_mappings.data_weights,
+            pix_lengths_0=mapper_1.unique_mappings.pix_lengths,
+            pix_pixels_0=mapper_1.params,
+            data_to_pix_unique_1=mapper_0.unique_mappings.data_to_pix_unique,
+            data_weights_1=mapper_0.unique_mappings.data_weights,
+            pix_lengths_1=mapper_0.unique_mappings.pix_lengths,
+            pix_pixels_1=mapper_0.params,
+        )
+
+        return curvature_matrix_off_diag_0 + curvature_matrix_off_diag_1.T
+
+    @property
+    def _curvature_matrix_x1_mapper(self) -> np.ndarray:
+        """
+        Returns the `curvature_matrix`, a 2D matrix which uses the mappings between the data and the linear objects to
+        construct the simultaneous linear equations. The object is described in full in the method `curvature_matrix`.
+
+        This method computes the `curvature_matrix` when there is a single mapper object in the `Inversion`,
+        which circumvents `block_diag` for speed up.
+        """
+        return self._curvature_matrix_mapper_diag
+
+    @property
+    def _curvature_matrix_multi_mapper(self) -> np.ndarray:
+        """
+        Returns the `curvature_matrix`, a 2D matrix which uses the mappings between the data and the linear objects to
+        construct the simultaneous linear equations. The object is described in full in the method `curvature_matrix`.
+
+        This method computes the `curvature_matrix` when there are multiple mapper objects in the `Inversion`,
+        by computing each one (and their off-diagonal matrices) and combining them via the `block_diag` method.
+        """
+
+        curvature_matrix = self._curvature_matrix_mapper_diag
+
+        if self.total(cls=Mapper) == 1:
+            return curvature_matrix
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+        mapper_param_range_list = self.param_range_list_from(cls=Mapper)
+
+        for i in range(len(mapper_list)):
+            mapper_i = mapper_list[i]
+            mapper_param_range_i = mapper_param_range_list[i]
+
+            for j in range(i + 1, len(mapper_list)):
+                mapper_j = mapper_list[j]
+                mapper_param_range_j = mapper_param_range_list[j]
+
+                off_diag = self._curvature_matrix_off_diag_from(
+                    mapper_0=mapper_i, mapper_1=mapper_j
+                )
+
+                curvature_matrix[
+                    mapper_param_range_i[0] : mapper_param_range_i[1],
+                    mapper_param_range_j[0] : mapper_param_range_j[1],
+                ] = off_diag
+
+                curvature_matrix[
+                    mapper_param_range_j[0] : mapper_param_range_j[1],
+                    mapper_param_range_i[0] : mapper_param_range_i[1],
+                ] = off_diag.T
+
+        return curvature_matrix
+
+    @property
+    def _curvature_matrix_func_list_and_mapper(self) -> np.ndarray:
+        """
+        The `curvature_matrix` is a 2D matrix which uses the mappings between the data and the linear objects to
+        construct the simultaneous linear equations.
+
+        The linear algebra is described in the paper https://arxiv.org/pdf/astro-ph/0302587.pdf, where the
+        curvature matrix given by equation (4) and the letter F.
+
+        This function computes the diagonal terms of F using the sparse_operator formalism.
+
+        The three blocks of F are assembled by separate private helpers, so that each block can be
+        computed (and therefore profiled) on its own:
+
+        - the mapper x mapper block, `_curvature_matrix_mapper_diag` (via `_curvature_matrix_multi_mapper`);
+        - the mapper x linear-func blocks, `_curvature_matrix_mapper_func_blocks_from`;
+        - the linear-func x linear-func blocks, `_curvature_matrix_func_func_blocks_from`.
+
+        The helpers write into the `curvature_matrix` they are passed and return it, so composing them
+        in this order is exactly the single-pass assembly they replaced.
+        """
+
+        curvature_matrix = self._curvature_matrix_multi_mapper
+
+        curvature_matrix = self._curvature_matrix_mapper_func_blocks_from(
+            curvature_matrix=curvature_matrix
+        )
+
+        curvature_matrix = self._curvature_matrix_func_func_blocks_from(
+            curvature_matrix=curvature_matrix
+        )
+
+        return curvature_matrix
+
+    def _blurred_curvature_weights_from(
+        self, curvature_weights: np.ndarray
+    ) -> np.ndarray:
+        """
+        Returns a linear func's noise-weighted curvature weights correlated with the PSF, in the
+        mask's slim representation with shape [n_unmasked_data_pixels, n_linear_func_pixels].
+
+        The mapper x linear-func block of `F` requires, at every unmasked data pixel, the
+        sliding-window sum ``sum_dy_dx psf[dy, dx] * weights[y + dy - cy, x + dx - cx]`` -- a
+        *correlation* with the PSF, not a convolution. Correlating with the PSF is exactly
+        convolving with the PSF reversed along both axes, so this routes through the dataset
+        PSF's `reversed_kernel` convolver and its batched (multi-column) convolution, which is
+        over an order of magnitude faster at HST resolution than the dense sliding window it
+        replaces.
+
+        As in the sliding-window implementation the weights are zero everywhere outside the
+        mask (no blurring mapping matrix is supplied), and the result is read back only at the
+        unmasked pixels.
+
+        Parameters
+        ----------
+        curvature_weights
+            The operated values of a linear function divided by the noise-map squared, with
+            shape [n_unmasked_data_pixels, n_linear_func_pixels].
+        """
+        return self.psf.reversed_kernel.convolved_mapping_matrix_from(
+            mapping_matrix=curvature_weights,
+            mask=self.mask,
+            xp=np,
+        )
+
+    def _curvature_matrix_mapper_func_blocks_from(
+        self, curvature_matrix: np.ndarray
+    ) -> np.ndarray:
+        """
+        Writes the mapper x linear-func off-diagonal blocks of the `curvature_matrix` into the input
+        matrix, returning it.
+
+        Each block contracts a mapper's unique data-to-source-pixel mappings against the PSF-correlated,
+        noise-weighted curvature vector of a linear function.
+
+        The correlation is the dominant cost of F at HST resolution, so it is done once per linear
+        func by `_blurred_curvature_weights_from` (batched FFT convolution) rather than once per
+        (mapper, linear func) pair by a dense sliding window, and only the sparse scatter of the
+        result onto source pixels runs in numba.
+
+        Each `[mapper, linear_func]` block is written together with its transpose into the
+        `[linear_func, mapper]` block, so F leaves this helper symmetric and no global mirroring
+        pass is required.
+
+        Parameters
+        ----------
+        curvature_matrix
+            The (total_params, total_params) curvature matrix the blocks are written into.
+        """
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+        mapper_param_range_list = self.param_range_list_from(cls=Mapper)
+
+        if len(mapper_list) == 0:
+            return curvature_matrix
+
+        linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
+        linear_func_param_range_list = self.param_range_list_from(
+            cls=AbstractLinearObjFuncList
+        )
+
+        # Neither the noise-weighted curvature weights of a linear func nor their PSF
+        # correlation depend on the mapper, so both are formed once per linear func rather
+        # than once per (mapper, linear func) pair.
+        blurred_curvature_weights_list = [
+            self._blurred_curvature_weights_from(
+                curvature_weights=np.array(
+                    self.linear_func_operated_mapping_matrix_dict[linear_func]
+                    / self.noise_map[:, None] ** 2
+                )
+            )
+            for linear_func in linear_func_list
+        ]
+
+        for i in range(len(mapper_list)):
+            mapper = mapper_list[i]
+            mapper_param_range = mapper_param_range_list[i]
+
+            for func_index, linear_func in enumerate(linear_func_list):
+                linear_func_param_range = linear_func_param_range_list[func_index]
+
+                off_diag = inversion_imaging_numba_util.curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from(
+                    data_to_pix_unique=mapper.unique_mappings.data_to_pix_unique,
+                    data_weights=mapper.unique_mappings.data_weights,
+                    pix_lengths=mapper.unique_mappings.pix_lengths,
+                    pix_pixels=mapper.params,
+                    blurred_curvature_weights=blurred_curvature_weights_list[
+                        func_index
+                    ],
+                )
+
+                curvature_matrix[
+                    mapper_param_range[0] : mapper_param_range[1],
+                    linear_func_param_range[0] : linear_func_param_range[1],
+                ] = off_diag
+
+                curvature_matrix[
+                    linear_func_param_range[0] : linear_func_param_range[1],
+                    mapper_param_range[0] : mapper_param_range[1],
+                ] = off_diag.T
+
+        return curvature_matrix
+
+    def _curvature_matrix_func_func_blocks_from(
+        self, curvature_matrix: np.ndarray
+    ) -> np.ndarray:
+        """
+        Writes the linear-func x linear-func blocks of the `curvature_matrix` into the input matrix,
+        returning it.
+
+        Each block is a BLAS `dot` of two noise-weighted operated mapping matrices.
+
+        Parameters
+        ----------
+        curvature_matrix
+            The (total_params, total_params) curvature matrix the blocks are written into.
+        """
+
+        linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
+        linear_func_param_range_list = self.param_range_list_from(
+            cls=AbstractLinearObjFuncList
+        )
+
+        # The linear func x linear func block is symmetric, so each weighted matrix is
+        # formed once and only the upper triangle of blocks is computed, with the
+        # mirrored block set from the transpose.
+        weighted_vector_list = [
+            self.linear_func_operated_mapping_matrix_dict[linear_func]
+            / self.noise_map[:, None]
+            for linear_func in linear_func_list
+        ]
+
+        for index_0 in range(len(linear_func_list)):
+
+            linear_func_param_range_0 = linear_func_param_range_list[index_0]
+
+            for index_1 in range(index_0, len(linear_func_list)):
+                linear_func_param_range_1 = linear_func_param_range_list[index_1]
+
+                diag = np.dot(
+                    weighted_vector_list[index_0].T,
+                    weighted_vector_list[index_1],
+                )
+
+                curvature_matrix[
+                    linear_func_param_range_0[0] : linear_func_param_range_0[1],
+                    linear_func_param_range_1[0] : linear_func_param_range_1[1],
+                ] = diag
+
+                if index_1 != index_0:
+                    curvature_matrix[
+                        linear_func_param_range_1[0] : linear_func_param_range_1[1],
+                        linear_func_param_range_0[0] : linear_func_param_range_0[1],
+                    ] = diag.T
+
+        return curvature_matrix
+
+    def _mapped_reconstructed_data_dict_from(
+        self,
+        *,
+        use_operated_for_linear_func: bool,
+    ) -> Dict["LinearObj", "Array2D"]:
+        """
+        Shared implementation for mapping a reconstruction to image-plane arrays for each linear object.
+
+        - Mapper: uses unique mappings (w-tilde compatible) + PSF convolution.
+        - Linear-func: uses either operated or unoperated mapping matrix dict.
+        """
+        mapped_dict: Dict["LinearObj", "Array2D"] = {}
+
+        reconstruction_dict = self.source_quantity_dict_from(
+            source_quantity=self.reconstruction
+        )
+
+        for linear_obj in self.linear_obj_list:
+            reconstruction = reconstruction_dict[linear_obj]
+
+            if isinstance(linear_obj, Mapper):
+
+                mapped = inversion_imaging_numba_util.mapped_reconstructed_data_via_image_to_pix_unique_from(
+                    data_to_pix_unique=linear_obj.unique_mappings.data_to_pix_unique,
+                    data_weights=linear_obj.unique_mappings.data_weights,
+                    pix_lengths=linear_obj.unique_mappings.pix_lengths,
+                    reconstruction=np.array(reconstruction),
+                )
+
+                mapped = Array2D(values=mapped, mask=self.mask)
+
+                if use_operated_for_linear_func:
+                    mapped = self.psf.convolved_image_from(
+                        image=mapped,
+                        blurring_image=None,
+                    ).array
+
+                    mapped = Array2D(values=mapped, mask=self.mask)
+
+            else:
+
+                if use_operated_for_linear_func:
+                    mapping_matrix = self.linear_func_operated_mapping_matrix_dict[
+                        linear_obj
+                    ]
+                else:
+                    mapping_matrix = self.linear_func_mapping_matrix_dict[linear_obj]
+
+                mapped = np.sum(reconstruction * mapping_matrix, axis=1)
+                mapped = Array2D(values=mapped, mask=self.mask)
+
+            mapped_dict[linear_obj] = mapped
+
+        return mapped_dict
+
+    @property
+    def mapped_reconstructed_data_dict(self) -> Dict[LinearObj, Array2D]:
+        """
+        When constructing the simultaneous linear equations (via vectors and matrices) the quantities of each individual
+        linear object (e.g. their `mapping_matrix`) are combined into single ndarrays via stacking. This does not track
+        which quantities belong to which linear objects, therefore the linear equation's solutions (which are returned
+        as ndarrays) do not contain information on which linear object(s) they correspond to.
+
+        For example, consider if two `Mapper` objects with 50 and 100 source pixels are used in an `Inversion`.
+        The `reconstruction` (which contains the solved for source pixels values) is an ndarray of shape [150], but
+        the ndarray itself does not track which values belong to which `Mapper`.
+
+        This function converts an ndarray of a `reconstruction` to a dictionary of ndarrays containing each linear
+        object's reconstructed data values, where the keys are the instances of each mapper in the inversion.
+
+        The images are the unconvolved reconstructed data values, meaning they are the solved for reconstruction
+        with PSF operations removed.
+
+        The w-tilde formalism bypasses the calculation of the `mapping_matrix` and it therefore cannot be used to map
+        the reconstruction's values to the image-plane. Instead, the unique data-to-pixelization mappings are used,
+        including the 2D convolution operation after mapping is complete.
+
+        Parameters
+        ----------
+        reconstruction
+            The reconstruction (in the source frame) whose values are mapped to a dictionary of values for each
+            individual mapper (in the image-plane).
+        """
+        return self._mapped_reconstructed_data_dict_from(
+            use_operated_for_linear_func=False
+        )
+
+    @property
+    def mapped_reconstructed_operated_data_dict(self) -> Dict[LinearObj, Array2D]:
+        """
+        When constructing the simultaneous linear equations (via vectors and matrices) the quantities of each individual
+        linear object (e.g. their `mapping_matrix`) are combined into single ndarrays via stacking. This does not track
+        which quantities belong to which linear objects, therefore the linear equation's solutions (which are returned
+        as ndarrays) do not contain information on which linear object(s) they correspond to.
+
+        For example, consider if two `Mapper` objects with 50 and 100 source pixels are used in an `Inversion`.
+        The `reconstruction` (which contains the solved for source pixels values) is an ndarray of shape [150], but
+        the ndarray itself does not track which values belong to which `Mapper`.
+
+        This function converts an ndarray of a `reconstruction` to a dictionary of ndarrays containing each linear
+        object's reconstructed data values, where the keys are the instances of each mapper in the inversion.
+
+        The images are the convolved reconstructed data values, meaning they are the solved for reconstruction with PSF
+        operations included.
+
+        The w-tilde formalism bypasses the calculation of the `mapping_matrix` and it therefore cannot be used to map
+        the reconstruction's values to the image-plane. Instead, the unique data-to-pixelization mappings are used,
+        including the 2D convolution operation after mapping is complete.
+
+        Parameters
+        ----------
+        reconstruction
+            The reconstruction (in the source frame) whose values are mapped to a dictionary of values for each
+            individual mapper (in the image-plane).
+        """
+        return self._mapped_reconstructed_data_dict_from(
+            use_operated_for_linear_func=True
+        )

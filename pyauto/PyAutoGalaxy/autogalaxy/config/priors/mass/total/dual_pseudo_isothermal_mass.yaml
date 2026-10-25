@@ -1,0 +1,328 @@
+dPIEMassB0:
+  centre_0:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  centre_1:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  ell_comps_0:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.3
+    lower_limit: -1.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: -1.0
+      upper: 1.0
+  ell_comps_1:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.3
+    lower_limit: -1.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: -1.0
+      upper: 1.0
+  ra:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  rs:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  b0:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+dPIEMassB0Sph:
+  centre_0:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  centre_1:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  ra:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  rs:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  b0:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+dPIEMass:
+  centre_0:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  centre_1:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  ellipticity:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 0.9
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: 0.0
+      upper: 1.0
+  angle_pos:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 180.0
+    width_modifier:
+      type: Absolute
+      value: 30.0
+    limits:
+      lower: -inf
+      upper: inf
+  sigma:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1000.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  r_core:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  r_cut:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 100.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  redshift_object:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Relative
+      value: 0.5
+    limits:
+      lower: 0.0
+      upper: inf
+  redshift_source:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Relative
+      value: 0.5
+    limits:
+      lower: 0.0
+      upper: inf
+  H0:
+    type: Uniform
+    lower_limit: 50.0
+    upper_limit: 100.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  Om0:
+    type: Uniform
+    lower_limit: 0.1
+    upper_limit: 0.5
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: 1.0
+dPIEMassSph:
+  centre_0:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  centre_1:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  sigma:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1000.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  r_core:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 10.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  r_cut:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 100.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  redshift_object:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Relative
+      value: 0.5
+    limits:
+      lower: 0.0
+      upper: inf
+  redshift_source:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Relative
+      value: 0.5
+    limits:
+      lower: 0.0
+      upper: inf
+  H0:
+    type: Uniform
+    lower_limit: 50.0
+    upper_limit: 100.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  Om0:
+    type: Uniform
+    lower_limit: 0.1
+    upper_limit: 0.5
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: 1.0

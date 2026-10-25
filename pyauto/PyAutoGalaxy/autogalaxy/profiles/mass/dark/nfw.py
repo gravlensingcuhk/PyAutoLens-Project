@@ -1,0 +1,443 @@
+import numpy as np
+from typing import Tuple
+
+import autoarray as aa
+
+from autogalaxy.profiles.mass.dark.gnfw import gNFW
+from autogalaxy.profiles.mass.abstract.cse import MassProfileCSE
+
+from autogalaxy.profiles.mass.dark import nfw_hk24_util
+
+
+class NFW(gNFW, MassProfileCSE):
+    r"""
+    Elliptical Navarro-Frenk-White (NFW) dark matter halo profile.
+
+    The NFW profile is the special case of the generalised NFW with inner slope
+    :math:`\gamma = 1`.  The projected surface mass density (convergence) is:
+
+    .. math::
+
+        \kappa_{\rm NFW}(x) = 2 \kappa_s \, g(x), \qquad x = \frac{\xi}{r_s}
+
+    where :math:`\xi` is the elliptical radius, :math:`r_s` is the scale radius,
+    :math:`\kappa_s = \rho_s r_s / \Sigma_{\rm crit}` is the dimensionless
+    characteristic convergence, and
+
+    .. math::
+
+        g(x) = \begin{cases}
+            \dfrac{1 - \tfrac{1}{\sqrt{1-x^2}}\,\mathrm{arccosh}(1/x)}{x^2 - 1}
+            & x < 1 \\[6pt]
+            \dfrac{1}{3} & x = 1 \\[6pt]
+            \dfrac{1 - \tfrac{1}{\sqrt{x^2-1}}\,\arccos(1/x)}{x^2 - 1}
+            & x > 1
+        \end{cases}
+
+    Deflection angles are computed analytically via the Heyrovský & Karamazov (2024)
+    formalism, or alternatively via a cored-steep-ellipsoid (CSE) decomposition
+    following Oguri (2021).
+
+    References
+    ----------
+    - Navarro, Frenk & White 1996, ApJ, 462, 563
+    - Navarro, Frenk & White 1997, ApJ, 490, 493
+    - Oguri 2021, PASP, 133, 074504  (arXiv:2106.11464)
+    - Heyrovský & Karamazov 2024 (arXiv:2407.xxxxx)
+    """
+
+    def __init__(
+        self,
+        centre: Tuple[float, float] = (0.0, 0.0),
+        ell_comps: Tuple[float, float] = (0.0, 0.0),
+        kappa_s: float = 0.05,
+        scale_radius: float = 1.0,
+    ):
+        r"""
+        Parameters
+        ----------
+        centre
+            The (y,x) arc-second coordinates of the profile centre.
+        ell_comps
+            The first and second ellipticity components of the elliptical coordinate system.
+        kappa_s
+            The overall normalization of the dark matter halo
+            (:math:`\kappa_s = \rho_s r_s / \Sigma_{\rm crit}`).
+        scale_radius
+            The NFW scale radius :math:`r_s`, as an angle on the sky in arcseconds.
+        """
+
+        super().__init__(
+            centre=centre,
+            ell_comps=ell_comps,
+            kappa_s=kappa_s,
+            inner_slope=1.0,
+            scale_radius=scale_radius,
+        )
+        super(MassProfileCSE, self).__init__()
+
+    def deflections_yx_2d_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        return self.deflections_2d_via_analytic_from(grid=grid, xp=xp, **kwargs)
+
+    @aa.decorators.to_vector_yx
+    @aa.decorators.transform(rotate_back=True)
+    def deflections_2d_via_analytic_from(
+        self, grid: aa.type.Grid2DLike, xp=np, **kwargs
+    ):
+        """
+        Analytic calculation deflection angles from Heyrovský & Karamazov 2024 via Eq. 30 & 31
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the deflection angles are computed on.
+        """
+
+        # Convert e definitions:
+        # from q = (1-e)/(1+e) to q = sqrt(1-e**2)
+
+        e_autolens = xp.sqrt(self.ell_comps[1] ** 2 + self.ell_comps[0] ** 2)
+        e_hk24 = 2 * xp.sqrt(e_autolens) / (1 + e_autolens)
+
+        # Define dimensionless length coords
+
+        x1 = grid.array[:, 1] / self.scale_radius
+        x2 = grid.array[:, 0] / self.scale_radius
+
+        # The deflection at the exact centre is zero by symmetry, but the closed form divides
+        # by the radius there. The centre's inputs are masked to a harmless point on the unit
+        # ellipse before anything is evaluated (so no branch sees a zero radius) and its
+        # deflection is zeroed through the prefactor afterwards.
+
+        mask = x1**2 + x2**2 > 1e-24
+
+        x1 = xp.where(mask, x1, 1.0)
+        x2 = xp.where(mask, x2, 0.0)
+
+        x1_sq = x1**2
+        x2_sq = x2**2
+        e_sq = e_hk24**2
+        r_sq = x1_sq + x2_sq
+
+        prefactor = xp.where(
+            mask,
+            4
+            * self.kappa_s
+            * xp.sqrt(1 - e_sq)
+            / (((x1 - e_hk24) ** 2 + x2_sq) * ((x1 + e_hk24) ** 2 + x2_sq)),
+            0.0,
+        )
+
+        f1 = nfw_hk24_util.small_f_1(x1, x2, e_hk24, xp=xp)
+        f2 = nfw_hk24_util.small_f_2(x1, x2, e_hk24, xp=xp)
+        f3 = nfw_hk24_util.small_f_3(x1, x2, e_hk24, xp=xp)
+
+        deflection_x = prefactor * (
+            x1 * ((x1_sq - e_sq) * (1 - e_sq) + x2_sq * (1 + e_sq)) * f1
+            + x1 * (r_sq - e_sq) * f2
+            - x2 * (r_sq + e_sq) * f3
+        )
+
+        deflection_y = prefactor * (
+            x2 * (x1_sq * (1 - 2 * e_sq) + x2_sq + e_sq) * f1
+            + x2 * (r_sq + e_sq) * f2
+            + x1 * (r_sq - e_sq) * f3
+        )
+
+        return xp.multiply(self.scale_radius, xp.vstack((deflection_y, deflection_x)).T)
+
+    @aa.decorators.to_vector_yx
+    @aa.decorators.transform(rotate_back=True)
+    def deflections_2d_via_cse_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        return self._deflections_2d_via_cse_from(grid=grid, xp=xp, **kwargs)
+
+    @aa.over_sample
+    @aa.decorators.to_array
+    @aa.decorators.transform
+    def convergence_2d_via_cse_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        """
+        Calculate the projected 2D convergence from a grid of (y,x) arc second coordinates, by computing and summing
+        the convergence of each individual cse used to decompose the mass profile.
+
+        The cored steep elliptical (cse) decomposition of a the elliptical NFW mass
+        profile (e.g. `decompose_convergence_via_cse`) is using equation (12) of
+        Oguri 2021 (https://arxiv.org/abs/2106.11464).
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the convergence is computed on.
+        """
+
+        elliptical_radii = self.elliptical_radii_grid_from(grid=grid, xp=xp, **kwargs)
+
+        return self._convergence_2d_via_cse_from(grid_radii=elliptical_radii, xp=xp)
+
+    def convergence_func(self, grid_radius: float, xp=np) -> float:
+        grid_radius = (1.0 / self.scale_radius) * grid_radius.array + 0j
+        return xp.real(
+            2.0
+            * self.kappa_s
+            * xp.array(self.coord_func_g(grid_radius=grid_radius, xp=xp))
+        )
+
+    def decompose_convergence_via_cse(
+        self, grid_radii: np.ndarray, total_cses=30, sample_points=60, xp=np
+    ):
+        """
+        Decompose the convergence of the elliptical NFW mass profile into cored steep elliptical (cse) profiles.
+
+        This uses an input function `func` which is specific to the elliptical NFW mass profile, and is defined by
+        equation (12) of Oguri 2021 (https://arxiv.org/abs/2106.11464).
+
+        Parameters
+        ----------
+        func
+            The function representing the profile that is decomposed into CSEs.
+        radii_min:
+            The minimum radius to fit
+        radii_max:
+            The maximum radius to fit
+        total_cses
+            The number of CSEs used to approximate the input func.
+        sample_points: int (should be larger than 'total_cses')
+            The number of data points to fit
+
+        Returns
+        -------
+        Tuple[List, List]
+            A list of amplitudes and core radii of every cored steep elliptical (cse) the mass profile is decomposed
+            into.
+        """
+        radii_min = 0.005
+        radii_max = xp.maximum(7.5, xp.max(grid_radii))
+
+        def nfw_2d(r):
+            grid_radius = (1.0 / self.scale_radius) * r + 0j
+            return xp.real(
+                2.0
+                * self.kappa_s
+                * self.coord_func_g(grid_radius=grid_radius, xp=xp)
+            )
+
+        return self._decompose_convergence_via_cse_from(
+            func=nfw_2d,
+            radii_min=radii_min,
+            radii_max=radii_max,
+            total_cses=total_cses,
+            sample_points=sample_points,
+            xp=xp,
+        )
+
+    @aa.decorators.to_vector_yx
+    @aa.decorators.transform
+    def shear_yx_2d_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        """
+        Analytic calculation shear from Heyrovský & Karamazov 2024
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the deflection angles are computed on.
+
+        """
+
+        # Convert e definitions:
+        # from q = (1-e)/(1+e) to q = sqrt(1-e**2)
+
+        e_autolens = xp.sqrt(self.ell_comps[1] ** 2 + self.ell_comps[0] ** 2)
+        e_hk24 = 2 * xp.sqrt(e_autolens) / (1 + e_autolens)
+
+        # Define dimensionless length coords
+
+        x1 = grid.array[:, 1] / self.scale_radius
+        x2 = grid.array[:, 0] / self.scale_radius
+
+        # Avoid nans due to x=0
+        x1 = xp.where(xp.abs(x1) < 1e-6, 1e-6, x1)
+        x2 = xp.where(xp.abs(x2) < 1e-6, 1e-6, x2)
+
+        # Calculate shear from nfw_HK24.py
+
+        g1, g2 = nfw_hk24_util.g1_g2_from(
+            x1=x1, x2=x2, e=e_hk24, k_s=self.kappa_s, xp=xp
+        )
+
+        # Rotation for shear
+
+        shear_field = self.rotated_grid_from_reference_frame_from(
+            grid=xp.vstack((g2, g1)).T, angle=self.angle(xp) * 2, xp=xp
+        )
+
+        return aa.VectorYX2DIrregular(values=shear_field, grid=grid)
+
+    @aa.decorators.to_array
+    @aa.decorators.transform
+    def convergence_2d_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        """
+        Analytic calculation convergence from Heyrovský & Karamazov 2024
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the deflection angles are computed on.
+
+        Returns
+        -------
+        Convergence
+
+        """
+
+        # Convert e definitions:
+        # from q = (1-e)/(1+e) to q = sqrt(1-e**2)
+
+        e_autolens = xp.sqrt(self.ell_comps[1] ** 2 + self.ell_comps[0] ** 2)
+        e_hk24 = 2 * xp.sqrt(e_autolens) / (1 + e_autolens)
+
+        # Define dimensionless length coords
+
+        x1 = grid.array[:, 1] / self.scale_radius
+        x2 = grid.array[:, 0] / self.scale_radius
+
+        # Avoid nans due to x=0
+
+        x1 = xp.where(xp.abs(x1) < 1e-6, 1e-6, x1)
+        x2 = xp.where(xp.abs(x2) < 1e-6, 1e-6, x2)
+
+        # Calculate convergence from nfw_HK24.py
+        a = nfw_hk24_util.semi_major_axis_from(x1, x2, e_hk24, xp=xp)
+
+        return nfw_hk24_util.kappa_from(k_s=self.kappa_s, a=a, xp=xp)
+
+
+class NFWSph(NFW):
+    r"""
+    Spherical Navarro-Frenk-White (NFW) dark matter halo profile.
+
+    A special case of :class:`NFW` with no ellipticity (:math:`q = 1`).  The convergence
+    is the standard NFW convergence evaluated on a circular radial grid:
+
+    .. math::
+
+        \kappa_{\rm NFW}(r) = 2 \kappa_s \, g(r/r_s)
+
+    and the analytic deflection angle at projected radius :math:`r` is:
+
+    .. math::
+
+        \alpha(r) = \frac{4 \kappa_s r_s}{r/r_s}\,h(r/r_s)
+
+    where :math:`h(x) = \ln(x/2) + f(x)` and :math:`f(x)` is the standard NFW
+    auxiliary function.  The lensing potential is also available analytically.
+
+    References
+    ----------
+    - Navarro, Frenk & White 1996, ApJ, 462, 563
+    - Navarro, Frenk & White 1997, ApJ, 490, 493
+    - Wright & Brainerd 2000, ApJ, 534, 34
+    """
+
+    def __init__(
+        self,
+        centre: Tuple[float, float] = (0.0, 0.0),
+        kappa_s: float = 0.05,
+        scale_radius: float = 1.0,
+    ):
+        r"""
+        Parameters
+        ----------
+        centre
+            The (y,x) arc-second coordinates of the profile centre.
+        kappa_s
+            The overall normalization of the dark matter halo
+            (:math:`\kappa_s = \rho_s r_s / \Sigma_{\rm crit}`).
+        scale_radius
+            The NFW scale radius :math:`r_s`, as an angle on the sky in arcseconds.
+        """
+
+        super().__init__(
+            centre=centre,
+            ell_comps=(0.0, 0.0),
+            kappa_s=kappa_s,
+            scale_radius=scale_radius,
+        )
+
+    def deflections_yx_2d_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        return self.deflections_2d_via_analytic_from(grid=grid, xp=xp, **kwargs)
+
+    @aa.decorators.to_vector_yx
+    @aa.decorators.transform
+    def deflections_2d_via_analytic_from(
+        self, grid: aa.type.Grid2DLike, xp=np, **kwargs
+    ):
+        """
+        Calculate the deflection angles at a given set of arc-second gridded coordinates.
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the deflection angles are computed on.
+        """
+
+        eta = xp.multiply(
+            1.0 / self.scale_radius,
+            self.radial_grid_from(grid=grid, xp=xp, **kwargs).array,
+        )
+
+        # Guard r=0: the deflection at the centre of a spherical profile is exactly
+        # zero by symmetry, but the analytic form here divides by eta and calls
+        # arccosh(1/r) which both blow up at the origin.
+        eta_safe = xp.where(eta < 1e-6, 1e-6, eta)
+
+        deflection_grid = xp.where(
+            eta < 1e-6,
+            0.0,
+            xp.multiply(
+                (4.0 * self.kappa_s * self.scale_radius / eta_safe),
+                self.deflection_func_sph(grid_radius=eta_safe, xp=xp),
+            ),
+        )
+
+        return self._cartesian_grid_via_radial_from(
+            grid=grid, radius=deflection_grid, xp=xp
+        )
+
+    def deflection_func_sph(self, grid_radius, xp=np):
+        # `coord_func_h` is real for a real radius: `coord_func_f_from` evaluates each of its
+        # branches on masked real inputs, so there is no complex promotion to take the real
+        # part of.
+        return self.coord_func_h(grid_radius=grid_radius, xp=xp)
+
+    @aa.over_sample
+    @aa.decorators.to_array
+    @aa.decorators.transform
+    def potential_2d_from(self, grid: aa.type.Grid2DLike, xp=np, **kwargs):
+        """
+        Calculate the potential at a given set of arc-second gridded coordinates.
+
+        Parameters
+        ----------
+        grid
+            The grid of (y,x) arc-second coordinates the deflection angles are computed on.
+
+        """
+        eta = (1.0 / self.scale_radius) * self.radial_grid_from(
+            grid=grid, **kwargs
+        ) + 0j
+        return np.real(
+            2.0
+            * self.scale_radius**2
+            * self.kappa_s
+            * self.potential_func_sph(eta, xp=xp)
+        )
+
+    @staticmethod
+    def potential_func_sph(eta, xp=np):
+        # Spherical NFW lensing potential psi(x) = 2 kappa_s r_s^2 g(x), with
+        # g(x) = ln^2(x/2) - arctanh^2(sqrt(1 - x^2)), obtained by integrating
+        # the deflection field radially. The previous prefactor used a single
+        # factor of r_s instead of r_s^2, so grad(psi) came out a factor 1/r_s
+        # too small relative to deflections_yx_2d_from.
+        return ((xp.log(eta.array / 2.0)) ** 2) - (
+            xp.arctanh(xp.sqrt(1 - eta.array**2))
+        ) ** 2

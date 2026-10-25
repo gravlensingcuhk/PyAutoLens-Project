@@ -1,14 +1,17 @@
 import json
-from autoconf import jax_wrapper  # Sets JAX environment before other imports 
+from autonerves import jax_wrapper  # Sets JAX environment before other imports 
 import sys
 from os import path
 import autofit as af
 import autolens as al
-from autoconf import conf
+from autonerves import conf
 import numpy as np
 import slam_pipeline
 
-cosma_path = path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project')
+import os
+
+# The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
+cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
 workspace_path = cosma_path
 output_path = path.join(cosma_path, 'output')
 config_path = path.join(cosma_path, 'config')
@@ -66,7 +69,8 @@ over_sample_size = al.util.over_sample.over_sample_size_via_radial_bins_from(
 )
 
 dataset = dataset.apply_over_sampling(over_sample_size_lp=over_sample_size)
-dataset = dataset.apply_sparse_operator_cpu()
+# No `apply_sparse_operator_cpu()`: its Numba inversion path is not JAX-traceable, and autofit >= 2026.10
+# jit-traces the likelihood before Nautilus starts (the HST runners use the default JAX path too).
 
 
 """
@@ -134,7 +138,13 @@ source_lp_result = slam_pipeline.source_lp.run(
 
 """
 __SOURCE PIX PIPELINE__
+
+Rectangular RTU mesh (25 x 25) + AdaptPower regularization, the HST project's stability setup;
+see slam_pipeline/source_pix.py "__The Source Mesh__" for why the Hilbert/Delaunay/AdaptSplit
+scheme was dropped. The adapt image is the SOURCE LP source capped at S/N 3 on a copy, while the
+uncapped image drives the pixelization over-sampling map (4 on the arcs, 2 elsewhere).
 """
+
 settings_search = af.SettingsSearch(
     path_prefix='model_setup_free_source',
     unique_tag=f'{dataset_name}',
@@ -143,61 +153,10 @@ settings_search = af.SettingsSearch(
     number_of_cores = 16,
 )
 
-hilbert_pixels = slam_pipeline.model_util.hilbert_pixels_from_pixel_scale(ps)
+adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result)
 
-galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
-    result=source_lp_result
-)
-
-# Bind the RAW source image before capping: the over-sampling S/N map (np.where
-# below) needs the true S/N, which the capped image can never exceed.
-source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
-
-# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
-# image-mesh weights and the adaptive regularization. Both are max-normalised
-# ((adapt/max)**power), so without the cap the single brightest source pixel
-# dominates, starving the extended arc of source pixels and regularization weight.
-adapt_image_snr_cap = 3.0
-source_adapt_image = source_image_raw.copy()
-source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
-galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
-
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01) #weight_power= 4.5 and 2
-
-
-image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
-    mask=dataset.mask, adapt_data=galaxy_image_name_dict["('galaxies', 'source')"]
-)
-
-edge_pixels_total = 30
-
-image_plane_mesh_grid = al.image_mesh.append_with_circle_edge_points(
-    image_plane_mesh_grid=image_plane_mesh_grid,
-    centre=mask.mask_centre,
-    radius=mask_radius + mask.pixel_scale / 2.0,
-    n_points=edge_pixels_total,
-)
-
-adapt_images = al.AdaptImages(
-    galaxy_name_image_dict=galaxy_image_name_dict,
-    galaxy_name_image_plane_mesh_grid_dict={
-        "('galaxies', 'source')": image_plane_mesh_grid
-    },
-)
-
-signal_to_noise_threshold = 3.0
-over_sample_size_pixelization = np.where(
-    source_image_raw > signal_to_noise_threshold,
-    4,
-    2,
-)
-over_sample_size_pixelization = al.Array2D(
-    values=over_sample_size_pixelization, mask=mask
-)
-
-dataset = dataset.apply_over_sampling(
-    over_sample_size_lp=over_sample_size,
-    over_sample_size_pixelization=over_sample_size_pixelization,
+dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
+    dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
 )
 
 analysis = al.AnalysisImaging(
@@ -206,73 +165,26 @@ analysis = al.AnalysisImaging(
     positions_likelihood_list=[
         source_lp_result.positions_likelihood_from(factor=3.0, minimum_threshold=0.075)
     ],
+    use_jax=use_jax,
 )
 
 source_pix_result_1 = slam_pipeline.source_pix.run_1(
     settings_search=settings_search,
     analysis=analysis,
     source_lp_result=source_lp_result,
-    mesh_init=al.mesh.Delaunay(pixels=image_plane_mesh_grid.shape[0], zeroed_pixels=edge_pixels_total),
-    regularization_init=af.Model(al.reg.AdaptSplit),
 )
 
 """
 __SOURCE PIX PIPELINE 2__
+
+The adapt image is now the pixelized source of search 1; the mesh adapts to it and its
+weight_power / weight_floor are fitted.
 """
 
-galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(
-    result=source_lp_result
-)
+adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1)
 
-# Bind the RAW source image before capping: the over-sampling S/N map (np.where
-# below) needs the true S/N, which the capped image can never exceed.
-source_image_raw = galaxy_image_name_dict["('galaxies', 'source')"]
-
-# Cap the source adapt image at S/N 3.0 on a COPY before it drives the Hilbert
-# image-mesh weights and the adaptive regularization. Both are max-normalised
-# ((adapt/max)**power), so without the cap the single brightest source pixel
-# dominates, starving the extended arc of source pixels and regularization weight.
-adapt_image_snr_cap = 3.0
-source_adapt_image = source_image_raw.copy()
-source_adapt_image[source_adapt_image > adapt_image_snr_cap] = adapt_image_snr_cap
-galaxy_image_name_dict["('galaxies', 'source')"] = source_adapt_image
-
-image_mesh = al.image_mesh.Hilbert(pixels=hilbert_pixels, weight_power=3.5, weight_floor=0.01)
-
-
-image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
-    mask=dataset.mask, adapt_data=galaxy_image_name_dict["('galaxies', 'source')"]
-)
-
-edge_pixels_total = 30
-
-image_plane_mesh_grid = al.image_mesh.append_with_circle_edge_points(
-    image_plane_mesh_grid=image_plane_mesh_grid,
-    centre=mask.mask_centre,
-    radius=mask_radius + mask.pixel_scale / 2.0,
-    n_points=edge_pixels_total,
-)
-
-adapt_images = al.AdaptImages(
-    galaxy_name_image_dict=galaxy_image_name_dict,
-    galaxy_name_image_plane_mesh_grid_dict={
-        "('galaxies', 'source')": image_plane_mesh_grid
-    },
-)
-
-over_sample_size_pixelization = np.where(
-    source_image_raw > signal_to_noise_threshold,
-    4,
-    2,
-)
-
-over_sample_size_pixelization = al.Array2D(
-    values=over_sample_size_pixelization, mask=mask
-)
-
-dataset = dataset.apply_over_sampling(
-    over_sample_size_lp=over_sample_size,
-    over_sample_size_pixelization=over_sample_size_pixelization,
+dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
+    dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
 )
 
 analysis = al.AnalysisImaging(
@@ -286,11 +198,6 @@ source_pix_result_2 = slam_pipeline.source_pix.run_2(
     analysis=analysis,
     source_lp_result=source_lp_result,
     source_pix_result_1=source_pix_result_1,
-    mesh=al.mesh.Delaunay(
-        pixels=image_plane_mesh_grid.shape[0], zeroed_pixels=edge_pixels_total
-    ),
-    regularization=af.Model(al.reg.AdaptSplit),
-
 )
 
 """

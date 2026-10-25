@@ -1,0 +1,2 @@
+class StellarProfile:
+    pass

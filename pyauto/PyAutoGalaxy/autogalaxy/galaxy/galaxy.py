@@ -1,0 +1,414 @@
+"""
+The `Galaxy` class is the central object in **PyAutoGalaxy** that groups light profiles, mass profiles, and
+other components (e.g. pixelizations) at a given redshift.
+
+A `Galaxy` holds its components as named keyword-argument attributes, so the user can access them by name
+(e.g. `galaxy.bulge`, `galaxy.disk`). It then provides aggregate methods — `image_2d_from`,
+`deflections_yx_2d_from`, `convergence_2d_from`, `potential_2d_from` — that sum the contributions of all
+matching component types.
+
+The aggregate-over-mass-profiles half of that interface — `cls_list_from`, `deflections_yx_2d_from`,
+`convergence_2d_from`, `potential_2d_from` and `extract_attribute` — lives in the `MassProfileAggregate` mixin
+(in `mass_aggregate.py`), which `Galaxy` shares with the `MassField` class.
+
+The `Galaxies` class (in `galaxies.py`) wraps a list of `Galaxy` objects and provides the same aggregate
+interface over the whole ensemble.
+"""
+
+from typing import Dict, List, Optional, Union
+
+import numpy as np
+
+from autonerves.dictable import instance_as_dict, to_dict
+
+import autoarray as aa
+import autofit as af
+
+from autogalaxy import exc
+from autogalaxy.galaxy.mass_aggregate import MassProfileAggregate
+from autogalaxy.operate.image import OperateImageList
+from autogalaxy.profiles.geometry_profiles import GeometryProfile
+from autogalaxy.profiles.light.abstract import LightProfile
+from autogalaxy.profiles.light.linear import LightProfileLinear
+from autogalaxy.profiles.light.snr.abstract import LightProfileSNR
+from autogalaxy.profiles.mass.abstract.abstract import MassProfile
+from autogalaxy.profiles import validate
+
+
+class Galaxy(af.ModelObject, OperateImageList, MassProfileAggregate):
+    """
+    @DynamicAttrs
+    """
+
+    def __init__(self, redshift: float, **kwargs):
+        """
+        Class representing a galaxy, which is composed of attributes used for fitting galaxies (e.g. light profiles,
+        mass profiles, pixelizations, etc.).
+
+        All *has_* methods retun `True` if galaxy has that attribute, `False` if not.
+
+        Parameters
+        ----------
+        redshift
+            The redshift of the galaxy.
+        pixelization
+            The pixelization of the galaxy used to reconstruct an observed image using an inversion.
+        """
+        super().__init__()
+
+        validate.validate_redshift(redshift=redshift)
+
+        self.redshift = redshift
+
+        for name, val in kwargs.items():
+            if isinstance(val, list):
+                raise exc.GalaxyException(
+                    "One or more of the input light / mass profiles has been passed to the Galaxy object"
+                    "as a list."
+                    ""
+                    "The Galaxy object cannot accept a list of light / mass profiles. "
+                    ""
+                    "Instead, pass these objects as a dictionary, where the key of each dictionary entry is"
+                    "the name of the profile and the value is the profile, e.g.:"
+                    ""
+                    "{bulge : al.lp.Sersic()}"
+                    ""
+                )
+
+            setattr(self, name, val)
+
+    def __hash__(self):
+        return int(self.id)
+
+    def __repr__(self):
+        string = "Redshift: {}".format(self.redshift)
+
+        if self.has(cls=LightProfile):
+            string += "\nLight Profiles:\n{}".format(
+                "\n".join(map(str, self.cls_list_from(cls=LightProfile)))
+            )
+
+        if self.has(cls=MassProfile):
+            string += "\nMass Profiles:\n{}".format(
+                "\n".join(map(str, self.cls_list_from(cls=MassProfile)))
+            )
+
+        if self.has(cls=aa.Pixelization):
+            string += "\nPixelization:\n{}".format(str(self.pixelization))
+
+        return string
+
+    def __eq__(self, other):
+        return self.dict() == other.dict()
+
+    @property
+    def profile_dict(self) -> Dict:
+        return {
+            key: value
+            for key, value in self.__dict__.items()
+            if isinstance(value, GeometryProfile) or isinstance(value, aa.Pixelization)
+        }
+
+    def dict(self) -> Dict:
+        d = instance_as_dict(self)
+        d["arguments"] = {
+            **d.get("arguments", {}),
+            **{name: to_dict(profile) for name, profile in self.profile_dict.items()},
+        }
+        return d
+
+    def _radial_projected_shape_slim_from(self, grid: aa.type.Grid1D2DLike) -> int:
+        """
+        To make 1D plots (e.g. `image_1d_from()`) from an input 2D grid, one uses that 2D grid to radially project
+        the coordinates across the profile's major-axis.
+
+        This function computes the distance from the profile centre to the edge of this 2D grid.
+
+        Because the centres of the galaxy's light and mass profiles can be offset from one another, thsi means the
+        radially grid computed for each profile can have different shapes. Therefore plots using a `Galaxy` object
+        use the biggest radial grid.
+
+        If a 1D grid is input it returns the shape of this grid, as the grid itself defines the radial coordinates.
+
+        Parameters
+        ----------
+        grid
+            A 1D or 2D grid from which a 1D plot of the profile is to be created.
+        """
+        return max(
+            [
+                profile._radial_projected_shape_slim_from(grid=grid)
+                for key, profile in self.profile_dict.items()
+            ]
+        )
+
+    def grid_radial_from(self, grid, centre, angle):
+        if isinstance(grid, aa.Grid1D) or isinstance(grid, aa.Grid2DIrregular):
+            return grid
+
+        radial_projected_shape_slim = self._radial_projected_shape_slim_from(grid=grid)
+
+        return grid.grid_2d_radial_projected_from(
+            centre=centre, angle=angle + 90, shape_slim=radial_projected_shape_slim
+        )
+
+    def image_2d_list_from(
+        self, grid: aa.type.Grid2DLike, xp=np, operated_only: Optional[bool] = None
+    ) -> List[aa.Array2D]:
+        """
+        Returns a list of the 2D images of the galaxy's light profiles from a 2D grid of Cartesian (y,x) coordinates.
+
+        If the galaxy has no light profiles, a numpy array of zeros is returned.
+
+        The images output by this function do not include instrument operations, such as PSF convolution (for imaging
+        data) or a Fourier transform (for interferometer data).
+
+        Inherited methods in the `autogalaxy.operate.image` package can apply these operations to the images.
+        These functions may have the `operated_only` input passed to them, which is why this function includes
+        the `operated_only` input.
+
+        If the `operated_only` input is included, the function omits light profiles which are parents of
+        the `LightProfileOperated` object, which signifies that the light profile represents emission that has
+        already had the instrument operations (e.g. PSF convolution, a Fourier transform) applied to it and therefore
+        that operation is not performed again.
+
+        See the `autogalaxy.profiles.light` package for details of how images are computed from a light
+        profile.
+
+        Parameters
+        ----------
+        grid
+            The 2D (y, x) coordinates where values of the image are evaluated.
+        operated_only
+            By default, the returned list contains all light profile images (irrespective of whether they have been
+            operated on or not). If this input is included as a bool, only images which are or are not already
+            operated are included in the list, with the images of other light profiles created as a numpy array of
+            zeros.
+        """
+        return [
+            light_profile.image_2d_from(grid=grid, xp=xp, operated_only=operated_only)
+            for light_profile in self.cls_list_from(
+                cls=LightProfile, cls_filtered=LightProfileLinear
+            )
+        ]
+
+    def image_2d_list_unbinned_from(
+        self, grid: aa.Grid2D, xp=np, operated_only: Optional[bool] = None
+    ) -> List[np.ndarray]:
+        """Return each non-linear profile image before over-sampling binning."""
+        return [
+            light_profile.image_2d_unbinned_from(
+                grid=grid, xp=xp, operated_only=operated_only
+            )
+            for light_profile in self.cls_list_from(
+                cls=LightProfile, cls_filtered=LightProfileLinear
+            )
+        ]
+
+    def image_2d_unbinned_from(
+        self, grid: aa.Grid2D, xp=np, operated_only: Optional[bool] = None
+    ) -> np.ndarray:
+        image_2d_list = self.image_2d_list_unbinned_from(
+            grid=grid, xp=xp, operated_only=operated_only
+        )
+
+        if image_2d_list:
+            return sum(image_2d_list)
+
+        return xp.zeros((grid.over_sampled.shape[0],))
+
+    @aa.decorators.to_array
+    def image_2d_from(
+        self,
+        grid: aa.type.Grid2DLike,
+        xp=np,
+        operated_only: Optional[bool] = None,
+    ) -> Union[np.ndarray, aa.Array2D]:
+        """
+        Returns the 2D image of all galaxy light profiles summed from a 2D grid of Cartesian (y,x) coordinates.
+
+        This function first computes the image of each galaxy, via the function `image_2d_list_from`. The
+        images are then summed to give the overall image of the galaxies.
+
+        Refer to the function `image_2d_list_from` for a full description of the calculation and how the `operated_only`
+        input is used.
+
+        Parameters
+        ----------
+        grid
+            The 2D (y, x) coordinates where values of the image are evaluated.
+        operated_only
+            The returned list from this function contains all light profile images, and they are never operated on
+            (e.g. via the imaging PSF). However, inherited methods in the `autogalaxy.operate.image` package can
+            apply these operations to the images, which may have the `operated_only` input passed to them. This input
+            therefore is used to pass the `operated_only` input to these methods.
+        """
+
+        if (
+            len(self.cls_list_from(cls=LightProfile, cls_filtered=LightProfileLinear))
+            > 0
+        ):
+            return sum(
+                self.image_2d_list_from(grid=grid, xp=xp, operated_only=operated_only)
+            )
+        return xp.zeros((grid.shape[0],))
+
+    @property
+    def half_light_radius(self):
+        """
+        The half-light radius of the galaxy.
+
+        Returns `None` because a `Galaxy` may contain multiple light profiles with different effective radii;
+        there is no single half-light radius that characterises the whole galaxy. Individual light profile
+        components expose their own `half_light_radius` / `effective_radius` attributes.
+        """
+        return None
+
+    @aa.decorators.to_grid
+    def traced_grid_2d_from(
+        self, grid: aa.type.Grid2DLike, xp=np
+    ) -> aa.type.Grid2DLike:
+        """
+        Trace an input grid of (y,x) coordinates through the galaxy's deflection angles.
+
+        The traced grid is computed as:
+
+            β = θ − α(θ)
+
+        where θ is the image-plane grid and α(θ) are the deflection angles from the galaxy's mass profiles.
+
+        This is the lensing ray-tracing step that maps image-plane positions to source-plane positions.
+
+        Parameters
+        ----------
+        grid
+            The 2D (y, x) image-plane coordinates to be traced to the source plane.
+
+        Returns
+        -------
+        aa.type.Grid2DLike
+            The source-plane (y, x) coordinates after deflection.
+        """
+        if isinstance(grid, aa.Grid2D):
+            traced_grid = grid - self.deflections_yx_2d_from(grid=grid, xp=xp)
+
+            # At a uniform over sample size of 1 every sub pixel is the pixel itself, so
+            # `grid.over_sampled` is the slim grid in the same order and tracing it again
+            # doubles the deflection angle calculation for a bit-identical result. The
+            # over sample size is host numpy, so this branch is static at JAX trace time.
+
+            sub_size_all_one = bool(np.all(np.asarray(grid.over_sample_size.array) == 1))
+
+            if sub_size_all_one:
+                traced_grid_over_sampled = aa.Grid2DIrregular(
+                    values=traced_grid.array, xp=xp
+                )
+            else:
+                traced_grid_over_sampled = grid.over_sampled - self.deflections_yx_2d_from(
+                    grid=grid.over_sampled, xp=xp
+                )
+
+            return aa.Grid2D(
+                values=traced_grid,
+                mask=grid.mask,
+                over_sample_size=grid.over_sample_size,
+                over_sampled=traced_grid_over_sampled,
+                over_sampler=grid.over_sampler,
+            )
+
+        return grid - self.deflections_yx_2d_from(grid=grid, xp=xp)
+
+    def luminosity_within_circle_from(self, radius: float):
+        """
+        Returns the total luminosity of the galaxy's light profiles within a circle of specified radius.
+
+        See `light_profile.luminosity_within_circle` for details of how this is performed.
+
+        Parameters
+        ----------
+        radius
+            The radius of the circle to compute the dimensionless mass within.
+        unit_luminosity
+            The unit_label the luminosity is returned in {esp, counts}.
+        exposure_time
+            The exposure time of the observation, which converts luminosity from electrons per second unit_label to counts.
+        """
+        if self.has(cls=LightProfile):
+            return sum(
+                map(
+                    lambda p: p.luminosity_within_circle_from(radius=radius),
+                    self.cls_list_from(
+                        cls=LightProfile, cls_filtered=LightProfileLinear
+                    ),
+                )
+            )
+
+    def mass_angular_within_circle_from(self, radius: float):
+        """
+        Integrate the mass profiles's convergence profile to compute the total mass within a circle of \
+        specified radius. This is centred on the mass profile.
+
+        The following unit_label for mass can be specified and output:
+
+        - Dimensionless angular unit_label (default) - 'angular'.
+        - Solar masses - 'angular' (multiplies the angular mass by the critical surface mass density).
+
+        Parameters
+        ----------
+        radius : dim.Length
+            The radius of the circle to compute the dimensionless mass within.
+        unit_mass
+            The unit_label the mass is returned in {angular, angular}.
+        critical_surface_density or None
+            The critical surface mass density of the strong lens configuration, which converts mass from angulalr \
+            unit_label to phsical unit_label (e.g. solar masses).
+        """
+        if self.has(cls=MassProfile):
+            return sum(
+                map(
+                    lambda p: p.mass_angular_within_circle_from(radius=radius),
+                    self.cls_list_from(cls=MassProfile),
+                )
+            )
+        else:
+            raise exc.GalaxyException(
+                "You cannot perform a mass-based calculation on a galaxy which does not have a mass-profile"
+            )
+
+    def set_snr_of_snr_light_profiles(
+        self,
+        grid: aa.type.Grid2DLike,
+        exposure_time: float,
+        background_sky_level: float = 0.0,
+        psf: Optional[aa.Convolver] = None,
+    ):
+        """
+        Iterate over every galaxy finding all `LightProfileSNR` light profiles and set their `intensity` values to
+        values which give their input `signal_to_noise_ratio` value, which is performed as follows:
+
+        - Evaluate the image of each light profile on the input grid.
+        - Blur this image with a PSF, if included.
+        - Take the value of the brightest pixel.
+        - Use an input `exposure_time` and `background_sky` (e.g. from the `SimulatorImaging` object) to determine
+          what value of `intensity` gives the desired signal to noise ratio for the image.
+
+        Parameters
+        ----------
+        grid
+            The (y, x) coordinates in the original reference frame of the grid.
+        exposure_time
+            The exposure time of the simulated imaging.
+        background_sky_level
+            The level of the background sky of the simulated imaging.
+        psf
+            The psf of the simulated imaging which can change the S/N of the light profile due to spreading out
+            the emission.
+        """
+        for light_profile in self.cls_list_from(cls=LightProfile):
+            if isinstance(light_profile, LightProfileSNR):
+                light_profile.set_intensity_from(
+                    grid=grid,
+                    exposure_time=exposure_time,
+                    background_sky_level=background_sky_level,
+                    psf=psf,
+                )

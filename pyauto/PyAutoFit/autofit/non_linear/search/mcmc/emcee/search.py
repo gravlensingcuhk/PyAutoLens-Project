@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Dict, Optional, TYPE_CHECKING
+
+import numpy as np
+
+from autofit import exc
+from autofit.mapper.model_mapper import ModelMapper
+from autofit.mapper.prior_model.abstract import AbstractPriorModel
+from autofit.non_linear.checkpoint import (
+    EMCEE_FILENAME,
+    NativeFileCheckpointer,
+    load_emcee_backend,
+)
+from autofit.non_linear.initializer import Initializer
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import CHAIN
+from autofit.non_linear.samples.mcmc import SamplesMCMC
+from autofit.non_linear.search.mcmc.auto_correlations import AutoCorrelationsSettings
+from autofit.non_linear.search.mcmc.auto_correlations import AutoCorrelations
+from autofit.non_linear.test_mode import is_test_mode
+from autofit.non_linear.samples.adapter import ChainPosterior, RawSamples
+from autofit.non_linear.search import capabilities as cap
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+logger = logging.getLogger(__name__)
+
+
+class Emcee(NonLinearSearch):
+    samples_cls = SamplesMCMC
+
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.NONE
+    gradient = cap.Gradient.NONE
+    batched = False
+    honours_gradient_mode = False
+    posterior_kind = cap.PosteriorKind.CHAIN
+    produces_evidence = False
+    # Resumable: ``run`` reopens the HDF backend, loads the last sample and iteration
+    # count and samples only the remaining steps. The search-extensibility report's
+    # section 3.1 table listed Emcee as not resumable; that was corrected here (A1
+    # review) against the published meaning "resumes from its own checkpoint".
+    resumable = True
+    warm_start = cap.WarmStart.CONSUMER
+    install_extra = ""
+    upstream_url = "https://github.com/dfm/emcee"
+    citation_keys = ("emcee",)
+    status = cap.Status.STABLE
+    test_mode_budget = {"nwalkers": 20, "nsteps": 10}
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.LOG_POSTERIOR, cap.CoordinateSpace.PHYSICAL)
+    invalid_value = -float("inf")
+    # emcee's own HDF backend is both the archive and the resume state; it is kept
+    # after completion because the samples cannot be rebuilt without it.
+    checkpointer = NativeFileCheckpointer(
+        EMCEE_FILENAME, loader=load_emcee_backend, retain_after_completion=True
+    )
+    resume_state = checkpointer
+
+    __identifier_fields__ = ("nwalkers",)
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        nwalkers: int = 50,
+        nsteps: int = 2000,
+        initializer: Optional[Initializer] = None,
+        auto_correlation_settings: Optional[AutoCorrelationsSettings] = None,
+        iterations_per_quick_update: int = None,
+        iterations_per_full_update: int = None,
+        number_of_cores: int = 1,
+        silence: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        **kwargs,
+    ):
+        """
+        An Emcee non-linear search.
+
+        For a full description of Emcee, checkout its Github and readthedocs webpages:
+
+        https://github.com/dfm/emcee
+
+        https://emcee.readthedocs.io/en/stable/
+
+        If you use `Emcee` as part of a published work, please cite the package following the instructions under the
+        *Attribution* section of the GitHub page.
+
+        Parameters
+        ----------
+        name
+            The name of the search, controlling the last folder results are output.
+        path_prefix
+            The path of folders prefixing the name folder where results are output.
+        unique_tag
+            The name of a unique tag for this model-fit, which will be given a unique entry in the sqlite database
+            and also acts as the folder after the path prefix and before the search name.
+        nwalkers
+            The number of walkers in the ensemble used to sample parameter space.
+        nsteps
+            The number of steps that must be taken by every walker.
+        initializer
+            Generates the initialize samples of non-linear parameter space (see autofit.non_linear.initializer).
+        auto_correlation_settings
+            Customizes and performs auto correlation calculations performed during and after the search.
+        number_of_cores
+            The number of cores sampling is performed using a Python multiprocessing Pool instance.
+        silence
+            If True, the default print output of the non-linear search is silenced.
+        session
+            An SQLalchemy session instance so the results of the model-fit are written to an SQLite database.
+        """
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=CHAIN.initializer_for(initializer),
+            iterations_per_quick_update=iterations_per_quick_update,
+            iterations_per_full_update=iterations_per_full_update,
+            number_of_cores=number_of_cores,
+            silence=silence,
+            session=session,
+            **kwargs,
+        )
+
+        self.auto_correlation_settings = CHAIN.auto_correlation_settings_for(
+            auto_correlation_settings
+        )
+
+        self.nwalkers = nwalkers
+        self.nsteps = nsteps
+
+        self.logger.debug("Creating Emcee Search")
+
+    def run(self, ctx):
+        """
+        Run emcee (the ``run(ctx)`` hook; see ``docs/design/run_ctx.md``) and return the
+        ``emcee.EnsembleSampler``.
+
+        emcee's HDF backend (``search_internal/search_internal.hdf``) is both the archive
+        and the resume state: a resumed run reopens it, continues from its last sample
+        and samples only the remaining steps. Likelihoods are spread over the fit's
+        ``SneakyPool`` (``ctx.pool.sneaky``), which is ``None`` on one core.
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+        """
+        import emcee
+
+        model = ctx.model
+
+        try:
+            backend = emcee.backends.HDFBackend(filename=self.backend_filename)
+        except TypeError:
+            backend = None
+
+        search_internal = emcee.EnsembleSampler(
+            nwalkers=self.nwalkers,
+            ndim=model.prior_count,
+            log_prob_fn=ctx.fitness.call_wrap,
+            backend=backend,
+            pool=ctx.pool.sneaky(ctx.fitness),
+        )
+
+        # Backend stream 1 of the search-level seed (`ctx.rng`, whose stream 0 the
+        # initializer already took); emcee otherwise copies numpy's global state. A
+        # resumed run restores the state its HDF backend saved.
+        if self.seed is not None:
+            search_internal._random = np.random.RandomState(
+                np.random.MT19937(ctx.rng.spawn(1)[0])
+            )
+
+        try:
+            state = search_internal.get_last_sample()
+            samples = self.samples_from(model=model, search_internal=search_internal)
+
+            total_iterations = search_internal.iteration
+
+            if samples.converged:
+                iterations_remaining = 0
+            else:
+                iterations_remaining = self.nsteps - total_iterations
+
+                self.logger.info(
+                    "Resuming Emcee non-linear search (previous samples found)."
+                )
+
+        except AttributeError:
+            state, _ = ctx.start_points(search_internal.nwalkers)
+
+            self.logger.info(
+                "Starting new Emcee non-linear search (no previous samples found)."
+            )
+
+            total_iterations = 0
+            iterations_remaining = self.nsteps
+
+        while iterations_remaining > 0:
+            # ``emcee``'s ``sample`` does ``range(iterations)`` internally and
+            # never casts, so this must be an ``int`` (PyAutoFit#1422).
+            iterations = ctx.schedule.next_budget(total_iterations, self.nsteps)
+
+            for sample in search_internal.sample(
+                initial_state=state,
+                iterations=iterations,
+                progress=True,
+                skip_initial_state_check=True,
+                store=True,
+            ):
+                pass
+
+            state = search_internal.get_last_sample()
+
+            total_iterations += iterations
+            iterations_remaining = self.nsteps - total_iterations
+
+            samples = self.samples_from(model=model, search_internal=search_internal)
+
+            if self.auto_correlation_settings.check_for_convergence:
+                if (
+                    search_internal.iteration
+                    > self.auto_correlation_settings.check_size
+                ):
+                    if samples.converged:
+                        iterations_remaining = 0
+
+            if iterations_remaining > 0:
+                ctx.update(search_internal)
+
+        return search_internal
+
+    def samples_info_from(self, search_internal=None, auto_correlations=None):
+        search_internal = search_internal or self.backend
+
+        if auto_correlations is None:
+            auto_correlations = self.auto_correlations_from(
+                search_internal=search_internal
+            )
+
+        return {
+            "check_size": auto_correlations.check_size,
+            "required_length": auto_correlations.required_length,
+            "change_threshold": auto_correlations.change_threshold,
+            "total_walkers": len(search_internal.get_chain()[0, :, 0]),
+            "total_steps": len(search_internal.get_log_prob()),
+            "time": self.timer.time if self.timer else None,
+        }
+
+    def raw_samples_from(self, model, search_internal):
+        """
+        The emcee chain after burn-in and thinning, as raw samples.
+
+        The parameters and log posteriors come out of emcee under the *same*
+        ``discard`` / ``thin`` (PyAutoFit#1628), through ``ChainPosterior.thin``,
+        which falls back to the whole chain when burn-in removal leaves no draws; the log likelihood is the log
+        posterior minus the log prior (``samples_from_raw``), and every draw has
+        weight 1.
+
+        Parameters
+        ----------
+        model
+            Maps input vectors of unit parameter values to physical values and model instances via priors.
+        search_internal
+            The ``emcee.EnsembleSampler`` or its ``HDFBackend``.
+        """
+        # Computed once per conversion and shared by the burn-in, `samples_info` and
+        # `SamplesMCMC`; each computation integrates the whole chain twice.
+        auto_correlations = self.auto_correlations_from(
+            search_internal=search_internal
+        )
+
+        if is_test_mode():
+            discard = 5
+            thin = 5
+
+        else:
+            discard = int(3.0 * np.max(auto_correlations.times))
+            thin = int(np.max(auto_correlations.times) / 2.0)
+
+        parameters, log_posterior = ChainPosterior.from_sampler(
+            search_internal, label="Emcee"
+        ).thin(discard=discard, thin=thin)
+
+        return RawSamples(
+            parameters=parameters,
+            log_posterior=log_posterior,
+            info=self.samples_info_from(
+                search_internal=search_internal,
+                auto_correlations=auto_correlations,
+            ),
+            samples_kwargs=dict(
+                auto_correlation_settings=self.auto_correlation_settings,
+                auto_correlations=auto_correlations,
+            ),
+            label="Emcee",
+        )
+
+    def auto_correlations_from(self, search_internal=None):
+        import emcee
+
+        search_internal = search_internal or self.backend
+
+        times = search_internal.get_autocorr_time(tol=0)
+
+        previous_auto_correlation_times = emcee.autocorr.integrated_time(
+            x=search_internal.get_chain()[
+                : -self.auto_correlation_settings.check_size, :, :
+            ],
+            tol=0,
+        )
+
+        return AutoCorrelations(
+            check_size=self.auto_correlation_settings.check_size,
+            required_length=self.auto_correlation_settings.required_length,
+            change_threshold=self.auto_correlation_settings.change_threshold,
+            times=times,
+            previous_times=previous_auto_correlation_times,
+        )
+
+    @property
+    def backend_filename(self):
+        return self.paths.search_internal_path / EMCEE_FILENAME
+
+    @property
+    def backend(self) -> "emcee.backends.HDFBackend":
+        """
+        The `Emcee` hdf5 backend, which provides access to all samples, likelihoods, etc. of the non-linear search.
+
+        The sampler is described in the "Results" section at https://dynesty.readthedocs.io/en/latest/quickstart.html
+        """
+        import emcee
+
+        if Path(self.backend_filename).is_file():
+            return emcee.backends.HDFBackend(filename=str(self.backend_filename))
+        else:
+            raise FileNotFoundError(
+                f"The file search_internal.hdf does not exist at the path {self.paths.search_internal_path}"
+            )

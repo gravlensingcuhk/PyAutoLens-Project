@@ -1,0 +1,594 @@
+import numpy as np
+from typing import Tuple, Optional
+
+from autofit.mapper.prior_model.latent_parameters import Periodic
+
+# The ellipticity magnitude at which the axis-ratio conversion saturates. Beyond
+# it every magnitude maps onto the same axis ratio, so the likelihood is exactly
+# flat in the radial direction and carries no gradient there — a gradient search
+# that walks past this cannot walk back. `EllProfile.__model_constraint__`
+# reports the distance beyond it, which is how PyAutoFit's multi-start searches
+# count the lanes trapped in that region.
+#
+# Deliberately distinct from the `magnitude_squared >= 1.0` validity threshold in
+# `profiles/validate.py`. They answer different questions — this is where the
+# *gradient* dies, that is where the *geometry* stops meaning anything — and the
+# annulus between them is reachable: at magnitude 0.9995 the radial derivative is
+# already exactly zero while `validate_ell_comps` still calls the point valid.
+# Stated together here rather than left as unrelated literals in separate files.
+ELL_COMPS_MAGNITUDE_CLAMP = 0.999
+
+# The amount the x-component of a pair of components is nudged by when both are
+# exactly zero, for traced JAX values only (see `_nudge_off_origin`).
+_ORIGIN_NUDGE = 1e-8
+
+
+def _nudge_off_origin(c0, c1, xp=np):
+    """
+    Returns the x-component `c1` of a pair of components (`ell_comps[1]`, `gamma_1`, `multipole_comps[1]`), nudged
+    by `_ORIGIN_NUDGE` when both components are exactly zero, for traced JAX values only.
+
+    Every polar conversion below computes `sqrt(c0**2 + c1**2)`, whose derivative at the origin is 0/0, so
+    `jax.grad` returns NaN there even though the profiles themselves are smooth through it (shear and multipole
+    deflections are linear in their components, so the gradient at the nudged point is exact). The nudged value is
+    `c1 + nudge`, so the derivative through `c1` is unchanged, and positive, so the angle `arctan2(0, +nudge) = 0`
+    matches the existing guarded value at the origin.
+
+    Only traced values carry a gradient, so NumPy and concrete JAX values are returned unchanged: staging the nudge
+    onto a constant component alters how XLA compiles the downstream arithmetic and moves jitted deflections by an
+    ulp, which flips bit-exact ties in the point solver (`test_static_lattice_jax.py` in PyAutoLens pins one). For
+    the same reason traced values go through `jax.lax.select` rather than `jnp.where` or an additive offset, both of
+    which were measured to shift that pinned tie; away from the origin the traced value is selected unchanged.
+    """
+    if xp.__name__.startswith("jax"):
+        import jax
+
+        if isinstance(c0, jax.core.Tracer) or isinstance(c1, jax.core.Tracer):
+            return jax.lax.select(
+                xp.logical_and(c0 == 0, c1 == 0), c1 + _ORIGIN_NUDGE, c1
+            )
+    return c1
+
+
+def ell_comps_from(axis_ratio: float, angle: float, xp=np) -> Tuple[float, float]:
+    """
+    Returns the elliptical components e1 and e2 of a light or mass profile from an input angle in degrees and axis
+    ratio.
+
+    The elliptical components of a light or mass profile are given by:
+
+    elliptical_component_y = ell_comps[0] = (1-axis_ratio)/(1+axis_ratio) * sin(2 * angle)
+    elliptical_component_x = ell_comps[1] = (1-axis_ratio)/(1+axis_ratio) * cos(2 * angle)
+
+    Which are the values this function returns.
+
+    Parameters
+    ----------
+    axis_ratio
+        Ratio of light profiles ellipse's minor and major axes (b/a).
+    angle
+        Rotation angle of light profile counter-clockwise from positive x-axis.
+    """
+    angle *= xp.pi / 180.0
+    fac = (1 - axis_ratio) / (1 + axis_ratio)
+    ellip_y = fac * xp.sin(2 * angle)
+    ellip_x = fac * xp.cos(2 * angle)
+    return (ellip_y, ellip_x)
+
+
+def axis_ratio_and_angle_from(
+    ell_comps: Tuple[float, float], xp=np
+) -> Tuple[float, float]:
+    """
+    Returns the axis-ratio and position angle in degrees (-45 < angle < 135.0) from input elliptical components e1
+    and e2 of a light or mass profile.
+
+    The elliptical components of a light or mass profile are given by:
+
+    elliptical_component_y = ell_comps[0] = (1-axis_ratio)/(1+axis_ratio) * sin(2 * angle)
+    elliptical_component_x = ell_comps[1] = (1-axis_ratio)/(1+axis_ratio) * cos(2 * angle)
+
+    The axis-ratio and angle are therefore given by:
+
+    axis_ratio = (1 - fac) / (1 + fac)
+    angle = 0.5 * arctan(ell_comps[0] / ell_comps[1])
+
+    where `fac = sqrt(ell_comps[1] ** 2 + ell_comps[0] ** 2).
+
+    This function returns the axis-ratio and angle in degrees.
+
+    An additional check is performed which requires the angle is between -45 and 135 degrees. This ensures that
+    for certain values of `ell_comps` the angle does not jump from one boundary to another (e.g. without this check
+    certain values of `ell_comps` return -46.0 degrees and others 134.0 degrees). This ensures that when error
+    estimates are computed from samples of a lens model via marginalization, the calculation is not biased by the
+    angle jumping between these two values.
+
+    Parameters
+    ----------
+    ell_comps
+        The elliptical components of the light or mass profile which are converted to an angle.
+    """
+    ell_comps = (ell_comps[0], _nudge_off_origin(ell_comps[0], ell_comps[1], xp=xp))
+
+    angle = 0.5 * xp.arctan2(
+        ell_comps[0],
+        xp.where(
+            xp.logical_and(ell_comps[0] == 0, ell_comps[1] == 0), 1.0, ell_comps[1]
+        ),
+    )
+    angle *= 180.0 / xp.pi
+
+    angle = xp.where(angle < -45, angle + 180, angle)
+
+    fac = xp.sqrt(ell_comps[1] ** 2 + ell_comps[0] ** 2)
+    if xp.__name__.startswith("jax"):
+        import jax
+
+        fac = jax.lax.min(fac, ELL_COMPS_MAGNITUDE_CLAMP)
+    else:  # NumPy
+        fac = np.minimum(fac, ELL_COMPS_MAGNITUDE_CLAMP)
+
+    axis_ratio = (1 - fac) / (1 + fac)
+    return axis_ratio, angle
+
+
+def axis_ratio_from(ell_comps: Tuple[float, float], xp=np):
+    """
+    Returns the axis-ratio from input elliptical components e1 and e2 of a light or mass profile.
+
+    The elliptical components of a light or mass profile are given by:
+
+    elliptical_component_y = ell_comps[0] = (1-axis_ratio)/(1+axis_ratio) * sin(2 * angle)
+    elliptical_component_x = ell_comps[1] = (1-axis_ratio)/(1+axis_ratio) * cos(2 * angle)
+
+    The axis-ratio is therefore given by:
+
+    axis_ratio = (1 - fac) / (1 + fac)
+    angle = 0.5 * arctan(ell_comps[0] / ell_comps[1])
+
+    where `fac = sqrt(ell_comps[1] ** 2 + ell_comps[0] ** 2).
+
+    This function returns the axis-ratio.
+
+    Parameters
+    ----------
+    ell_comps
+        The elliptical components of the light or mass profile which are converted to an angle.
+    """
+    axis_ratio, angle = axis_ratio_and_angle_from(ell_comps=ell_comps, xp=xp)
+    return axis_ratio
+
+
+def angle_from(ell_comps: Tuple[float, float], xp=np) -> float:
+    """
+    Returns the position angle in degrees (-45 < angle < 135.0) from input elliptical components e1 and e2
+    of a light or mass profile.
+
+    The elliptical components of a light or mass profile are given by:
+
+    elliptical_component_y = ell_comps[0] = (1-q)/(1+q) * sin(2 * angle)
+    elliptical_component_x = ell_comps[1] = (1-q)/(1+q) * cos(2 * angle)
+
+    axis_ratio = (1 - fac) / (1 + fac)
+    angle = 0.5 * arctan(ell_comps[0] / ell_comps[1])
+
+    where `fac = sqrt(ell_comps[1] ** 2 + ell_comps[0] ** 2).
+
+    This function returns the angle in degrees.
+
+    An additional check is performed which requires the angle is between -45 and 135 degrees. This ensures that
+    for certain values of `ell_comps` the angle does not jump from one boundary to another (e.g. without this check
+    certain values of `ell_comps` return -46.0 degrees and others 134.0 degrees).
+
+    This ensures that when error estimates are computed from samples of a lens model via marginalization, the
+    calculation is not biased by the angle jumping between these two values.
+
+    Parameters
+    ----------
+    ell_comps
+        The elliptical components of the light or mass profile which are converted to an angle.
+    """
+    axis_ratio, angle = axis_ratio_and_angle_from(ell_comps=ell_comps, xp=xp)
+    return angle
+
+
+def shear_gamma_1_2_from(magnitude: float, angle: float, xp=np) -> Tuple[float, float]:
+    """
+    Returns the shear gamma 1 and gamma 2 values an input shear magnitude and angle in degrees.
+
+    The gamma 1 and gamma 2 components of a shear are given by:
+
+    gamma_1 = magnitude * xp.cos(2 * angle * xp.pi / 180.0)
+    gamma_2 = magnitude * xp.sin(2 * angle * xp.pi / 180.0)
+
+    Which are the values this function returns.
+
+    Converting from gamma 1 and gamma 2 to magnitude and angle is given by:
+
+    magnitude = xp.sqrt(gamma_1**2 + gamma_2**2)
+    angle = xp.arctan2(gamma_2, gamma_1) / 2 * 180.0 / xp.pi
+
+    Parameters
+    ----------
+    axis_ratio
+        Ratio of light profiles ellipse's minor and major axes (b/a).
+    angle
+        Rotation angle of light profile counter-clockwise from positive x-axis.
+    """
+    gamma_1 = magnitude * xp.cos(2 * angle * xp.pi / 180.0)
+    gamma_2 = magnitude * xp.sin(2 * angle * xp.pi / 180.0)
+    return (gamma_1, gamma_2)
+
+
+def shear_magnitude_and_angle_from(
+    gamma_1: float, gamma_2: float, xp=np
+) -> Tuple[float, float]:
+    """
+    Returns the shear magnitude and angle in degrees from input shear gamma 1 and gamma 2 values.
+
+    The gamma 1 and gamma 2 components of a shear are given by:
+
+    gamma_1 = magnitude * xp.cos(2 * angle * xp.pi / 180.0)
+    gamma_2 = magnitude * xp.sin(2 * angle * xp.pi / 180.0)
+
+    Converting from gamma 1 and gamma 2 to magnitude and angle is given by:
+
+    magnitude = xp.sqrt(gamma_1**2 + gamma_2**2)
+    angle = xp.arctan2(gamma_2, gamma_1) / 2 * 180.0 / xp.pi
+
+    Which are the values this function returns.
+
+    Additional checks are performed which requires the angle is between 0 and 180 degrees. This ensures that
+    for certain values of `gamma_1` and `gamma_2` the angle does not jump from one boundary to another (e.g. without
+    this check certain values of `gamma_1` and `gamma_2` return -1.0 degrees and others 179.0 degrees).
+
+    This ensures that when error estimates are computed from samples of a lens model via marginalization, the
+    calculation is not biased by the angle jumping between these two values.
+
+    Parameters
+    ----------
+    gamma_1
+        The gamma 1 component of the shear.
+    gamma_2
+        The gamma 2 component of the shear.
+    """
+    gamma_1 = _nudge_off_origin(gamma_2, gamma_1, xp=xp)
+
+    angle = (
+        0.5
+        * xp.arctan2(
+            gamma_2, xp.where(xp.logical_and(gamma_1 == 0, gamma_2 == 0), 1.0, gamma_1)
+        )
+        * 180.0
+        / xp.pi
+    )
+    magnitude = xp.sqrt(gamma_1**2 + gamma_2**2)
+
+    angle = xp.where(angle < 0, angle + 180.0, angle)
+    angle = xp.where(
+        xp.logical_and(xp.abs(angle - 90.0) > 45.0, angle > 90.0), angle - 180.0, angle
+    )
+
+    return magnitude, angle
+
+
+def shear_magnitude_from(gamma_1: float, gamma_2: float, xp=np) -> float:
+    """
+    Returns the shear magnitude and angle in degrees from input shear gamma 1 and gamma 2 values.
+
+    The gamma 1 and gamma 2 components of a shear are given by:
+
+    gamma_1 = magnitude * xp.cos(2 * angle * xp.pi / 180.0)
+    gamma_2 = magnitude * xp.sin(2 * angle * xp.pi / 180.0)
+
+    Converting from gamma 1 and gamma 2 to magnitude and angle is given by:
+
+    magnitude = xp.sqrt(gamma_1**2 + gamma_2**2)
+    angle = xp.arctan2(gamma_2, gamma_1) / 2 * 180.0 / xp.pi
+
+    The magnitude value is what this function returns.
+
+    Parameters
+    ----------
+    gamma_1
+        The gamma 1 component of the shear.
+    gamma_2
+        The gamma 2 component of the shear.
+    """
+    magnitude, angle = shear_magnitude_and_angle_from(
+        gamma_1=gamma_1, gamma_2=gamma_2, xp=xp
+    )
+    return magnitude
+
+
+def shear_angle_from(gamma_1: float, gamma_2: float, xp=np) -> float:
+    """
+    Returns the shear magnitude and angle in degrees from input shear gamma 1 and gamma 2 values.
+
+    The gamma 1 and gamma 2 components of a shear are given by:
+
+    gamma_1 = magnitude * xp.cos(2 * angle * xp.pi / 180.0)
+    gamma_2 = magnitude * xp.sin(2 * angle * xp.pi / 180.0)
+
+    Converting from gamma 1 and gamma 2 to magnitude and angle is given by:
+
+    magnitude = xp.sqrt(gamma_1**2 + gamma_2**2)
+    angle = xp.arctan2(gamma_2, gamma_1) / 2 * 180.0 / xp.pi
+
+    The angle value is what this function returns.
+
+    Parameters
+    ----------
+    gamma_1
+        The gamma 1 component of the shear.
+    gamma_2
+        The gamma 2 component of the shear.
+    """
+    magnitude, angle = shear_magnitude_and_angle_from(
+        gamma_1=gamma_1, gamma_2=gamma_2, xp=xp
+    )
+    return angle
+
+
+def multipole_k_m_and_phi_m_from(
+    multipole_comps: Tuple[float, float], m: int, xp=np
+) -> Tuple[float, float]:
+    r"""
+    Returns the multipole normalization value `k_m` and angle `phi` from the multipole component parameters.
+
+    The normalization and angle are given by:
+
+    .. math::
+        \phi^{\rm mass}_m = \frac{1}{m} \arctan{\frac{\epsilon_{\rm 2}^{\rm mp}}{\epsilon_{\rm 1}^{\rm mp}}}, \, \,
+        k^{\rm mass}_m = \sqrt{{\epsilon_{\rm 1}^{\rm mp}}^2 + {\epsilon_{\rm 2}^{\rm mp}}^2} \, .
+
+    The conversion depends on the multipole order `m`, to ensure that all possible rotationally symmetric
+    multiple mass profiles are available in the conversion for multiple components spanning -inf to inf.
+
+    Additional checks are performed which requires the angle `phi_m` is between -45 and 135 degrees. This ensures that
+    for certain multipole component values the angle does not jump from one boundary to another (e.g. without
+    this check certain values of the multipole components return -46.0 degrees and others 134.0 degrees).
+
+    This ensures that when error estimates are computed from samples of a lens model via marginalization, the
+    calculation is not biased by the angle jumping between these two values.
+
+    Parameters
+    ----------
+    multipole_comps
+        The first and second components of the multipole.
+
+    Returns
+    -------
+    The normalization and angle parameters of the multipole.
+    """
+    multipole_comps = (
+        multipole_comps[0],
+        _nudge_off_origin(multipole_comps[0], multipole_comps[1], xp=xp),
+    )
+
+    phi_m = (
+        xp.arctan2(
+            multipole_comps[0],
+            xp.where(
+                xp.logical_and(multipole_comps[0] == 0, multipole_comps[1] == 0),
+                1.0,
+                multipole_comps[1],
+            ),
+        )
+        * 180.0
+        / xp.pi
+        / float(m)
+    )
+
+    k_m = xp.sqrt(multipole_comps[1] ** 2 + multipole_comps[0] ** 2)
+
+    phi_m = xp.where(phi_m < -90.0 / m, phi_m + 360.0 / m, phi_m)
+
+    return k_m, phi_m
+
+
+def multipole_k_m_phi_m_and_shape_angle_from(
+    multipole_comps: Tuple[float, float],
+    m: int,
+    ell_comps: Optional[Tuple[float, float]],
+    ellipse_angle: Optional[float],
+    xp=np,
+) -> Tuple[float, float, float]:
+    r"""
+    Returns the multipole normalization value `k_m`, angle `phi` and shape_angle `s` from the multipole
+    component parameters. The shape angle is the difference between the angle of the underlying elliptical profile and
+    the multipole `phi_m` and is what defines the shape of the perturbation around the ellipse oriented towards the
+    direction of the underlying position angle. You must supply either the ell_comps or position angle of the
+    underlying elliptical profile.
+
+    The normalization and angle are given by:
+
+    .. math::
+        \phi^{\rm mass}_m = \frac{1}{m} \arctan{\frac{\epsilon_{\rm 2}^{\rm mp}}{\epsilon_{\rm 1}^{\rm mp}}}, \, \,
+        k^{\rm mass}_m = \sqrt{{\epsilon_{\rm 1}^{\rm mp}}^2 + {\epsilon_{\rm 2}^{\rm mp}}^2} \, .
+
+    The shape angle is then given as (where \phi_{\rm ell} is the position angle of the underlying elliptical profile):
+    .. math::
+        s^{\rm mass}_m = \phi_{\rm ell} - \phi_m \, .
+
+
+    The conversion depends on the multipole order `m`, to ensure that all possible rotationally symmetric
+    multiple mass profiles are available in the conversion for multiple components spanning -inf to inf.
+
+    Additional checks are performed which requires the angle `phi_m` is between -45 and 135 degrees. This ensures that
+    for certain multipole component values the angle does not jump from one boundary to another (e.g. without
+    this check certain values of the multipole components return -46.0 degrees and others 134.0 degrees). The shape angle
+    is then also checked and required to be in the range +- 360/m.
+
+    This ensures that when error estimates are computed from samples of a lens model via marginalization, the
+    calculation is not biased by the angle jumping between these two values.
+
+    Parameters
+    ----------
+    multipole_comps
+        The first and second components of the multipole.
+    m
+        The multipole order.
+    ell_comps
+        The elliptical components of the underlying elliptical distribution that the multipole is perturbing.
+        Note either ell_comps or galaxy_angle must be passed.
+    ellipse_angle
+        Alternative to supplying the ell_comps of the underlying profile, the position angle of the underlying profile.
+
+    Returns
+    -------
+    The normalization and angle parameters of the multipole.
+    """
+    if ellipse_angle is None:
+        if ell_comps is None:
+            raise AssertionError(
+                "You must pass either the ell_comps or the position angle of the underlying distribution."
+            )
+        else:
+            angle = ellipse_angle
+    else:
+        angle = angle_from(ell_comps, xp=xp)
+
+    k_m, phi_m = multipole_k_m_and_phi_m_from(multipole_comps, m, xp=xp)
+
+    shape_angle = angle - phi_m
+
+    while angle < -180 / m:
+        angle += 360 / m
+    while angle > 180 / m:
+        angle -= 360 / m
+
+    return k_m, phi_m, shape_angle
+
+
+def multipole_comps_from(
+    k_m: float,
+    phi_m: Optional[float],
+    m: int,
+    shape_angle: Optional[float] = None,
+    ellipse_angle: Optional[float] = None,
+    xp=np,
+) -> Tuple[float, float]:
+    r"""
+    Returns the multipole component parameters from their normalization value `k_m` and angle `phi`.
+
+    .. math::
+        \phi^{\rm mass}_m = \frac{1}{m} \arctan{\frac{\epsilon_{\rm 2}^{\rm mp}}{\epsilon_{\rm 1}^{\rm mp}}}, \, \,
+        k^{\rm mass}_m = \sqrt{{\epsilon_{\rm 1}^{\rm mp}}^2 + {\epsilon_{\rm 2}^{\rm mp}}^2} \, .
+
+    The conversion depends on the multipole order `m`, to ensure that all possible rotationally symmetric
+    multiple mass profiles are available in the conversion for multiple components spanning -inf to inf.
+
+    Parameters
+    ----------
+    k_m
+        The magnitude of the multipole.
+    phi_m
+        The angle of the multipole. You can supply either phi_m or shape_angle and ellipse_angle.
+    shape_angle
+        The shape angle of the multipole, defined as the difference between the underlying position angle and the
+        multipole phi_m.
+    ellipse_angle
+        The position_angle of the underlying elliptical profile. Must be supplied alongside shape_angle as an
+        alternative to phi_m.
+
+    Returns
+    -------
+    The multipole component parameters.
+    """
+    # Degrees -> radians conversion
+    deg_to_rad = xp.asarray(np.pi / 180.0)
+
+    if phi_m is not None:
+        angle = phi_m * float(m) * deg_to_rad
+    elif (shape_angle is None) or (ellipse_angle is None):
+        raise AssertionError(
+            "You must provide EITHER phi_m OR shape_angle and ellipse_angle."
+        )
+    else:
+        multipole_angle = ellipse_angle - shape_angle
+        angle = multipole_angle * float(m) * deg_to_rad
+
+    multipole_comp_0 = k_m * xp.sin(angle)
+    multipole_comp_1 = k_m * xp.cos(angle)
+
+    return multipole_comp_0, multipole_comp_1
+
+
+# Latent-parameter conversions.
+#
+# PyAutoFit lets a model component declare, as a ``latent_parameters`` class
+# attribute, how the parameters it is *sampled* in convert to the ones it is
+# *read* in (``autofit.mapper.prior_model.latent_parameters``). The entries below are
+# those declarations' functions: each receives every parameter of the component
+# by name (the free ones as arrays over the posterior samples, the fixed ones as
+# floats) and returns the latent parameters by name. They are what the
+# ``corner_anesthetic_latent`` plots show. An angle is returned as ``Periodic``
+# with its period, so PyAutoFit recentres the samples on their circular mean and
+# a posterior peaked at the conversion's branch cut is not drawn as two peaks.
+
+
+def latent_shear_from(gamma_1, gamma_2, **kwargs) -> dict:
+    """A shear's magnitude and angle (degrees) from its ``gamma_1`` / ``gamma_2``."""
+    magnitude, angle = shear_magnitude_and_angle_from(gamma_1=gamma_1, gamma_2=gamma_2)
+    return {"magnitude": magnitude, "angle": Periodic(angle, period=180.0)}
+
+
+def latent_ellipse_from(ell_comps_0, ell_comps_1, **kwargs) -> dict:
+    """An ellipse's axis ratio and position angle (degrees) from its elliptical components."""
+    axis_ratio, angle = axis_ratio_and_angle_from(ell_comps=(ell_comps_0, ell_comps_1))
+    return {"axis_ratio": axis_ratio, "angle": Periodic(angle, period=180.0)}
+
+
+def latent_multipole_from(multipole_comps_0, multipole_comps_1, m, **kwargs) -> dict:
+    """A multipole's strength ``k_m`` and sky angle ``phi_m`` (degrees) from its components."""
+    k_m, phi_m = multipole_k_m_and_phi_m_from(
+        multipole_comps=(multipole_comps_0, multipole_comps_1), m=int(m)
+    )
+    return {"k_m": k_m, "phi_m": Periodic(phi_m, period=360.0 / int(m))}
+
+
+def latent_scaled_multipole_from(
+    scaled_multipole_comps_0, scaled_multipole_comps_1, m, **kwargs
+) -> dict:
+    """A scaled multipole's strength ``k_m`` (per unit major axis) and sky angle ``phi_m``."""
+    k_m, phi_m = multipole_k_m_and_phi_m_from(
+        multipole_comps=(scaled_multipole_comps_0, scaled_multipole_comps_1), m=int(m)
+    )
+    return {"k_m": k_m, "phi_m": Periodic(phi_m, period=360.0 / int(m))}
+
+
+def latent_shape_multipole_from(
+    shape_multipole_comps_0, shape_multipole_comps_1, m, **kwargs
+) -> dict:
+    """
+    A shape-frame multipole's strength ``k_m`` and shape angle ``s_m`` (degrees, the
+    angle between the multipole and the ellipse it perturbs) from its components,
+    which are ``(k_m sin(m s_m), k_m cos(m s_m))``.
+    """
+    k_m, shape_angle = multipole_k_m_and_phi_m_from(
+        multipole_comps=(shape_multipole_comps_0, shape_multipole_comps_1), m=int(m)
+    )
+    return {"k_m": k_m, "shape_angle": Periodic(shape_angle, period=360.0 / int(m))}
+
+
+def latent_light_multipoles_from(
+    multipole_3_comps_0,
+    multipole_3_comps_1,
+    multipole_4_comps_0,
+    multipole_4_comps_1,
+    **kwargs,
+) -> dict:
+    """The m=3 and m=4 strengths and angles (degrees) of a light profile's Fourier multipoles."""
+    k_3, phi_3 = multipole_k_m_and_phi_m_from(
+        multipole_comps=(multipole_3_comps_0, multipole_3_comps_1), m=3
+    )
+    k_4, phi_4 = multipole_k_m_and_phi_m_from(
+        multipole_comps=(multipole_4_comps_0, multipole_4_comps_1), m=4
+    )
+    return {
+        "k_3": k_3,
+        "phi_3": Periodic(phi_3, period=120.0),
+        "k_4": k_4,
+        "phi_4": Periodic(phi_4, period=90.0),
+    }

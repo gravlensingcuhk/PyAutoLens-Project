@@ -1,0 +1,624 @@
+from __future__ import annotations
+
+import logging
+import os
+import pickle
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING
+
+import numpy as np
+
+from autofit.non_linear.checkpoint import NativeFileCheckpointer
+from autofit.non_linear.objective import SCALAR
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import WEIGHTED
+from autofit.non_linear.samples.nest import SamplesNest
+from .samples import NSSamples
+from autofit.non_linear.samples.adapter import RawSamples
+from autofit.non_linear.search import capabilities as cap
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+
+try:
+    import blackjax as _blackjax
+    from blackjax.ns.utils import (
+        log_weights as _nss_log_weights,
+        finalise as _nss_finalise,
+    )
+
+    _HAS_NSS = tuple(
+        int(x) for x in _blackjax.__version__.split(".")[:2]
+    ) >= (1, 6)
+except ImportError:
+    _blackjax = None
+    _nss_log_weights = None
+    _nss_finalise = None
+    _HAS_NSS = False
+
+
+logger = logging.getLogger(__name__)
+
+#: The figure of merit ``af.NSS`` substitutes for a log likelihood it refuses to sample from
+#: (its declared ``invalid_value``). Not ``-inf``: blackjax's nested sampler arithmetic (log
+#: weights, shell evidence) has to stay finite, so an unreachably low finite value is used
+#: instead. ``Fitness.call`` returns it for a non-finite log likelihood, for one over the
+#: configured magnitude ceiling and, through the traced ``xp.where`` penalty, for a model
+#: that violates an assertion.
+NSS_INVALID_LOG_LIKELIHOOD = -1e30
+
+
+_CHECKPOINT_FILENAME = "nss_checkpoint.pkl"
+
+
+def _save_checkpoint(path, state, dead, run_key, iteration):
+    """Atomically pickle the resumable state of an in-flight NSS run.
+
+    The blackjax ``state`` and each entry in ``dead`` are pytrees of JAX arrays.
+    JAX arrays do pickle directly, but to keep the on-disk format independent
+    of the JAX install (so a checkpoint written on one cluster can be loaded
+    on another) we round-trip through NumPy before writing. ``_load_checkpoint``
+    reverses the conversion.
+
+    A tmp-and-rename pattern guards against partial writes — a SLURM timeout
+    halfway through a pickle dump leaves the previous-good checkpoint intact.
+    """
+    import jax
+
+    to_numpy = lambda x: jax.tree_util.tree_map(np.asarray, x)
+    blob = {
+        "state": to_numpy(state),
+        "dead": [to_numpy(d) for d in dead],
+        "run_key": np.asarray(run_key),
+        "iteration": int(iteration),
+    }
+    tmp_path = Path(str(path) + ".tmp")
+    with open(tmp_path, "wb") as f:
+        pickle.dump(blob, f)
+    os.replace(tmp_path, path)
+
+
+def _load_checkpoint(path):
+    """Reverse of ``_save_checkpoint`` — restore a saved blob to JAX pytrees."""
+    import jax
+    import jax.numpy as jnp
+
+    with open(path, "rb") as f:
+        blob = pickle.load(f)
+    to_jax = lambda x: jax.tree_util.tree_map(jnp.asarray, x)
+    return (
+        to_jax(blob["state"]),
+        [to_jax(d) for d in blob["dead"]],
+        jnp.asarray(blob["run_key"]),
+        int(blob["iteration"]),
+    )
+
+
+class _NSSInternal:
+    """Container holding the post-run state of the blackjax NSS loop.
+
+    The ``NonLinearSearch`` pipeline stores this object as ``search_internal``
+    (via ``paths.save_search_internal``) and passes it back into
+    ``samples_via_internal_from`` to extract the posterior. Keeping it as a
+    plain dataclass-style holder rather than the bare ``nss`` return tuple
+    means we can unpickle it later without depending on JAX (the
+    ``final_state.particles.position`` array is stored as a NumPy view).
+    """
+
+    def __init__(
+        self,
+        positions: np.ndarray,
+        loglikelihoods: np.ndarray,
+        log_weights: np.ndarray,
+        logZs: np.ndarray,
+        wall_time: float,
+        sampling_time: float,
+        evals: int,
+        ess: int,
+        n_live: int,
+        num_mcmc_steps: int,
+        num_delete: int,
+        termination: float,
+        seed: int,
+    ):
+        self.positions = positions
+        self.loglikelihoods = loglikelihoods
+        self.log_weights = log_weights
+        self.logZs = logZs
+        self.wall_time = wall_time
+        self.sampling_time = sampling_time
+        self.evals = evals
+        self.ess = ess
+        self.n_live = n_live
+        self.num_mcmc_steps = num_mcmc_steps
+        self.num_delete = num_delete
+        self.termination = termination
+        self.seed = seed
+
+
+class NSS(NonLinearSearch):
+    samples_cls = NSSamples
+
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.REQUIRED
+    gradient = cap.Gradient.NONE
+    batched = True
+    honours_gradient_mode = False
+    posterior_kind = cap.PosteriorKind.WEIGHTED
+    produces_evidence = True
+    resumable = True
+    warm_start = cap.WarmStart.PROVIDER
+    install_extra = "optional"
+    upstream_url = "https://github.com/blackjax-devs/blackjax"
+    citation_keys = ("blackjax",)
+    status = cap.Status.EXPERIMENTAL
+    test_mode_budget = {"termination": -1.0}
+    # Physical: the unit-cube initial draws are transformed before ``algo.init``, and
+    # the sampler then proposes physical vectors (``instance_from_vector``) against a
+    # physical-space prior density.
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.LOG_LIKELIHOOD, cap.CoordinateSpace.PHYSICAL)
+    invalid_value = NSS_INVALID_LOG_LIKELIHOOD
+    # The resume state is NSS's own atomic ``nss_checkpoint.pkl`` (``run`` writes,
+    # reads and deletes it); the archive is the default ``search_internal.dill``.
+    resume_state = NativeFileCheckpointer(_CHECKPOINT_FILENAME, loader=_load_checkpoint)
+
+    __identifier_fields__ = (
+        "n_live",
+        "num_mcmc_steps",
+        "num_delete",
+        "termination",
+        "seed",
+    )
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        n_live: int = 200,
+        num_mcmc_steps: int = 5,
+        num_delete: int = 50,
+        chunk_size: Optional[int] = None,
+        termination: float = -3.0,
+        checkpoint_interval: int = 100,
+        iterations_per_quick_update: Optional[int] = None,
+        iterations_per_full_update: Optional[int] = None,
+        number_of_cores: int = 1,
+        seed: int = 42,
+        silence: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        **kwargs,
+    ):
+        """
+        A Nested Slice Sampling non-linear search (JAX-native, ``blackjax.nss``).
+
+        ``af.NSS`` wraps mainline blackjax's nested slice sampler
+        (``blackjax.nss``, merged upstream in blackjax 1.6) into a first-class
+        ``NonLinearSearch`` so users can drop ``search = af.NSS(...)`` into any
+        production autolens / autogalaxy / autofit script alongside
+        ``af.Nautilus(...)``. The likelihood and prior closures both run inside
+        ``jax.jit``, leveraging the Phase 0 JAX-native priors (PyAutoFit#1262)
+        to make ``model.vector_from_unit_vector`` and
+        ``model.log_prior_list_from_vector`` traceable.
+
+        Phases 1-3 of the ``nss_first_class_sampler`` roadmap are live:
+
+        - Phase 1: the wrapper itself (this class).
+        - Phase 2: checkpoint/resume via ``checkpoint_interval`` — a
+          ``nss_checkpoint.pkl`` is written to ``paths.search_internal_path``
+          every N outer iterations and reloaded automatically on resume.
+        - Phase 3: on-the-fly visualization via ``iterations_per_quick_update``
+          — every N outer iterations the current best live particle is fed to
+          ``analysis.visualize`` so partial results appear in the image_path
+          directory during long fits.
+
+        Nested sampling merged into mainline blackjax in release 1.6, so the
+        only requirement is ``pip install 'blackjax>=1.6.2'`` (covered by the
+        ``autofit[optional]`` extra) — the pinned-git-fork install that forced
+        this search's removal in PyAutoFit#1356 is gone.
+
+        Parameters
+        ----------
+        name
+            The name of the search, controlling the last folder results are output.
+        path_prefix
+            The path of folders prefixing the name folder where results are output.
+        unique_tag
+            A unique tag for this model-fit, given a unique entry in the
+            sqlite database and used as the folder after the path prefix and
+            before the search name.
+        n_live
+            Number of live particles maintained by NSS. Production-tested
+            default of 200 corresponds to FINDINGS_v3's ``c3_big_delete``
+            config on the HST MGE problem (recovered ``einstein_radius=1.5996``
+            in 7 min wall time).
+        num_mcmc_steps
+            Number of slice-MCMC inner steps per dead-point batch.
+        num_delete
+            Number of particles killed per outer iteration. Larger
+            ``num_delete`` reduces JIT overhead per iteration at the cost of
+            slightly worse posterior coverage.
+        chunk_size
+            Optional GPU-memory knob. When set and ``< num_delete``, the
+            inner MCMC step vmap (which fans out ``num_delete`` particles
+            in parallel inside ``blackjax.ns.from_mcmc.update_with_mcmc_take_last``)
+            is replaced with ``jax.lax.map(..., batch_size=chunk_size)``.
+            Peak GPU memory becomes ``chunk_size × per_particle_state``
+            instead of ``num_delete × per_particle_state`` — required to
+            run NSS on inversion-heavy likelihoods (PyAutoLens pixelization
+            / Delaunay) at A100 80 GB scale. Default ``None`` preserves the
+            upstream un-chunked behaviour (and is the right choice on CPU
+            or whenever ``num_delete`` already fits the device).
+        termination
+            Convergence criterion. The fit stops when
+            ``logZ_live - logZ < termination``. Default ``-3.0`` corresponds
+            to delta-logZ < 1e-3.
+        checkpoint_interval
+            Outer iterations between checkpoint writes. Default ``100`` writes
+            a ``nss_checkpoint.pkl`` (atomic via tmp-and-rename) every ~5000-
+            10000 likelihood evaluations at typical ``num_delete=50``. Set to
+            a large value to effectively disable checkpointing on short runs.
+        iterations_per_quick_update
+            Outer iterations between on-the-fly visualizations. When non-None
+            the current best live particle is fed to ``analysis.visualize``
+            every N iterations so partial results appear in the image_path
+            directory during long fits. ``analysis.visualize`` is wrapped in
+            try/except so a viz failure logs a warning but does not kill the
+            sampler.
+        iterations_per_full_update
+            Accepted for API parity. NSS does not have a full-update concept
+            separate from the outer-iteration cadence.
+        number_of_cores
+            Accepted for API parity only. NSS runs on whatever device JAX is
+            configured for (CPU, GPU, TPU) — multiprocessing parallelism is
+            not used. If ``number_of_cores > 1`` a warning is logged.
+        seed
+            JAX random seed used to initialise the unit-cube draws for the
+            ``n_live`` initial particles and the inner slice-sampling RNG. It is the
+            search-level seed (``autofit.non_linear.search.seed``) and stays a static
+            identifier field, so seeded NSS output folders are unchanged.
+        silence
+            If True, suppresses NSS's progress bar output.
+        session
+            An SQLAlchemy session instance so the results of the model-fit
+            are written to an SQLite database.
+
+        Notes
+        -----
+        Sampling space: NSS samples in **physical** parameter space (initial
+        particles are drawn via ``model.vector_from_unit_vector`` per unit-cube
+        sample, then the slice walks proceed in physical coordinates). The
+        Nautilus / PocoMC convention is to sample in unit-cube space and
+        apply the prior transform inside the likelihood — that is **not** what
+        ``af.NSS`` does. The slice walks have the natural metric of the
+        problem and there is no per-step remapping cost.
+        """
+
+        if not _HAS_NSS:
+            raise ImportError(
+                "af.NSS requires blackjax >= 1.6 (nested sampling merged "
+                "into mainline blackjax in release 1.6). Install via:\n"
+                "    pip install 'blackjax>=1.6.2'"
+            )
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=WEIGHTED.nested_initializer_for(kwargs.pop("initializer", None)),
+            iterations_per_full_update=iterations_per_full_update,
+            iterations_per_quick_update=iterations_per_quick_update,
+            number_of_cores=number_of_cores,
+            silence=silence,
+            session=session,
+            seed=seed,
+            **kwargs,
+        )
+
+        self.n_live = n_live
+        self.num_mcmc_steps = num_mcmc_steps
+        self.num_delete = num_delete
+        self.chunk_size = chunk_size
+        self.termination = termination
+        self.checkpoint_interval = checkpoint_interval
+
+        if number_of_cores is not None and number_of_cores > 1:
+            logger.warning(
+                "af.NSS received number_of_cores=%d. NSS is JAX-native and "
+                "runs on whatever device JAX is configured for; the value is "
+                "ignored. Set number_of_cores=1 to silence this warning.",
+                number_of_cores,
+            )
+
+        self.logger.debug("Creating NSS Search")
+
+    @property
+    def backend_seed(self) -> Optional[int]:
+        """
+        The seed the backend takes directly: ``seed``, made child-specific for a
+        grid-search child (``autofit.non_linear.search.seed.child_seed``).
+        """
+        from autofit.non_linear.search.seed import child_seed
+
+        return child_seed(self, self.seed)
+
+    def fitness_overrides(self, analysis) -> dict:
+        """
+        NSS fires its own quick update between outer iterations (``_fire_quick_update``),
+        so the ``Fitness`` cadence that ``call_wrap`` drives is switched off: blackjax
+        evaluates the raw objective inside its jitted step and never goes through
+        ``call_wrap``, and a second background worker would only duplicate the visuals.
+        """
+        return {
+            "iterations_per_quick_update": None,
+            "background_quick_update": False,
+            "live_visual_update": False,
+        }
+
+    def run(self, ctx):
+        """
+        Run NSS (the ``run(ctx)`` hook; see ``docs/design/run_ctx.md``) and return the
+        ``_NSSInternal`` holder of its final state.
+
+        The log likelihood blackjax samples through is the fit's scalar objective
+        (``Fitness.call`` via ``Fitness.objective``), so NSS shares the one guard path
+        every search uses: a non-finite log likelihood, one over the configured
+        magnitude ceiling, and a model that violates an assertion (the traced
+        ``xp.where`` penalty) all return the declared ``invalid_value``
+        (``NSS_INVALID_LOG_LIKELIHOOD``). It is handed over unjitted: blackjax traces it
+        inside its own jitted step, where a nested jit would only add a call boundary.
+
+        The prior log density and the unit-cube initial draws are built from
+        ``ctx.model`` with ``xp=jax.numpy``. Between outer iterations the loop (a)
+        pickles resumable state to NSS's native ``nss_checkpoint.pkl`` (the search's
+        ``resume_state``) and (b) fires a quick-update visualization of the current best
+        live particle. When ``ctx.resume`` holds that file the loop resumes from the
+        saved ``(state, dead, run_key, iteration)``; on successful exit the file is
+        deleted, so the next fresh fit does not resume from a stale checkpoint.
+
+        The likelihood-function sanity check of a resumed run runs when the fit's
+        ``Fitness`` is built, before this method, rather than after sampling.
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+        """
+        import jax
+        import jax.numpy as jnp
+        import time
+
+        model = ctx.model
+
+        self.logger.info("Starting NSS non-linear search.")
+
+        ndim = model.prior_count
+
+        log_likelihood = ctx.fitness.objective(SCALAR, compile=False)
+
+        def prior_logprob(params):
+            log_priors = model.log_prior_list_from_vector(vector=params, xp=jnp)
+            return sum(log_priors)
+
+        rng_key = jax.random.PRNGKey(self.backend_seed)
+        rng_key, init_key, run_key = jax.random.split(rng_key, 3)
+
+        unit_cube = jax.random.uniform(init_key, shape=(self.n_live, ndim))
+        initial_samples = jnp.stack(
+            [
+                model.vector_from_unit_vector(unit_cube[i], xp=jnp)
+                for i in range(self.n_live)
+            ]
+        )
+
+        # When ``chunk_size`` is set and below the wider of ``n_live`` /
+        # ``num_delete``, build the algorithm via the PyAutoFit-local
+        # ``build_chunked_nss_algorithm``. That replicates mainline
+        # ``blackjax.ns.nss.as_top_level_api`` with both vmap sites chunked:
+        # the inner MCMC step (PyAutoFit#1303's
+        # ``make_chunked_update_strategy``) **and** the n_live-wide
+        # ``algo.init`` (PyAutoFit#1304 — the OOM-causing site for
+        # inversion-heavy lensing cells). ``chunk_size=None`` or
+        # ``chunk_size >= max(n_live, num_delete)`` keeps using upstream
+        # ``blackjax.nss(...)`` bit-for-bit.
+        if self.chunk_size is not None and self.chunk_size < max(
+            self.n_live, self.num_delete
+        ):
+            from ._chunked_nss import (
+                build_chunked_nss_algorithm,
+            )
+
+            algo = build_chunked_nss_algorithm(
+                logprior_fn=prior_logprob,
+                loglikelihood_fn=log_likelihood,
+                num_inner_steps=self.num_mcmc_steps,
+                num_delete=self.num_delete,
+                chunk_size=self.chunk_size,
+            )
+        else:
+            algo = _blackjax.nss(
+                logprior_fn=prior_logprob,
+                loglikelihood_fn=log_likelihood,
+                num_delete=self.num_delete,
+                num_inner_steps=self.num_mcmc_steps,
+            )
+
+        @jax.jit
+        def one_step(carry, _):
+            state, k = carry
+            k, subk = jax.random.split(k, 2)
+            state, dead_point = algo.step(subk, state)
+            return (state, k), dead_point
+
+        checkpoint_path = self.resume_state.path(ctx.paths)
+
+        if ctx.resume is not None:
+            state, dead, run_key, iteration = ctx.resume.load(ctx.paths)
+            self.logger.info(
+                "Resuming NSS from checkpoint at iteration %d (state file %s).",
+                iteration,
+                checkpoint_path,
+            )
+        else:
+            state = algo.init(initial_samples)
+            dead = []
+            iteration = 0
+            self.logger.info(
+                "NSS configuration: n_live=%d, num_mcmc_steps=%d, num_delete=%d, "
+                "chunk_size=%s, termination=%s, ndim=%d, checkpoint_interval=%d. "
+                "JIT compile on first iteration may take 25-30 s.",
+                self.n_live,
+                self.num_mcmc_steps,
+                self.num_delete,
+                self.chunk_size,
+                self.termination,
+                ndim,
+                self.checkpoint_interval,
+            )
+
+        t_start = time.time()
+        while not state.integrator.logZ_live - state.integrator.logZ < self.termination:
+            (state, run_key), dead_info = one_step((state, run_key), None)
+            dead.append(dead_info)
+            iteration += 1
+
+            if (
+                checkpoint_path is not None
+                and iteration % self.checkpoint_interval == 0
+            ):
+                _save_checkpoint(checkpoint_path, state, dead, run_key, iteration)
+
+            if (
+                self.iterations_per_quick_update is not None
+                and iteration % self.iterations_per_quick_update == 0
+            ):
+                self._fire_quick_update(
+                    state=state, model=model, analysis=ctx.fitness.analysis
+                )
+
+        wall_time = time.time() - t_start
+
+        final_state = _nss_finalise(state, dead)
+
+        rng_key, weight_key = jax.random.split(rng_key, 2)
+        log_w_mc = _nss_log_weights(weight_key, final_state, shape=100)
+        log_w_per_particle = log_w_mc.mean(axis=-1)
+        logZs = jax.scipy.special.logsumexp(
+            jnp.nan_to_num(log_w_mc, nan=jnp.nan_to_num(log_w_mc).min()),
+            axis=0,
+        )
+
+        def _safe_ess(log_w_mean):
+            log_w_mean = log_w_mean - log_w_mean.max()
+            weights = jnp.exp(log_w_mean)
+            return float(weights.sum() ** 2 / (weights**2).sum())
+
+        ess = int(_safe_ess(log_w_mc.mean(axis=-1)))
+        # blackjax >= 1.6 SliceInfo: stepping-out expansions + shrinkage
+        # contractions are the two likelihood-evaluation counters (the fork's
+        # ``num_steps`` field is ``num_expansions`` in mainline).
+        evals = int(
+            final_state.update_info.num_expansions.sum()
+            + final_state.update_info.num_shrink.sum()
+        )
+
+        search_internal = _NSSInternal(
+            positions=np.asarray(final_state.particles.position),
+            loglikelihoods=np.asarray(final_state.particles.loglikelihood),
+            log_weights=np.asarray(log_w_per_particle),
+            logZs=np.asarray(logZs),
+            wall_time=float(wall_time),
+            sampling_time=float(wall_time),
+            evals=evals,
+            ess=ess,
+            n_live=int(self.n_live),
+            num_mcmc_steps=int(self.num_mcmc_steps),
+            num_delete=int(self.num_delete),
+            termination=float(self.termination),
+            seed=int(self.seed),
+        )
+
+        # The checkpoint is kept until the result exists: `start_resume_fit` discards
+        # this resume state only after the archive is finalized and before it writes
+        # `.completed` (`NonLinearSearch._complete_fit`), so a failure while the result
+        # is processed leaves the run resumable.
+        return search_internal
+
+    @property
+    def _nss_checkpoint_path(self) -> Optional[Path]:
+        """Resolve the checkpoint location (the search's ``resume_state`` file), or None
+        when the paths store no internal state (``NullPaths``)."""
+        return self.resume_state.path(self.paths)
+
+    def _fire_quick_update(self, state, model, analysis):
+        """Push the current best live particle through ``analysis.visualize``.
+
+        The Nautilus / Dynesty quick-update path goes through
+        ``Fitness.manage_quick_update``; ``af.NSS`` hands blackjax the raw
+        objective (no ``call_wrap`` bookkeeping) so we invoke
+        ``analysis.visualize`` directly between outer-loop iterations. Wrapped in try/except — a visualization failure
+        logs a warning but does not kill a long sampler run.
+        """
+        try:
+            best_idx = int(np.asarray(state.particles.loglikelihood).argmax())
+            best_params = np.asarray(state.particles.position[best_idx]).tolist()
+            instance = model.instance_from_vector(vector=best_params)
+            analysis.visualize(
+                paths=self.paths,
+                instance=instance,
+                during_analysis=True,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "af.NSS quick-update visualization failed: %s. Continuing the "
+                "fit — quick-update is best-effort, the final visualization "
+                "fires at the end of the run regardless.",
+                exc,
+            )
+
+    @property
+    def checkpoint_file(self):
+        """Path to the on-disk checkpoint written between outer-loop iterations.
+
+        Returns the same value as ``_nss_checkpoint_path`` — exposed as a
+        public property for symmetry with ``af.Nautilus.checkpoint_file``.
+        """
+        return self._nss_checkpoint_path
+
+    def samples_info_from(self, search_internal: Optional[_NSSInternal] = None):
+        if search_internal is None:
+            search_internal = self.paths.load_search_internal()
+        return {
+            "log_evidence": float(np.asarray(search_internal.logZs).mean()),
+            "log_evidence_error": float(np.asarray(search_internal.logZs).std()),
+            "total_samples": int(search_internal.evals),
+            "total_accepted_samples": int(len(search_internal.positions)),
+            "time": float(search_internal.wall_time),
+            "sampling_time": float(search_internal.sampling_time),
+            "number_live_points": int(search_internal.n_live),
+            "num_mcmc_steps": int(search_internal.num_mcmc_steps),
+            "num_delete": int(search_internal.num_delete),
+            "termination": float(search_internal.termination),
+            "ess": int(search_internal.ess),
+        }
+
+    def raw_samples_from(self, model, search_internal: _NSSInternal):
+        """The stored ``_NSSInternal`` holder as raw samples, with its log weights
+        exponentiated and normalised by the search (as they always were)."""
+
+        log_w = np.asarray(search_internal.log_weights)
+        log_w_norm = log_w - log_w.max()
+        weights = np.exp(log_w_norm)
+        weight_total = weights.sum()
+        if weight_total > 0:
+            weights = weights / weight_total
+
+        return RawSamples(
+            parameters=np.asarray(search_internal.positions),
+            log_likelihood=np.asarray(search_internal.loglikelihoods),
+            weights=weights,
+            info=self.samples_info_from(search_internal=search_internal),
+            label="NSS",
+        )

@@ -1,0 +1,189 @@
+from autonerves import jax_wrapper
+from autonerves.dictable import register_parser
+from autofit import conf
+
+conf.instance.register(__file__)
+
+from autonerves.dictable import from_dict, from_json, output_to_json, to_dict
+from autoarray.dataset import preprocess  # noqa
+
+from autoarray.dataset.imaging.dataset import Imaging  # noqa
+from autoarray.dataset.interferometer.dataset import Interferometer  # noqa
+from autoarray.dataset.dataset_model import DatasetModel
+from autoarray.inversion.mesh import mesh  # noqa
+from autoarray.inversion import regularization as reg  # noqa
+from autoarray.inversion.mesh import image_mesh
+from autoarray.inversion.mappers.abstract import Mapper  # noqa
+from autoarray.settings import Settings  # noqa
+from autoarray.inversion.inversion.factory import inversion_from as Inversion  # noqa
+from autoarray.inversion.mesh.image_mesh.abstract import AbstractImageMesh
+from autoarray.inversion.mesh.mesh.abstract import AbstractMesh
+from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.pixelization import Pixelization  # noqa
+from autoarray.inversion.mesh.border_relocator import BorderRelocator
+from autoarray.mask.mask_1d import Mask1D  # noqa
+from autoarray.mask.mask_2d import Mask2D  # noqa
+from autoarray.mask.derive.zoom_2d import Zoom2D
+from autoarray.operators.transformer import TransformerDFT  # noqa
+from autoarray.operators.transformer import TransformerNUFFT  # noqa
+from autoarray.layout.layout import Layout2D  # noqa
+from autoarray.structures.arrays.uniform_1d import Array1D  # noqa
+from autoarray.structures.arrays.uniform_2d import Array2D  # noqa
+from autoarray.structures.arrays.rgb import Array2DRGB
+from autoarray.structures.arrays.irregular import ArrayIrregular  # noqa
+from autoarray.structures.header import Header  # noqa
+from autoarray.structures.grids.uniform_1d import Grid1D  # noqa
+from autoarray.structures.grids.uniform_2d import Grid2D  # noqa
+from autoarray.structures.grids.irregular_2d import Grid2DIrregular  # noqa
+from autoarray.operators.over_sampling.over_sampler import OverSampler  # noqa
+from autoarray.operators.convolver import Convolver
+from autoarray.inversion.mesh.interpolator.rectangular import (
+    InterpolatorRectangular,
+)  # noqa
+from autoarray.inversion.mesh.interpolator.delaunay import (
+    InterpolatorDelaunay,
+)  # noqa
+from autoarray.inversion.mesh.interpolator.sibson import (
+    InterpolatorDelaunayNN,
+)  # noqa
+from autoarray.structures.vectors.uniform import VectorYX2D  # noqa
+from autoarray.structures.vectors.irregular import VectorYX2DIrregular  # noqa
+from autoarray.layout.region import Region1D  # noqa
+from autoarray.layout.region import Region2D  # noqa
+from autoarray.structures.visibilities import Visibilities  # noqa
+from autoarray.structures.visibilities import VisibilitiesNoiseMap  # noqa
+from autoarray.inversion.mesh.mesh_geometry.rectangular import (
+    rectangular_edge_pixel_list_from,
+)
+
+from .analysis import model_util
+from .analysis.adapt_images.adapt_images import AdaptImages
+from .analysis.adapt_images.adapt_images import galaxy_name_image_dict_via_result_from
+from . import aggregator as agg
+from . import exc
+from . import util
+from .ellipse.dataset_interp import DatasetInterp
+from .ellipse.ellipse.ellipse import Ellipse
+from .ellipse.ellipse.ellipse_multipole import EllipseMultipole
+from .ellipse.ellipse.ellipse_multipole import EllipseMultipoleScaled
+from .ellipse.ellipse.ellipse_multipole import EllipseMultipoleShape
+from .ellipse.fit_ellipse import FitEllipse
+from .ellipse.fit_ellipse import FitEllipseSummed
+from .ellipse.model.analysis import AnalysisEllipse
+from .operate.image import OperateImage
+from .operate.image import OperateImageList
+from .operate.image import OperateImageGalaxies
+from .operate.lens_calc import LensCalc
+from .imaging.fit_imaging import FitImaging
+from .imaging.model.analysis import AnalysisImaging
+from autofit import Latent
+from .imaging.model.latent import LatentGalaxy
+from .imaging.simulator import SimulatorImaging
+from .interferometer.simulator import SimulatorInterferometer
+from .interferometer.fit_interferometer import FitInterferometer
+from .interferometer.model.analysis import AnalysisInterferometer
+
+from .galaxy.galaxy import Galaxy
+from .galaxy.galaxies import Galaxies
+from .galaxy.mass_field import MassField
+from .galaxy.galaxy_table import GalaxyTable
+from .galaxy.galaxy_table import galaxy_table_from_csv
+from .galaxy.galaxy_table import galaxy_table_to_csv
+from .galaxy.galaxy_model_csv import GalaxyModelRow
+from .galaxy.galaxy_model_csv import GalaxyModelTable
+from .galaxy.galaxy_model_csv import galaxy_models_from_csv
+from .galaxy.galaxy_model_csv import galaxy_models_to_csv
+from .galaxy.galaxy_model_csv import galaxies_from_csv_tables
+from .galaxy.galaxy_model_csv import galaxy_af_models_from_csv_tables
+from .galaxy.redshift import Redshift
+from .galaxy.to_inversion import AbstractToInversion
+from .galaxy.to_inversion import GalaxiesToInversion
+from .profiles.geometry_profiles import EllProfile
+from .profiles import (
+    point_sources as ps,
+    mass as mp,
+    light_and_mass_profiles as lmp,
+    light_linear_and_mass_profiles as lmp_linear,
+    scaling_relations as sr,
+)
+from .profiles.light.abstract import LightProfile
+from .profiles.light import standard as lp
+from .profiles import basis as lp_basis
+from .profiles.light.linear import LightProfileLinearObjFuncList
+from .profiles.light import linear as lp_linear
+from .profiles.light import operated as lp_operated
+from .profiles.light import (
+    linear_operated as lp_linear_operated,
+)
+from .profiles.light import snr as lp_snr
+from . import convert
+from . import mock as m  # noqa
+from .util.shear_field import ShearYX2D
+from .util.shear_field import ShearYX2DIrregular
+from . import cosmology as cosmo
+from .gui.clicker import Clicker
+from .gui.scribbler import Scribbler
+from .gui.display_util import mask_2d_regridded_from
+
+from autonerves import conf
+from autonerves.fitsable import ndarray_via_hdu_from
+from autonerves.fitsable import ndarray_via_fits_from
+from autonerves.fitsable import header_obj_from
+from autonerves.fitsable import output_to_fits
+from autonerves.fitsable import hdu_list_for_output_from
+
+# Last manual sync of the source stamp. Release wheels are stamped at build
+# time and the git tag is the release truth — deliberately never bumped per
+# release (PyAutoBuild#118/#120).
+__version__ = "2026.8.17.1"
+
+from autonerves import check_version
+
+check_version(__version__)
+
+
+def __getattr__(name):
+    if name == "plot":
+        from . import plot
+
+        globals()["plot"] = plot
+        return plot
+    if name == "interop":
+        import importlib
+
+        interop = importlib.import_module(f"{__name__}.interop")
+        globals()["interop"] = interop
+        return interop
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Public re-export of the autonerves configuration / serialization surface.
+#
+# Workspaces, tutorials and downstream code import these names from the science
+# library (e.g. ``from autolens import conf``) rather than depending on the
+# ``autonerves`` package directly, so the underlying configuration / serialization
+# layer stays an implementation detail of the library.
+# ---------------------------------------------------------------------------
+from autonerves import conf
+from autonerves import jax_wrapper
+from autonerves import fitsable
+from autonerves import setup_colab
+from autonerves import setup_notebook
+from autonerves.conf import with_config
+from autonerves.dictable import from_dict, from_json, to_dict, output_to_json
+from autonerves.fitsable import (
+    output_to_fits,
+    hdu_list_for_output_from,
+    ndarray_via_fits_from,
+    ndarray_via_hdu_from,
+    header_obj_from,
+)
+from autonerves.test_mode import (
+    with_test_mode_segment,
+    skip_visualization,
+    skip_fit_output,
+    skip_checks,
+    is_test_mode,
+    test_mode_level,
+)

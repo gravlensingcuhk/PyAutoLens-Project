@@ -1,0 +1,1761 @@
+import copy
+import hashlib
+import warnings
+
+import numpy as np
+from typing import Dict, List, Optional, Type, Union
+
+from autonerves import cached_property, is_test_mode
+
+from autoarray import exc
+from autoarray.dataset.imaging.dataset import Imaging
+from autoarray.dataset.interferometer.dataset import Interferometer
+from autoarray.inversion.inversion.dataset_interface import DatasetInterface
+from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
+from autoarray.inversion.linear_obj.linear_obj import LinearObj
+from autoarray.inversion.mappers.abstract import Mapper
+from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.settings import Settings
+from autoarray.structures.arrays.uniform_2d import Array2D
+from autoarray.structures.grids.irregular_2d import Grid2DIrregular
+from autoarray.structures.visibilities import Visibilities
+
+from autoarray.util import misc_util
+from autoarray.inversion.inversion import inversion_util
+
+
+class AbstractInversion:
+    def __init__(
+        self,
+        dataset: Union[Imaging, Interferometer, DatasetInterface],
+        linear_obj_list: List[LinearObj],
+        settings: Settings = None,
+        xp=np,
+        preloads=None,
+    ):
+        """
+        An `Inversion` reconstructs an input dataset using a list of linear objects (e.g. a list of analytic functions
+        or a pixelized grid).
+
+        The inversion constructs simultaneous linear equations (via vectors and matrices) which allow for the values
+        of the linear object parameters that best reconstruct the dataset to be solved, via linear matrix algebra.
+
+        The inversion may be regularized, whereby the parameters of the linear objects used to reconstruct the data
+        are smoothed with one another such that their solved for values conform to certain properties (e.g. smoothness
+        based regularization requires that parameters in the linear objects which neighbor one another have similar
+        values).
+
+        This object contains properties which compute all of the different matrices necessary to perform the inversion.
+
+        The linear algebra required to perform an `Inversion` depends on the type of dataset being fitted (e.g.
+        `Imaging`, `Interferometer) and the formalism chosen (e.g. a using a `mapping_matrix` or the
+        sparse linear algebra formalism). The children of this class overwrite certain methods in order to be appropriate for
+        certain datasets or use a specific formalism.
+
+        Inversions use the formalism's outlined in the following Astronomy papers:
+
+        https://arxiv.org/pdf/astro-ph/0302587.pdf
+        https://arxiv.org/abs/1708.07377
+        https://arxiv.org/abs/astro-ph/0601493
+
+        Parameters
+        ----------
+        dataset
+            The dataset being reconstructed (e.g. an `Imaging` or `Interferometer` dataset, or a `DatasetInterface`
+            whose attributes like `data` and `noise_map` may have been modified before being passed in).
+        linear_obj_list
+            The list of linear objects (e.g. analytic functions, a mapper with a pixelized grid) which reconstruct the
+            input dataset's data and whose values are solved for via the inversion.
+        settings
+            Settings controlling how an inversion is fitted, for example which linear algebra formalism is used.
+        xp
+            The array module to use (`numpy` by default; pass `jax.numpy` for JAX support).
+        preloads
+            An optional `AbstractPreloads` (e.g. a `PreloadsInterferometer`) carrying pre-computed
+            inversion quantities (e.g. the `curvature_matrix` `F`). When a quantity is invariant
+            across the evaluations reusing this inversion — a fixed pixelization across a search, or
+            the channel-invariant quantities of a datacube `FactorGraphModel` — it is computed once
+            and preloaded here so the inversion reuses it instead of rebuilding the dominant
+            inversion-setup cost. `None` (the default) leaves the standard behaviour unchanged, as
+            does any individual preload field left `None`.
+        """
+
+        self.dataset = dataset
+
+        self.linear_obj_list = linear_obj_list
+
+        self.settings = settings or Settings()
+
+        self.use_jax = xp is not np
+
+        self._preloads = preloads
+
+        # The Cholesky factor of the passive submatrix that the positive-only solve builds, and
+        # the global indices it was built on (`None` when the solve took the full system).
+        # Published by `reconstruction` and read by `log_det_curvature_reg_matrix_term`, which
+        # reads `log det(F + lambda*H)` off it instead of factorising that matrix a second time.
+        # Per-instance and never a module global: one inversion's factor must never be able to
+        # answer another inversion's log determinant.
+        self._nnls_factor = None
+        self._nnls_factor_ids = None
+
+    @property
+    def _xp(self):
+        if self.use_jax:
+            import jax.numpy as jnp
+
+            return jnp
+        return np
+
+    @property
+    def data(self):
+        return self.dataset.data
+
+    @property
+    def noise_map(self):
+        return self.dataset.noise_map
+
+    def has(self, cls: Type) -> bool:
+        """
+        Does this `Inversion` have an attribute which is of type `cls`?
+
+        Parameters
+        ----------
+        cls
+            The type of class whose presence is checked among the linear objects and regularizations in this inversion.
+        """
+        return misc_util.has(
+            values=self.linear_obj_list + self.regularization_list, cls=cls
+        )
+
+    def total(self, cls: Type) -> int:
+        """
+        Returns the total number of attribute in the `Inversion` which are of type `cls`?
+
+        Parameters
+        ----------
+        cls
+            The type of class that is checked if the object has an instance of.
+        """
+        return misc_util.total(
+            values=self.linear_obj_list + self.regularization_list, cls=cls
+        )
+
+    def param_range_list_from(self, cls: Type) -> List[List[int]]:
+        """
+        Each linear object in the `Inversion` has N parameters, and these parameters correspond to a certain range
+        of indexing values in the matrices used to perform the inversion.
+
+        This function returns the `param_range_list` of an input type of linear object, which gives the indexing range
+        of each linear object of the input type.
+
+        For example, if an `Inversion` has:
+
+        - A `LinearFuncList` linear object with 3 `params`.
+        - A `Mapper` with 100 `params`.
+        - A `Mapper` with 200 `params`.
+
+        The corresponding matrices of this inversion (e.g. the `curvature_matrix`) have `shape=(303, 303)` where:
+
+        - The `LinearFuncList` values are in the entries `[0:3]`.
+        - The first `Mapper` values are in the entries `[3:103]`.
+        - The second `Mapper` values are in the entries `[103:303]
+
+        For this example, `param_range_list_from(cls=Mapper)` therefore returns the
+        list `[[3, 103], [103, 303]]`.
+
+        Parameters
+        ----------
+        cls
+            The type of class that the list of their parameter range index values are returned for.
+
+        Returns
+        -------
+        A list of the index range of the parameters of each linear object in the inversion of the input cls type.
+        """
+        return inversion_util.param_range_list_from(
+            cls=cls, linear_obj_list=self.linear_obj_list
+        )
+
+    def cls_list_from(self, cls: Type, cls_filtered: Optional[Type] = None) -> List:
+        """
+        Returns a list of objects in the `Inversion` which are an instance of the input `cls`.
+
+        The optional `cls_filtered` input removes classes of an input instance type.
+
+        For example:
+
+        - If the input is `cls=aa.mesh.Mesh`, a list containing all pixelizations in the class are returned.
+
+        - If `cls=aa.mesh.Mesh` and `cls_filtered=aa.mesh.RectangularRTUAdaptDensity`, a list of all pixelizations
+        excluding those which are `RectangularRTUAdaptDensity` pixelizations will be returned.
+
+        Parameters
+        ----------
+        cls
+            The type of class that a list of instances of this class in the galaxy are returned for.
+        cls_filtered
+            A class type which is filtered and removed from the class list.
+        """
+        return misc_util.cls_list_from(
+            values=self.linear_obj_list + self.regularization_list,
+            cls=cls,
+            cls_filtered=cls_filtered,
+        )
+
+    @property
+    def total_params(self) -> int:
+        """
+        Returns the total number of parameters used by this `Inversion`, where:
+
+        - Each function in a linear function object list is a parameter.
+        - Each pixel of a `Mapper` object is a parameter.
+
+        Returns
+        -------
+        The total number of parameters used by this inversion.
+        """
+        return sum(linear_obj.params for linear_obj in self.linear_obj_list)
+
+    @property
+    def regularization_list(self) -> List[AbstractRegularization]:
+        return [linear_obj.regularization for linear_obj in self.linear_obj_list]
+
+    @property
+    def all_linear_obj_have_regularization(self) -> bool:
+        return len(self.linear_obj_list) == len(
+            list(filter(None, self.regularization_list))
+        )
+
+    @property
+    def total_regularizations(self) -> int:
+        return sum(
+            regularization is not None for regularization in self.regularization_list
+        )
+
+    @property
+    def no_regularization_index_list(self) -> List[int]:
+        # TODO : Needs to be range based on pixels.
+
+        no_regularization_index_list = []
+
+        param_range_list = self.param_range_list_from(cls=LinearObj)
+
+        for linear_obj, regularization, param_range in zip(
+            self.linear_obj_list, self.regularization_list, param_range_list
+        ):
+            if regularization is None:
+                no_regularization_index_list += range(param_range[0], param_range[1])
+
+        return no_regularization_index_list
+
+    @property
+    def mapper_indices(self) -> np.ndarray:
+
+        mapper_indices = []
+
+        param_range_list = self.param_range_list_from(cls=Mapper)
+
+        for param_range in param_range_list:
+
+            mapper_indices += range(param_range[0], param_range[1])
+
+        return np.array(mapper_indices)
+
+    @property
+    def mask(self) -> Array2D:
+        return self.data.mask
+
+    @property
+    def mapping_matrix(self) -> np.ndarray:
+        """
+        The `mapping_matrix` of a linear object describes the mappings between the observed data's data-points / pixels
+        and the linear object parameters. It is used to construct the simultaneous linear equations which reconstruct
+        the data.
+
+        The matrix has shape [total_data_points, data_linear_object_parameters], whereby all non-zero entries
+        indicate that a data point maps to a linear object parameter.
+
+        It is described in the following paper as matrix `f` https://arxiv.org/pdf/astro-ph/0302587.pdf and in more
+        detail in the function  `mapper_util.mapping_matrix_from()`.
+
+        If there are multiple linear objects, the mapping matrices are stacked such that their simultaneous linear
+        equations are solved simultaneously. This property returns the stacked mapping matrix.
+        """
+        return self._xp.hstack(
+            [linear_obj.mapping_matrix for linear_obj in self.linear_obj_list]
+        )
+
+    @property
+    def operated_mapping_matrix_list(self) -> np.ndarray:
+        raise NotImplementedError
+
+    @cached_property
+    def operated_mapping_matrix(self) -> np.ndarray:
+        """
+        The `operated_mapping_matrix` of a linear object describes the mappings between the observed data's values and
+        the linear objects model, including a 2D convolution operation.
+
+        This is used to construct the simultaneous linear equations which reconstruct the data.
+
+        If there are multiple linear objects, the blurred mapping matrices are stacked such that their simultaneous
+        linear equations are solved simultaneously.
+
+        The dataset-specific `operated_mapping_matrix_list` is itself cached, so for a single linear object its
+        matrix is returned directly rather than copied via `hstack`, avoiding holding two identical copies of
+        the (large) operated mapping matrix in memory.
+        """
+        operated_mapping_matrix_list = self.operated_mapping_matrix_list
+
+        if len(operated_mapping_matrix_list) == 1:
+            return operated_mapping_matrix_list[0]
+
+        return self._xp.hstack(operated_mapping_matrix_list)
+
+    @property
+    def data_vector(self) -> np.ndarray:
+        raise NotImplementedError
+
+    @property
+    def curvature_matrix(self) -> np.ndarray:
+        raise NotImplementedError
+
+    @cached_property
+    def regularization_matrix(self) -> Optional[np.ndarray]:
+        """
+        The regularization matrix H is used to impose smoothness on our inversion's reconstruction. This enters the
+        linear algebra system we solve for using D and F above and is given by
+        equation (12) in https://arxiv.org/pdf/astro-ph/0302587.pdf.
+
+        A complete description of regularization is given in the `regularization.py` and `regularization_util.py`
+        modules.
+
+        For multiple mappers, the regularization matrix is computed as the block diagonal of each individual mapper.
+        The scipy function `block_diag` has an overhead associated with it and if there is only one mapper and
+        regularization it is bypassed.
+        """
+        if self._xp.__name__.startswith("jax"):
+            from jax.scipy.linalg import block_diag
+
+            return block_diag(
+                *[
+                    linear_obj.regularization_matrix
+                    for linear_obj in self.linear_obj_list
+                ]
+            )
+        from scipy.linalg import block_diag
+
+        return block_diag(
+            *[linear_obj.regularization_matrix for linear_obj in self.linear_obj_list]
+        )
+
+    @cached_property
+    def regularization_matrix_reduced(self) -> Optional[np.ndarray]:
+        """
+        The regularization matrix H is used to impose smoothness on our inversion's reconstruction. This enters the
+        linear algebra system we solve for using D and F above and is given by
+        equation (12) in https://arxiv.org/pdf/astro-ph/0302587.pdf.
+
+        A complete description of regularization is given in the `regularization.py` and `regularization_util.py`
+        modules.
+
+        For multiple mappers, the regularization matrix is computed as the block diagonal of each individual mapper.
+        The scipy function `block_diag` has an overhead associated with it and if there is only one mapper and
+        regularization it is bypassed.
+        """
+        if self.all_linear_obj_have_regularization:
+            return self.regularization_matrix
+
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
+        ids_to_keep = self.mapper_indices
+
+        # Zero rows and columns in the matrix we want to ignore
+        return self.regularization_matrix[ids_to_keep][:, ids_to_keep]
+
+    @cached_property
+    def curvature_reg_matrix(self) -> np.ndarray:
+        """
+        The linear system of equations solves for F + regularization_coefficient*H, which is computed below.
+
+        The addition is **out-of-place**: `curvature_matrix` is left intact and a new `[params, params]` array is
+        returned. An earlier version of this property added `H` into `F` in place and then deleted the cached
+        `curvature_matrix` to force its recomputation, and this docstring described that; the in-place form was
+        removed in `0766edd4` (2025-06-26), so nothing here invalidates anything (and on the imaging inversions,
+        where the matrix is large, `curvature_matrix` is itself a `cached_property`).
+
+        Cached because the likelihood reaches it more than once per evaluation (`reconstruction` and
+        `curvature_reg_matrix_reduced`, and previously `log_det_curvature_reg_matrix_term` through the latter),
+        and each access re-ran the add -- ~2 ms per access of an (n, n) sum at n = 1500. It was a
+        `cached_property` until the blanket `e819fa12` (2025-11-05) sweep turned it into a plain `property` along
+        with a dozen others. The cost of the cache is one extra (n, n) array (18 MB at n = 1500, on top of `F`
+        and `H`) held for the inversion's lifetime.
+        """
+        if not self.has(cls=AbstractRegularization):
+            return self.curvature_matrix
+
+        return self._xp.add(self.curvature_matrix, self.regularization_matrix)
+
+    @property
+    def curvature_reg_matrix_reduced(self) -> Optional[np.ndarray]:
+        """
+        The regularization matrix H is used to impose smoothness on our inversion's reconstruction. This enters the
+        linear algebra system we solve for using D and F above and is given by
+        equation (12) in https://arxiv.org/pdf/astro-ph/0302587.pdf.
+
+        A complete description of regularization is given in the `regularization.py` and `regularization_util.py`
+        modules.
+
+        For multiple mappers, the regularization matrix is computed as the block diagonal of each individual mapper.
+        The scipy function `block_diag` has an overhead associated with it and if there is only one mapper and
+        regularization it is bypassed.
+        """
+        if self.all_linear_obj_have_regularization:
+            return self.curvature_reg_matrix
+
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
+        ids_to_keep = self.mapper_indices
+
+        # Zero rows and columns in the matrix we want to ignore
+        return self.curvature_reg_matrix[ids_to_keep][:, ids_to_keep]
+
+    @cached_property
+    def zeroed_ids_to_keep(self):
+        """
+        Return the **positive global indices** of linear parameters that should be
+        kept (solved for) in the inversion, accounting for **zeroed pixel indices**
+        from one or more mappers.
+
+        ---------------------------------------------------------------------------
+        Parameter vector layout
+        ---------------------------------------------------------------------------
+        This method assumes the full linear parameter vector is ordered as:
+
+            [ non-pixel linear objects ][ mapper_0 pixels ][ mapper_1 pixels ] ... [ mapper_M pixels ]
+
+        where:
+
+        - *Non-pixel linear objects* include quantities such as analytic light
+          profiles, regularization amplitudes, etc.
+        - Each mapper contributes a contiguous block of pixel-based linear parameters.
+        - The concatenated pixel blocks occupy the **final** entries of the parameter
+          vector, with total length:
+
+              total_pixels = sum(mapper.params for mapper in mappers)
+
+          `mapper.params` is the length of the mapper's source-plane mesh grid — the
+          real size of its block. It is deliberately *not* `mapper.mesh.pixels`: a
+          `Delaunay` mesh's `pixels` is a description the caller supplied and can
+          disagree with the grid (every workspace script passed the appended grid
+          length until 2026-09), and offsetting by it mis-places every mapper's ring
+          but the last one's.
+
+        ---------------------------------------------------------------------------
+        Zeroed pixel convention
+        ---------------------------------------------------------------------------
+        For each mapper:
+
+        - `mapper.zeroed_pixels` is a 1D array of **positive, mesh-local** pixel
+          indices in the range `[0, mapper.params - 1]`, resolved by the mesh against
+          `mapper.params` (`AbstractMesh.zeroed_pixels_from`).
+        - These indices identify pixels that should be **excluded** from the linear
+          solve (e.g. edge pixels, masked regions, or padding pixels).
+        - Indexing is defined purely within the mapper’s own pixelization (e.g.
+          row-major flattening for rectangular meshes, the last `zeroed_pixels`
+          vertices for a Delaunay mesh with an appended edge ring).
+
+        This method converts all mesh-local zeroed pixel indices into **global
+        parameter indices**, correctly offsetting for:
+          - the presence of non-pixel linear objects at the start of the vector
+          - the cumulative pixel counts of preceding mappers
+
+        ---------------------------------------------------------------------------
+        Backend and implementation details
+        ---------------------------------------------------------------------------
+        - The implementation is backend-agnostic and supports both NumPy and JAX via
+          `self._xp`.
+        - The returned indices are **positive global indices**, suitable for advanced
+          indexing of:
+              - `self.data_vector`
+              - `self.curvature_reg_matrix`
+        - When using JAX, this method avoids backend-incompatible operations and
+          preserves JIT compatibility under the same constraints as the rest of the
+          inversion pipeline.
+
+        Returns
+        -------
+        array-like
+            A 1D array of **positive global indices**, sorted in ascending order,
+            corresponding to linear parameters that should be kept in the inversion.
+        """
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+
+        n_total = int(self.total_params)
+
+        # The real size of each mapper's block: the length of its mesh grid, never
+        # `mesh.pixels` (see the docstring).
+        pixels_per_mapper = [int(m.params) for m in mapper_list]
+        total_pixels = int(sum(pixels_per_mapper))
+
+        # Global start index of concatenated pixel block
+        pixel_start = n_total - total_pixels
+
+        zeros_local_list = [m.zeroed_pixels for m in mapper_list]
+
+        # Total number of zeroed pixels across all mappers (Python int => static)
+        total_zeroed = int(sum(len(zeros_local) for zeros_local in zeros_local_list))
+        n_keep = int(n_total - total_zeroed)
+
+        # Build global indices-to-zero across all mappers
+        zeros_global_list = []
+        offset = 0
+        for zeros_local, n_pix in zip(zeros_local_list, pixels_per_mapper):
+            zeros_local = self._xp.asarray(zeros_local, dtype=self._xp.int32)
+            zeros_global_list.append(pixel_start + offset + zeros_local)
+            offset += n_pix
+
+        zeros_global = (
+            self._xp.concatenate(zeros_global_list)
+            if len(zeros_global_list) > 0
+            else self._xp.asarray([], dtype=self._xp.int32)
+        )
+
+        keep = self._xp.ones((n_total,), dtype=bool)
+
+        if self._xp is np:
+            keep[zeros_global] = False
+            keep_ids = self._xp.nonzero(keep)[0]
+
+        else:
+            keep = keep.at[zeros_global].set(False)
+            keep_ids = self._xp.nonzero(keep, size=n_keep)[0]
+
+        return keep_ids
+
+    @property
+    def solve_ids_to_keep(self) -> Optional[np.ndarray]:
+        """
+        The global parameter indices the reconstruction actually solves for, or `None` when it solves the full
+        system.
+
+        This is the single answer to "which parameters did the solve include?", and it exists so that every
+        quantity derived from the solve agrees with the solve about what it did. `reconstruction` subsets the
+        linear system by these indices and scatters its result back with exact zeros elsewhere;
+        `reconstruction_covariance_matrix` forms the covariance on the same submatrix and scatters back `NaN`.
+
+        Before this property the predicate below lived inline in `reconstruction` and nowhere else, so the
+        covariance had no way to know the solve had been subset -- it inverted the full `curvature_reg_matrix`
+        and reported a noise value for pixels that were never solved for. Keep the two readers pointed here
+        rather than re-deriving the condition, or they can drift apart again.
+
+        `None` rather than "every index" is deliberate: the full-system path must stay byte-identical to what it
+        was, and an `arange` would route it through indexing and scatter-back code it never used before.
+
+        Note that `use_edge_zeroed_pixels` is consulted only when `use_positive_only_solver` is `True`, mirroring
+        the nesting in `reconstruction`. That scoping is deliberate -- see the comment there and
+        `Settings.use_edge_zeroed_pixels`.
+
+        Returns
+        -------
+        The global indices kept by the solve, or `None` if the full system was solved.
+        """
+        if not self.settings.use_positive_only_solver:
+            return None
+
+        if not self.settings.use_edge_zeroed_pixels:
+            return None
+
+        if not self.has(cls=Mapper):
+            return None
+
+        return self.zeroed_ids_to_keep
+
+    @property
+    def positive_only_solver_used(self) -> str:
+        """
+        The positive-only solver `reconstruction` passes to `reconstruction_positive_only_from`:
+        ``"certified"`` or ``"pdip"``.
+
+        ``"certified"`` (the certified active-set solve, :mod:`autoarray.util.jax_active_set`) is selected
+        only when all of the following hold, and ``"pdip"`` (today's solver) otherwise:
+
+        - `Settings.positive_only_solver` is ``"certified"`` (opt-in; the packaged default is ``"pdip"``);
+        - the inversion runs on the JAX backend -- the NumPy path always runs fnnls (a NumPy certified
+          scheme measured slower than fnnls with its warm-start memo);
+        - it contains a `Mapper` and **no** `AbstractLinearObjFuncList` (linear light profiles / MGE).
+          Dense MGE coefficient blocks make the active-set scheme converge poorly (a 60-MGE +
+          Delaunay-1500 system failed to certify in 40 passes where PDIP took 22 iterations), so those
+          inversions keep PDIP.
+
+        On the NumPy backend the returned name has no effect (`reconstruction_positive_only_from` ignores
+        it there); it is still ``"pdip"`` so the property reports the solver family that ran on JAX.
+        """
+        if self.settings.positive_only_solver != "certified":
+            return "pdip"
+
+        if not self.use_jax:
+            return "pdip"
+
+        if not self.has(cls=Mapper):
+            return "pdip"
+
+        if self.has(cls=AbstractLinearObjFuncList):
+            return "pdip"
+
+        return "certified"
+
+    @property
+    def positive_only_preconditioning_used(self) -> str:
+        """
+        How `reconstruction` asks `reconstruction_positive_only_from` to scale the JAX PDIP solve:
+        ``"jacobi"`` or ``"raw"`` (PyAutoArray#571).
+
+        - Inversions containing a `Mapper` always use ``"jacobi"`` (today's Jacobi-preconditioned solve).
+        - Inversions with **no** `Mapper` (linear light profiles / MGE only) use
+          `Settings.nnls_preconditioning_no_mapper` (packaged default ``"raw"``): Jacobi scaling turns their
+          signal-free Gaussian columns, whose diagonal is only the no-regularization floor, into degenerate
+          coordinates on which the PDIP dual diverges (14/48 near-truth SLaM `source_lp[1]` points hit the
+          iteration cap with wrong log-likelihoods), while the raw solve converges on all of them.
+        - Whenever the certified solver is used the answer is ``"jacobi"`` (it only runs on mapper-only
+          inversions anyway).
+
+        The NumPy path runs fnnls and ignores the value.
+        """
+        if self.has(cls=Mapper):
+            return "jacobi"
+
+        if self.positive_only_solver_used != "pdip":
+            return "jacobi"
+
+        return self.settings.nnls_preconditioning_no_mapper
+
+    def _nnls_warm_start_fingerprint(self, ids_to_keep=None) -> Optional[str]:
+        """
+        Identify the index space this inversion's positive-only solve works in, so the
+        cross-evaluation passive-set memo (`autoarray.inversion.inversion.nnls_memo`) only
+        reuses a seed across evaluations whose reconstruction entries mean the same thing.
+
+        Deliberately built from shapes, NOT from the curvature matrix or data vector: the
+        memo exists to carry a passive set between *neighbouring* parameter points, whose
+        matrices differ. What must not change is the mapping from index to source pixel --
+        the mesh sizes and the parameter-vector length. Under edge zeroing the passive set
+        lives in the subset index space, so `ids_to_keep` is part of the identity too.
+
+        Returns `None` on the JAX path, which does not run fnnls at all.
+        """
+        if self._xp.__name__.startswith("jax"):
+            return None
+
+        parts = [str(tuple(np.shape(self.data_vector)))]
+
+        for mapper in self.cls_list_from(cls=Mapper):
+            parts.append(str(tuple(np.shape(mapper.source_plane_mesh_grid))))
+
+        if ids_to_keep is not None:
+            parts.append(
+                hashlib.sha256(
+                    np.ascontiguousarray(ids_to_keep, dtype=np.int64).tobytes()
+                ).hexdigest()
+            )
+
+        return "|".join(parts)
+
+    @cached_property
+    def reconstruction(self) -> np.ndarray:
+        """
+        Solve the linear system [F + reg_coeff*H] S = D -> S = [F + reg_coeff*H]^-1 D given by equation (12)
+        of https://arxiv.org/pdf/astro-ph/0302587.pdf (Positive-Negative solution)
+
+        ============================================================================================
+
+        Solve the Eq.(2) of https://arxiv.org/pdf/astro-ph/0302587.pdf (Non-negative solution)
+        Find non-negative solution that minimizes |Z * S - x|^2.
+
+        We use fnnls (https://github.com/jvendrow/fnnls) to optimize the quadratic value. Two commonly used
+        variables in the code are defined as follows:
+            ZTZ := np.dot(Z.T, Z)
+            ZTx := np.dot(Z.T, x)
+        """
+
+        if self.settings.use_positive_only_solver:
+
+            # `use_edge_zeroed_pixels` is deliberately nested here rather than checked alongside
+            # `use_positive_only_solver`: edge-zeroing is scoped to the positive-only solver, and the
+            # positive-negative branch below solves the full system regardless of its value. This is
+            # intended, not an oversight -- do not "fix" it by hoisting the check out of this branch.
+            # `solve_ids_to_keep` encodes that nesting (it returns None unless BOTH settings are on),
+            # so it is safe to consult here and nowhere higher up.
+            ids_to_keep = self.solve_ids_to_keep
+
+            # The solve's Cholesky factor of its passive submatrix, published through this
+            # out-dict and stored on the instance below so that
+            # `log_det_curvature_reg_matrix_term` can read `log det(F + lambda*H)` off it.
+            # `reconstruction_positive_only_from` clears it on entry, so it is empty whenever
+            # no solve completed.
+            factor = {}
+
+            # "certified" only for mapper-only JAX inversions -- see `positive_only_solver_used`.
+            solver = self.positive_only_solver_used
+
+            if ids_to_keep is not None:
+
+                # Use advanced indexing to select rows/columns
+                data_vector = self.data_vector[ids_to_keep]
+                curvature_reg_matrix = self.curvature_reg_matrix[ids_to_keep][
+                    :, ids_to_keep
+                ]
+
+                # Perform reconstruction via fnnls
+                reconstruction_partial = (
+                    inversion_util.reconstruction_positive_only_from(
+                        data_vector=data_vector,
+                        curvature_reg_matrix=curvature_reg_matrix,
+                        settings=self.settings,
+                        xp=self._xp,
+                        fingerprint=self._nnls_warm_start_fingerprint(
+                            ids_to_keep=ids_to_keep
+                        ),
+                        factor=factor,
+                        solver=solver,
+                        preconditioning=self.positive_only_preconditioning_used,
+                    )
+                )
+
+                self._nnls_factor = factor
+                self._nnls_factor_ids = ids_to_keep
+
+                # Allocate full solution array
+                reconstruction = self._xp.zeros(self.data_vector.shape[0])
+
+                # Scatter the partial solution back to the full shape
+                if self._xp.__name__.startswith("jax"):
+                    reconstruction = reconstruction.at[ids_to_keep].set(
+                        reconstruction_partial
+                    )
+                else:
+                    reconstruction[ids_to_keep] = reconstruction_partial
+
+                return reconstruction
+
+            else:
+
+                reconstruction = inversion_util.reconstruction_positive_only_from(
+                    data_vector=self.data_vector,
+                    curvature_reg_matrix=self.curvature_reg_matrix,
+                    settings=self.settings,
+                    xp=self._xp,
+                    fingerprint=self._nnls_warm_start_fingerprint(),
+                    factor=factor,
+                    solver=solver,
+                    preconditioning=self.positive_only_preconditioning_used,
+                )
+
+                self._nnls_factor = factor
+                self._nnls_factor_ids = None
+
+                return reconstruction
+
+        # One Cholesky factor of `F + H`, shared with `log_det_curvature_reg_matrix_term`. `None`
+        # when the gate in `_curvature_reg_matrix_cho_factor` is closed or the factorization failed,
+        # in which case the unchanged LU solve below runs (with its test-mode guard).
+        cho_factor = self._curvature_reg_matrix_cho_factor
+
+        if cho_factor is not None:
+            import scipy.linalg
+
+            return scipy.linalg.cho_solve(
+                cho_factor, np.asarray(self.data_vector), check_finite=False
+            )
+
+        return inversion_util.reconstruction_positive_negative_from(
+            data_vector=self.data_vector,
+            curvature_reg_matrix=self.curvature_reg_matrix,
+            xp=self._xp,
+        )
+
+    @cached_property
+    def _curvature_reg_matrix_cho_factor(self):
+        """
+        One Cholesky factor of ``F + reg_coeff*H`` for the positive-negative solve, shared by
+        :attr:`reconstruction` and :attr:`log_det_curvature_reg_matrix_term`.
+
+        Without it, a NumPy positive-negative likelihood call factorizes the same symmetric
+        positive-definite matrix twice: ``np.linalg.solve`` (an LU) for the reconstruction and
+        ``np.linalg.cholesky`` for the log determinant. On the Aris SPT2319-55 interferometer setup
+        those two were 31% of a call at 1,405 source pixels and 72% at 2,947 (PyAutoArray#633,
+        campaign PyAutoPulse#62). One ``cho_factor`` serves both: ``cho_solve`` gives the
+        reconstruction and ``2 * sum(log(diag(L)))`` the log determinant.
+
+        Returns the ``(c, lower)`` tuple of :func:`scipy.linalg.cho_factor`, or ``None`` -- meaning
+        "take the unchanged routes" -- when any of these holds:
+
+        - the JAX backend (its solve and log determinant are traced and stay as they are);
+        - ``Settings.use_positive_only_solver`` (that solve builds and reuses its own factor);
+        - ``Settings.log_det_method != "cholesky"`` (the ``"slogdet"`` opt-in is untouched);
+        - the factorization raises ``LinAlgError`` (``scipy.linalg.LinAlgError`` is
+          ``numpy.linalg.LinAlgError``), i.e. the matrix is not positive-definite;
+        - the factor's diagonal is not finite (non-finite input).
+
+        The ``None`` fallbacks keep failure behaviour identical to before: an indefinite but
+        nonsingular ``F + H`` is still solved by the LU and still makes the log determinant raise
+        (or return 0.0 in test mode) through :meth:`_log_det_symmetric_from`; a singular one still
+        makes the LU raise (or return its test-mode dummy).
+
+        ``curvature_reg_matrix`` is a cached array that other properties read (the reduced matrix,
+        the covariance), so it is copied, never factorized in place. The factor is one further
+        ``(n, n)`` array held for the inversion's lifetime.
+        """
+        if (
+            self._xp is not np
+            or self.settings.use_positive_only_solver
+            or self.settings.log_det_method != "cholesky"
+        ):
+            return None
+
+        import scipy.linalg
+
+        try:
+            cho_factor = scipy.linalg.cho_factor(
+                np.asarray(self.curvature_reg_matrix),
+                lower=True,
+                overwrite_a=False,
+                check_finite=False,
+            )
+        except np.linalg.LinAlgError:
+            return None
+
+        if not np.all(np.isfinite(np.diag(cho_factor[0]))):
+            return None
+
+        return cho_factor
+
+    @cached_property
+    def reconstruction_reduced(self) -> np.ndarray:
+        """
+        Solve the linear system [F + reg_coeff*H] S = D -> S = [F + reg_coeff*H]^-1 D given by equation (12)
+        of https://arxiv.org/pdf/astro-ph/0302587.pdf
+
+        S is the vector of reconstructed inversion values.
+        """
+        if self.all_linear_obj_have_regularization:
+            return self.reconstruction
+
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
+        ids_to_keep = self.mapper_indices
+
+        # Zero rows and columns in the matrix we want to ignore
+        return self.reconstruction[ids_to_keep]
+
+    @property
+    def reconstruction_dict(self) -> Dict[LinearObj, np.ndarray]:
+        return self.source_quantity_dict_from(source_quantity=self.reconstruction)
+
+    def source_quantity_dict_from(
+        self, source_quantity: np.ndarray
+    ) -> Dict[LinearObj, np.ndarray]:
+        """
+        When constructing the simultaneous linear equations (via vectors and matrices) the quantities of each individual
+        linear object (e.g. their `mapping_matrix`) are combined into single ndarrays via stacking. This does not track
+        which quantities belong to which linear objects, therefore the linear equation's solutions (which are returned
+        as ndarrays) do not contain information on which linear object(s) they correspond to.
+
+        For example, consider if two `Mapper` objects with 50 and 100 source pixels are used in an `Inversion`.
+        The `reconstruction` (which contains the solved for source pixels values) is an ndarray of shape [150], but
+        the ndarray itself does not track which values belong to which `Mapper`.
+
+        This function converts an ndarray of a `source_quantity` (like a `reconstruction`) to a dictionary of ndarrays,
+        where the keys are the instances of each mapper in the inversion.
+
+        Parameters
+        ----------
+        source_quantity
+            The quantity whose values are mapped to a dictionary of values for each individual mapper.
+
+        Returns
+        -------
+        The dictionary of ndarrays of values for each individual mapper.
+        """
+        source_quantity_dict = {}
+
+        index = 0
+
+        for linear_obj in self.linear_obj_list:
+            source_quantity_dict[linear_obj] = source_quantity[
+                index : index + linear_obj.params
+            ]
+
+            index += linear_obj.params
+
+        return source_quantity_dict
+
+    @property
+    def mapped_reconstructed_operated_data_dict(self) -> Dict[LinearObj, Array2D]:
+        raise NotImplementedError
+
+    @property
+    def mapped_reconstructed_data(self) -> Union[Array2D, Visibilities]:
+        """
+        Using the reconstructed source pixel fluxes we map each source pixel flux back to the image plane and
+        reconstruct the image data.
+
+        This uses the unique mappings of every source pixel to image pixels, which is a quantity that is already
+        computed when using the w-tilde formalism.
+
+        Returns
+        -------
+        Array2D
+            The reconstructed image data which the inversion fits.
+        """
+        return sum(self.mapped_reconstructed_data_dict.values())
+
+    @property
+    def mapped_reconstructed_operated_data(self) -> Union[Array2D, Visibilities]:
+        """
+        Using the reconstructed source pixel fluxes we map each source pixel flux back to the image plane and
+        reconstruct the image data.
+
+        This uses the unique mappings of every source pixel to image pixels, which is a quantity that is already
+        computed when using the w-tilde formalism.
+
+        Returns
+        -------
+        Array2D
+            The reconstructed image data which the inversion fits.
+        """
+        return sum(self.mapped_reconstructed_operated_data_dict.values())
+
+    @property
+    def data_subtracted_dict(self) -> Dict[LinearObj, Array2D]:
+        """
+        Returns a dictionary of the data subtracted by the reconstructed images of combinations of all but one of the
+        linear objects the inversion.
+
+        This produces images of the data showing what each linear object is actually fitted to, after accounting for
+        the signal in the other linear objects.
+
+        Returns
+        -------
+        A dictionary of the data subtracted by the reconstructed images of combinations of all but one of the
+        linear objects the inversion.
+        """
+        if self.data is None:
+            raise exc.InversionException(
+                "`data_subtracted_dict` cannot be computed because this inversion was built "
+                "without data (`data=None` -- the sparse-operator path, which uses the "
+                "precomputed `data_term` instead of the visibilities). `data_subtracted_dict` "
+                "needs the fitted data, so use `fit.inversion_with_data` (or `fit.data`) "
+                "instead of `fit.inversion`."
+            )
+
+        data_subtracted_dict = {}
+
+        for linear_obj in self.linear_obj_list:
+            data_subtracted_dict[linear_obj] = copy.copy(self.data)
+
+            for linear_obj_other in self.linear_obj_list:
+                if linear_obj != linear_obj_other:
+                    data_subtracted_dict[
+                        linear_obj
+                    ] -= self.mapped_reconstructed_operated_data_dict[linear_obj_other]
+
+        return data_subtracted_dict
+
+    @property
+    def regularization_term(self) -> float:
+        """
+        Returns the regularization term of an inversion. This term represents the sum of the difference in flux
+        between every pair of neighboring pixels.
+
+        This is computed as:
+
+        s_T * H * s = solution_vector.T * regularization_matrix * solution_vector
+
+        The term is referred to as *G_l* in Warren & Dye 2003, Nightingale & Dye 2015.
+
+        The above works include the regularization_matrix coefficient (lambda) in this calculation. In PyAutoLens,
+        this is already in the regularization matrix and thus implicitly included in the matrix multiplication.
+
+        Under ``regularization_term_method == "cho_solve"`` (opt-in, default off), regularization schemes
+        which know a factorization of their own matrix may instead supply their contribution directly via
+        :meth:`AbstractRegularization.regularization_term_from` — the kernel schemes (``MaternKernel`` etc.)
+        return ``coefficient * s^T C^-1 s`` from a single Cholesky solve of their covariance ``C``, avoiding
+        the round-off of contracting the explicitly formed inverse (whose error is amplified by ``cond(C)``,
+        ~1e9 on clustered traced mesh vertices). Because ``regularization_matrix_reduced`` is the block
+        diagonal of the per-object matrices when every linear object is regularized, the term is the sum of
+        the per-object terms; if any scheme has no shortcut (returns ``None``) the whole computation falls
+        back to the formed matrix. The default ``"matmul"`` path never consults the shortcut, so default
+        evidence values are unchanged.
+
+        Returns
+        -------
+        float
+            The regularization term of the inversion.
+        """
+        if not self.has(cls=AbstractRegularization):
+            return 0.0
+
+        if (
+            self.settings.regularization_term_method == "cho_solve"
+            and self.all_linear_obj_have_regularization
+        ):
+            # `reconstruction_reduced` is the full reconstruction here (the guard above is exactly the
+            # no-reduction case), so the per-object slices index it directly.
+            reconstruction = self.reconstruction_reduced
+
+            term_list = [
+                regularization.regularization_term_from(
+                    linear_obj=linear_obj,
+                    reconstruction=reconstruction[param_range[0] : param_range[1]],
+                    xp=self._xp,
+                )
+                for linear_obj, regularization, param_range in zip(
+                    self.linear_obj_list,
+                    self.regularization_list,
+                    self.param_range_list_from(cls=LinearObj),
+                )
+            ]
+
+            if all(term is not None for term in term_list):
+                return sum(term_list)
+
+        return self._xp.matmul(
+            self.reconstruction_reduced.T,
+            self._xp.matmul(
+                self.regularization_matrix_reduced, self.reconstruction_reduced
+            ),
+        )
+
+    def _log_det_symmetric_from(self, matrix, sparse: bool = False) -> float:
+        """
+        Log determinant of a symmetric positive-(semi)definite ``matrix``, used by the two evidence log-det terms.
+
+        The method is selected by ``self.settings.log_det_method`` (see :class:`Settings`):
+
+        - ``"cholesky"`` (default) — ``2 * sum(log(diag(cholesky(matrix))))``. This is the historical
+          computation and is byte-for-byte unchanged, including the test-mode ``LinAlgError`` guard. On the
+          NumPy backend a non-positive-definite matrix raises; on the JAX backend the Cholesky returns NaN,
+          which propagates as a non-finite figure of merit and can stall gradient-based searches
+          (autolens_workspace_developer#104).
+        - ``"slogdet"`` — the ``logabsdet`` from ``xp.linalg.slogdet(matrix)``. Wherever ``matrix`` is
+          positive-definite this equals the Cholesky value exactly (the sign is +1), but where the Cholesky
+          would NaN it returns a finite, differentiable value instead, so it never stalls a gradient search.
+          It is **opt-in and non-default** — intended for gradient-based work and for comparison against the
+          Cholesky evidence, not as a replacement for it. See PyAutoArray#391.
+
+        ``sparse=True`` (NumPy backend only, under ``"cholesky"``) offers the matrix to
+        :func:`inversion_util.log_det_sparse_spd_from` first, which factorizes it sparsely when it is both
+        large enough and sparse enough for that to be the faster route and returns ``None`` otherwise, in
+        which case the same dense Cholesky below runs. Either way the failure semantics are identical: both routes raise
+        ``np.linalg.LinAlgError`` on a matrix that is not positive-definite, so the test-mode guard applies
+        unchanged.
+        """
+        if self.settings.log_det_method == "slogdet":
+            return self._xp.linalg.slogdet(matrix)[1]
+
+        try:
+            if sparse:
+                log_det = inversion_util.log_det_sparse_spd_from(matrix=matrix)
+
+                if log_det is not None:
+                    return log_det
+
+            return 2.0 * self._xp.sum(
+                self._xp.log(self._xp.diag(self._xp.linalg.cholesky(matrix)))
+            )
+        except np.linalg.LinAlgError:
+            if is_test_mode():
+                # Singular matrix from a fabricated test-mode model; this evidence term is discarded.
+                # Return a benign 0.0 so unguarded test-mode paths do not crash (matches the reconstruction
+                # guard in inversion_util). Normal runs re-raise unchanged. numpy-only: the JAX cholesky
+                # returns NaN rather than raising (which is exactly what "slogdet" exists to avoid).
+                return 0.0
+            raise
+
+    @property
+    def log_det_curvature_reg_matrix_term(self) -> float:
+        """
+        The log determinant of [F + reg_coeff*H] is used to determine the Bayesian evidence of the solution.
+
+        On the NumPy path with the positive-only solver and the default ``"cholesky"`` method this term is read
+        off the Cholesky factor the reconstruction's non-negative least squares solve has already built, rather
+        than factorizing ``F + reg_coeff*H`` a second time. On the NumPy path with the positive-negative solver it
+        is read off the Cholesky factor the reconstruction solved with (:attr:`_curvature_reg_matrix_cho_factor`),
+        for the same reason.
+
+        ``fnnls_cholesky`` finishes holding a factor ``U`` of ``M[P][:, P]``, where ``M`` is
+        ``curvature_reg_matrix_reduced`` and ``P`` is the solve's final passive set -- 1485 of the 1500 columns
+        on the production HST Delaunay ``AdaptSplit`` system. The block-determinant identity then gives the
+        full log determinant from that factor plus a Schur complement over the ~15 remaining columns (see
+        :func:`inversion_util.log_det_from_passive_cholesky_from`): ~5 ms in place of a ~40 ms dense
+        factorization of the same matrix, agreeing with it to <= 2e-12 nats.
+
+        Because the factor comes from the solve, **this property evaluates** :attr:`reconstruction` (a
+        ``cached_property``) before reading it. The likelihood is unaffected -- it already evaluates
+        ``regularization_term``, and through it the reconstruction, before this term -- but a diagnostic that
+        asks for this term alone now pays for the reconstruction solve, where before it paid only for one
+        Cholesky.
+
+        The fast path is taken only when every one of these holds; anything else, and any
+        ``np.linalg.LinAlgError`` raised while reading the factor, takes the dense route below unchanged (which
+        carries the test-mode guard in :meth:`_log_det_symmetric_from`):
+
+        - the NumPy backend (the factor is a NumPy buffer built by a numba solver);
+        - ``Settings.log_det_method == "cholesky"`` (``"slogdet"`` is a different value by construction, and is
+          reached through the dense route);
+        - ``Settings.use_positive_only_solver`` (nothing else builds a factor, and this also keeps the
+          positive-negative route from evaluating the reconstruction it would not otherwise need);
+        - every linear object is regularized, so ``curvature_reg_matrix_reduced`` is the whole
+          ``curvature_reg_matrix`` the solve was handed rather than a ``mapper_indices`` subset of it;
+        - a factor is present with a non-empty passive block, and its matrix shape matches;
+        - the solve covered the whole reduced system. Note this is "no subset **or** the identity subset", not
+          "no subset": with ``use_edge_zeroed_pixels`` on but no edge pixels to zero, ``solve_ids_to_keep``
+          returns ``arange(n)`` rather than ``None``, which is the production configuration of the system
+          above.
+        """
+        if not self.has(cls=AbstractRegularization):
+            return 0.0
+
+        if (
+            self._xp is np
+            and self.settings.log_det_method == "cholesky"
+            and self.settings.use_positive_only_solver
+            and self.all_linear_obj_have_regularization
+        ):
+            matrix = self.curvature_reg_matrix_reduced
+
+            # Evaluates the solve (a `cached_property`), which is what publishes the factor
+            # read below. Bound to `_` because the value is not what is wanted here -- the
+            # side effect of the solve having run is.
+            _ = self.reconstruction
+
+            factor = self._nnls_factor
+            ids = self._nnls_factor_ids
+
+            if (
+                factor
+                and factor.get("U_buffer") is not None
+                and factor.get("k_active", 0) > 0
+                and factor.get("matrix_shape") == tuple(matrix.shape)
+                and self._nnls_factor_ids_cover(ids=ids, total=matrix.shape[0])
+            ):
+                try:
+                    return inversion_util.log_det_from_passive_cholesky_from(
+                        matrix=matrix,
+                        U_buffer=factor["U_buffer"],
+                        k_active=factor["k_active"],
+                        passive_set=factor["passive_set"],
+                    )
+                except np.linalg.LinAlgError:
+                    # The Schur complement of the passive block was not positive-definite. That
+                    # means this matrix is at the edge of what fp64 resolves as positive-definite,
+                    # and the dense factorization below is the authority on it: it either returns
+                    # its own value or raises the same error, where the test-mode guard and the
+                    # likelihood's `FitException` resampling handle it as they always have. It must
+                    # not be answered with a fabricated 0.0 here.
+                    pass
+
+        # Positive-negative NumPy path: read the log determinant off the Cholesky factor the
+        # reconstruction solves with (see `_curvature_reg_matrix_cho_factor`), rather than
+        # factorizing the same matrix again. Only when every linear object is regularized, so the
+        # reduced matrix is the full `curvature_reg_matrix` that was factorized. Reading the factor
+        # does not evaluate the reconstruction.
+        if self.all_linear_obj_have_regularization:
+            cho_factor = self._curvature_reg_matrix_cho_factor
+
+            if cho_factor is not None:
+                return 2.0 * np.sum(np.log(np.diag(cho_factor[0])))
+
+        return self._log_det_symmetric_from(self.curvature_reg_matrix_reduced)
+
+    @staticmethod
+    def _nnls_factor_ids_cover(ids: Optional[np.ndarray], total: int) -> bool:
+        """
+        Did the solve whose factor was published cover every parameter of the reduced system?
+
+        `None` means the solve took the full system. An explicit index array covers it only if it is the
+        identity `arange(total)`, which `solve_ids_to_keep` does return: `use_edge_zeroed_pixels` with no edge
+        pixels to zero yields `arange(n)`, not `None`, and that is the production configuration of the HST
+        Delaunay system this fast path was measured on. Any other index array is a proper subset, whose factor
+        says nothing about the full matrix's determinant.
+        """
+        if ids is None:
+            return True
+
+        ids = np.asarray(ids)
+
+        return ids.shape == (total,) and np.array_equal(ids, np.arange(total))
+
+    @property
+    def log_det_regularization_matrix_term(self) -> float:
+        """
+        The Bayesian evidence of an inversion which quantifies its overall goodness-of-fit uses the log determinant
+        of regularization matrix, Log[Det[Lambda*H]].
+
+        Unlike the determinant of the curvature reg matrix, which reuses the Cholesky decomposition already
+        computed for the source reconstruction, this term factorizes ``H`` itself, and how it does so depends on
+        the backend:
+
+        - **NumPy** — ``H`` is offered to :func:`inversion_util.log_det_sparse_spd_from`, a sparse SuperLU
+          factorization. The neighbour and split regularization schemes build ``H`` from a mesh's adjacency, so
+          it carries ``O(1)`` non-zeros per row whatever ``pixels`` is (8.6 on the HST Delaunay ``pixels=1500``
+          ``AdaptSplit`` matrix) and a dense ``O(pixels^3)`` Cholesky spends nearly all its work on structural
+          zeros. Matrices which the sparse factorization cannot speed up are returned untouched by that
+          function and take the dense Cholesky below: the kernel schemes' fully dense
+          ``coefficient * C^-1``, and any matrix below a few hundred pixels, where SuperLU's fixed setup
+          costs more than the whole dense factorization.
+        - **JAX** — the dense Cholesky, unchanged: the sparse factorization is a NumPy/SciPy routine and is
+          neither traceable nor differentiable.
+
+        (Or ``slogdet`` on either backend when ``Settings.log_det_method == "slogdet"`` — see
+        :meth:`_log_det_symmetric_from`.)
+
+        Under ``log_det_method == "slogdet"`` (opt-in, default off — PyAutoArray#391), regularization schemes
+        which know a factorization of their own matrix may additionally supply the term directly via
+        :meth:`AbstractRegularization.log_det_regularization_matrix_term_from` — the kernel schemes
+        (``MaternKernel`` etc.) return the analytically exact ``pixels * log(coeff) - log det C`` from a single
+        Cholesky of their covariance ``C``, avoiding the round-off of factorizing the explicitly formed inverse
+        (which reaches ~1e-6 absolute in the evidence at cond(C) ~ 1e9 on clustered traced mesh vertices).
+        Because ``regularization_matrix_reduced`` is the block diagonal of the per-object matrices when every
+        linear object is regularized, the term is the sum of the per-object terms; if any scheme has no
+        shortcut (returns ``None``) the whole computation falls back to ``slogdet`` of the formed matrix.
+        The default ``"cholesky"`` path never consults the shortcut, so default evidence values are unchanged.
+
+        Returns
+        -------
+        float
+            The log determinant of the regularization matrix.
+        """
+        if not self.has(cls=AbstractRegularization):
+            return 0.0
+
+        if (
+            self.settings.log_det_method == "slogdet"
+            and self.all_linear_obj_have_regularization
+        ):
+            term_list = [
+                regularization.log_det_regularization_matrix_term_from(
+                    linear_obj=linear_obj, xp=self._xp
+                )
+                for linear_obj, regularization in zip(
+                    self.linear_obj_list, self.regularization_list
+                )
+            ]
+
+            if all(term is not None for term in term_list):
+                return sum(term_list)
+
+        return self._log_det_symmetric_from(
+            self.regularization_matrix_reduced, sparse=self._xp is np
+        )
+
+    @property
+    def reconstruction_covariance_matrix(self) -> np.ndarray:
+        """
+        Returns the covariance matrix of the reconstruction, ``C = [F + reg_coeff*H]^-1``.
+
+        This is the inverse of the curvature matrix with regularization -- the same matrix used to solve for the
+        reconstruction via the linear inversion. Its diagonal holds the variance of each reconstructed pixel and
+        its off-diagonal entries the covariances between pixels; the off-diagonals are routinely negative, which is
+        a property of the covariance and not an error.
+
+        For the RMS standard deviation of each pixel (the quantity used for scientific analysis) use
+        `reconstruction_noise_map`, which takes the square root of this matrix's diagonal.
+
+        Formed on the parameters the solve actually solved for
+        -----------------------------------------------------
+        When `use_edge_zeroed_pixels` applies (see `solve_ids_to_keep`), `reconstruction` does not solve the
+        full system: it subsets `curvature_reg_matrix` to `zeroed_ids_to_keep`, solves the reduced problem and
+        scatters the answer back with **exact zeros** at the excluded pixels. Those pixels are the mesh's
+        poorly-constrained boundary vertices, zeroed precisely to keep the inversion stable.
+
+        This matrix is formed on that same index set and scattered back the same way, so it describes the
+        estimator that was actually computed. The excluded rows and columns are `NaN`, not zero: zero is a
+        covariance value ("known exactly"), whereas these parameters were never estimated at all. The returned
+        shape is always `[total_params, total_params]`, so callers do not have to branch on the settings.
+
+        Previously the full matrix was inverted regardless, which re-admitted into an explicit inverse the very
+        rows the solve dropped to stay stable, and reported a noise value for a pixel whose reconstruction reads
+        exactly `0` because it was never solved for.
+
+        Note this also changes the values on the parameters that ARE solved. Inverting the submatrix is not the
+        corresponding block of the full inverse: for a symmetric positive-definite `A`,
+        `[A^-1]_keep >= (A_keep)^-1` in the positive-semidefinite ordering, so every kept pixel's variance is
+        lower here than it was. That is the correct quantity -- the excluded parameters are held at zero by
+        construction, so conditioning on them is exact, not an approximation. It is unrelated to the
+        NNLS active-set caveat documented on `reconstruction_noise_map`, where the pixels held at zero are
+        chosen by the data rather than fixed in advance.
+
+        Measured on real ray-traced fits (Isothermal `einstein_radius=1.6` + shear, compact Sersic source,
+        `r=3.0"` mask, `over_sample_size_pixelization=4`, PSF and Poisson noise), at the regularization
+        coefficient the Bayesian evidence selects:
+
+        - `RectangularBilinearAdaptDensity(28, 28)`, 108 of 784 parameters zeroed: the old value was
+          overstated by a median factor of 1.0002, but 21% of solved pixels move by more than 1%, 9% by more
+          than 10%, and the worst by 1.8x. The change is concentrated near the mesh edge rather than spread.
+        - `Delaunay` set up as the workspace's own example does (an `Overlay` image mesh plus a ring of edge
+          points, `zeroed_pixels=30`): median 1.0045, 99th percentile 1.90, worst 2.37. Delaunay is affected
+          too whenever `zeroed_pixels > 0`; with the default `zeroed_pixels=0` this property is unchanged to
+          the bit.
+        - Downstream source flux and magnification through the workspace's `S/N >= 5` cut moved by 0.00% in
+          every case: the pixels whose noise changes most are near the edge, where the reconstruction has no
+          flux to move.
+
+        The inverse is formed from a Cholesky factorization rather than `np.linalg.inv`, for two reasons:
+
+        - `cho_factor` raises `LinAlgError` when the matrix is not positive-definite. `np.linalg.inv` raises only
+          on an exactly singular matrix, so an indefinite `curvature_reg_matrix` -- which the inversion does
+          encounter, hence `Settings.no_regularization_add_to_curvature_diag_value` -- previously returned a
+          plausible-looking covariance with no error and no warning. A covariance is only defined for a
+          positive-definite matrix, so failing here is correct and is handled by the callers in
+          `inversion/plot/inversion_plots.py`.
+        - `np.linalg.inv` is LU-based and exploits neither the symmetry nor the positive-definiteness this matrix
+          has. Its output drifts out of symmetry as conditioning worsens (measured at ~5e-7 absolute at
+          `cond ~ 1e12`, against ~3e-16 for the Cholesky solve), while a covariance matrix is symmetric by
+          definition.
+
+        Every failure mode raises `LinAlgError`, including a non-finite `curvature_reg_matrix`. That case is
+        checked explicitly because scipy would otherwise raise `ValueError`, which the callers -- here and
+        downstream -- do not catch; the previous implementation returned a silently all-`NaN` matrix instead.
+
+        The matrix is symmetrized on input. `cho_factor` reads only the upper triangle, so an asymmetric input
+        would otherwise be inverted as though its lower triangle matched, silently and with no diagnostic.
+        `curvature_reg_matrix` is `F + H` and symmetric by construction, so this is defensive only.
+
+        This property is NumPy-only: the input is coerced with `np.asarray`, so a JAX `curvature_reg_matrix`
+        forces a device-to-host transfer. It is a post-fit diagnostic, not part of the likelihood, so it is not on
+        the JIT path.
+
+        Returns
+        -------
+        The covariance matrix of the reconstruction, of shape [total_params, total_params].
+        """
+        from scipy.linalg import cho_factor, cho_solve
+
+        full_matrix = np.asarray(self.curvature_reg_matrix)
+
+        # Form the covariance on exactly the parameters the solve solved for. `solve_ids_to_keep` is None when
+        # the solve used the full system, in which case this path is unchanged.
+        ids_to_keep = self.solve_ids_to_keep
+
+        if ids_to_keep is None:
+            matrix = full_matrix
+        else:
+            ids_to_keep = np.asarray(ids_to_keep)
+            matrix = full_matrix[ids_to_keep][:, ids_to_keep]
+
+        # The guard runs on the SUBMATRIX, not the full one. A non-finite entry in a row the solve excluded
+        # cannot reach the factorization, and the reconstruction does not fail on it either -- failing here
+        # would make the covariance stricter than the solve it describes. It must also run before the
+        # scatter-back below, which fills the excluded entries with NaN deliberately.
+        if not np.isfinite(matrix).all():
+            raise np.linalg.LinAlgError(
+                "The curvature_reg_matrix contains non-finite entries (NaN or inf), so the reconstruction "
+                "covariance is undefined. Raised as LinAlgError so the plotting and CSV callers, which guard "
+                "on LinAlgError, degrade gracefully rather than aborting the model-fit."
+            )
+
+        # cho_factor reads only the upper triangle; symmetrize so an asymmetric input cannot be silently
+        # inverted as though its lower triangle matched its upper.
+        matrix = 0.5 * (matrix + matrix.T)
+
+        covariance = cho_solve(
+            cho_factor(matrix, check_finite=False),
+            np.eye(matrix.shape[0], dtype=matrix.dtype),
+            check_finite=False,
+        )
+
+        # cho_solve is accurate but not bitwise symmetric; a covariance matrix is symmetric by definition.
+        covariance = 0.5 * (covariance + covariance.T)
+
+        if ids_to_keep is None:
+            return covariance
+
+        # Scatter back to the full parameter shape, so this property's shape does not depend on the settings.
+        # The excluded entries are NaN ("never estimated"), which is what the solve says about them -- their
+        # reconstruction is an exact structural zero, not a fitted value.
+        full_covariance = np.full(full_matrix.shape, np.nan, dtype=covariance.dtype)
+        full_covariance[np.ix_(ids_to_keep, ids_to_keep)] = covariance
+
+        return full_covariance
+
+    @property
+    def reconstruction_noise_map_with_covariance(self) -> np.ndarray:
+        """
+        Deprecated alias of `reconstruction_covariance_matrix`.
+
+        This property previously returned ``np.sqrt(np.linalg.inv(curvature_reg_matrix))`` -- an elementwise square
+        root of the whole covariance matrix. Because the off-diagonal entries of a covariance matrix are routinely
+        negative, every such entry was `NaN` by construction, for any input matrix however well-conditioned, and
+        each call emitted `RuntimeWarning: invalid value encountered in sqrt`.
+
+        It now returns the covariance matrix itself, so the values differ: the diagonal holds variances rather
+        than standard deviations, and the off-diagonals hold covariances rather than `NaN`.
+
+        Note it also inherits `reconstruction_covariance_matrix`'s index set: under `use_edge_zeroed_pixels` the
+        rows and columns of parameters the solve excluded are `NaN` (never estimated), and the entries that
+        remain are the inverse of the submatrix rather than a block of the full inverse. See that property.
+
+        Returns
+        -------
+        The covariance matrix of the reconstruction (see `reconstruction_covariance_matrix`).
+        """
+        warnings.warn(
+            "`reconstruction_noise_map_with_covariance` is deprecated; use "
+            "`reconstruction_covariance_matrix` instead. Note the values have changed: it now returns the "
+            "covariance matrix, so its diagonal holds variances rather than standard deviations (the previous "
+            "elementwise square root made every off-diagonal NaN). For the RMS noise of each pixel use "
+            "`reconstruction_noise_map`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return self.reconstruction_covariance_matrix
+
+    @property
+    def reconstruction_noise_map(self):
+        """
+        Returns the noise-map of the reconstruction as a one dimensional ndarray, which does not account for the
+        covariance of the noise between pixels.
+
+        This matrix is representative of the noise properties of the fit and should be used for any scientific
+        analysis (e.g. source reconstructions of strong lenses).
+
+        The noise-map of the reconstruction is the RMS standard deviation of the noise in every pixel of the
+        reconstruction. This definition is identical to the `noise_map` attributes of dataset objects.
+
+        It is computed as the square root of the diagonal of `reconstruction_covariance_matrix`, which is the
+        inverse of the same matrix used to solve for the reconstruction via the linear inversion.
+
+        Pixels the solve never estimated are `NaN`
+        ------------------------------------------
+        Under `use_edge_zeroed_pixels` (the shipped default, and unconditional for the
+        `Rectangular*AdaptDensity` mesh family, whose `zeroed_pixels` is the whole edge ring) the solve excludes
+        the mesh's boundary vertices and writes an exact `0.0` into `reconstruction` for them. This noise map
+        reports **`NaN`** at exactly those pixels, meaning "never estimated" -- they have no uncertainty because
+        they have no fitted value.
+
+        So the two arrays agree on which pixels were solved. The implication runs one way, and the direction
+        matters: **`NaN` implies the reconstruction is exactly `0.0` there, but not the converse.** The
+        non-negative solver also pins pixels it DID solve for at exactly `0.0`, and those keep a finite,
+        meaningful noise value. On a representative fit -- `RectangularBilinearAdaptDensity(28, 28)`, 784
+        parameters -- 603 pixels read `0.0` while only the 108 structurally excluded ones are `NaN`; the other
+        495 were solved and pinned by the constraint. `np.isnan(reconstruction_noise_map)` is therefore the way
+        to identify the never-estimated pixels; `reconstruction == 0.0` is not, and conflates the two.
+
+        Previously the excluded pixels carried a finite noise value computed as though they had been solved,
+        so there was no way to tell them apart from the pinned ones at all.
+
+        `NaN` propagates rather than raising, and the consumers handle it: the colour scales derive their
+        limits with `np.nanmax` (`plot/utils.py:norm_from`), and `save_reconstruction_csv` already writes `nan`
+        into this column when the covariance cannot be computed. A signal-to-noise map formed as
+        `reconstruction / reconstruction_noise_map` gives `0.0 / NaN = NaN` at these pixels, silently, and a
+        `NaN >= threshold` comparison is `False` -- so they fall outside any signal-to-noise cut rather than
+        being counted as significant.
+
+        This previously took the diagonal of an elementwise-square-rooted matrix. The two are algebraically
+        identical -- `np.sqrt` is elementwise, so it commutes with taking the diagonal -- but only numerically
+        equivalent, since the covariance is now formed by Cholesky rather than LU. The difference is
+        conditioning-limited roundoff, measured at ~7e-15 relative at `cond ~ 1e3` rising to ~4e-5 at
+        `cond ~ 1e13`; neither result is the more correct one.
+
+        Caveat -- this is the uncertainty of the UNCONSTRAINED solve
+        ------------------------------------------------------------
+        `reconstruction_covariance_matrix` is `[F + reg_coeff*H]^-1`, the posterior covariance of the
+        positive-negative (unconstrained) solution of Warren & Dye (2003) eq. 12. But
+        `Settings.use_positive_only_solver` defaults to `True`, so the reconstruction is normally a
+        non-negative least-squares solve. Constraining `s >= 0` truncates the posterior, and a truncated
+        Gaussian's covariance is not the untruncated one, so this **overstates** the per-pixel uncertainty --
+        by more for pixels near the `s = 0` boundary, and it is not meaningful at all for pixels the solver
+        pinned at exactly zero.
+
+        The size of the discrepancy was measured on real ray-traced lens fits (`Isothermal` + shear,
+        `RectangularBilinearAdaptDensity`, `Constant` regularization). It depends strongly on the
+        regularization coefficient, and the Bayesian evidence -- which is what a model-fit maximises when
+        choosing that coefficient -- happens to select the regime where it is small:
+
+        - At the evidence-optimal coefficient, this noise map is overstated by a median factor of ~1.01
+          (extended source) to ~1.26 (very compact source), with individual pixels up to ~2x. Source flux
+          and magnification computed through a `S/N >= 5` cut moved by 0.0% to -1.3%.
+        - At coefficients well below the evidence optimum (an under-regularized fit) the factor grows to
+          ~2.8 median and ~10x on individual pixels.
+
+        So for most fits this is a small, one-directional (conservative) bias. Treat per-pixel error bars on
+        a very compact source as good to a few tens of percent rather than exact, and be more careful if the
+        regularization coefficient came out well below its evidence optimum.
+
+        Note that restricting the covariance to the solver's free set is **not** the correction: that treats
+        the active set as known and so understates. The two bracket the true truncated-Gaussian posterior.
+
+        Returns
+        -------
+        The noise-map of the reconstruction as a one dimensional ndarray, which does not account for the covariance
+        of the noise between pixels.
+        """
+        return np.sqrt(np.diag(self.reconstruction_covariance_matrix))
+
+    @property
+    def reconstruction_noise_map_dict(self) -> Dict[LinearObj, np.ndarray]:
+        return self.source_quantity_dict_from(
+            source_quantity=self.reconstruction_noise_map
+        )
+
+    def regularization_weights_from(self, index: int) -> np.ndarray:
+        linear_obj = self.linear_obj_list[index]
+        regularization = self.regularization_list[index]
+
+        if regularization is None:
+            pixels = linear_obj.params
+
+            return np.zeros((pixels,))
+
+        return regularization.regularization_weights_from(
+            linear_obj=linear_obj, xp=self._xp
+        )
+
+    @property
+    def regularization_weights_mapper_dict(self) -> Dict[LinearObj, np.ndarray]:
+        regularization_weights_dict = {}
+
+        for mapper in self.cls_list_from(cls=Mapper):
+            index = self.linear_obj_list.index(mapper)
+            regularization_weights_dict[mapper] = self.regularization_weights_from(
+                index=index,
+            )
+
+        return regularization_weights_dict
+
+    @property
+    def _data_vector_mapper(self) -> np.ndarray:
+        raise NotImplementedError
+
+    @property
+    def _curvature_matrix_mapper_diag(self) -> Optional[np.ndarray]:
+        raise NotImplementedError
+
+    @property
+    def linear_func_operated_mapping_matrix_dict(self) -> Dict:
+        raise NotImplementedError
+
+    @property
+    def data_linear_func_matrix_dict(self):
+        raise NotImplementedError
+
+    @property
+    def mapper_operated_mapping_matrix_dict(self) -> Dict:
+        raise NotImplementedError
+
+    def max_pixel_list_from(
+        self,
+        total_pixels: int = 1,
+        filter_neighbors: bool = False,
+        mapper_index: int = 0,
+    ) -> List[List[int]]:
+        """
+        Returns a list of lists of the maximum cell or pixel values in the mapper.
+
+        Neighbors can be filtered such that each maximum value in a pixel is higher than all surrounding pixels,
+        thus forming a `peak` in the mapper values.
+
+        For example, if a `reconstruction` is the mapper values and neighbor filtering is on, this would return the
+        brightest pixels in the mapper reconstruction which are brighter than all pixels around them.
+
+        In gravitational lensing, these peaks are the brightest regions of the source reconstruction and correspond
+        to features like the centre of the source galaxy and knots of star formation in a galaxy.
+
+        Parameters
+        ----------
+        total_pixels
+            The total number of pixels to return in the list of peak pixels.
+        filter_neighbors
+            If True, the peak pixels are filtered such that they are the brightest pixel in the mapper and all
+            of its neighbors.
+        mapper_index
+            The index of the mapper in the inversion to compute the max pixels for, where there may be multiple
+            mappers in the inversion.
+
+        Returns
+        -------
+
+        """
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+        reconstruction = self.reconstruction_dict[mapper]
+
+        max_pixel_list = []
+
+        pixel_list = []
+
+        pixels_ascending_list = list(reversed(np.argsort(reconstruction)))
+
+        for pixel in range(total_pixels):
+            pixel_index = pixels_ascending_list[pixel]
+
+            add_pixel = True
+
+            if filter_neighbors:
+                pixel_neighbors = mapper.neighbors[pixel_index]
+                pixel_neighbors = pixel_neighbors[pixel_neighbors >= 0]
+
+                max_value = reconstruction[pixel_index]
+                max_value_neighbors = reconstruction[pixel_neighbors]
+
+                if max_value < np.max(max_value_neighbors):
+                    add_pixel = False
+
+            if add_pixel:
+                pixel_list.append(pixel_index)
+
+        max_pixel_list.append(pixel_list)
+
+        return max_pixel_list
+
+    def max_pixel_centre(self, mapper_index: int = 0) -> Grid2DIrregular:
+        """
+        Returns the centre of the brightest pixel in the mapper values.
+
+        Parameters
+        ----------
+        mapper_index
+            The index of the mapper in the inversion to compute the max pixels for, where there may be multiple
+            mappers in the inversion.
+
+        Returns
+        -------
+        The centre of the brightest pixel in the mapper values.
+        """
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+        reconstruction = self.reconstruction_dict[mapper]
+
+        max_pixel = np.argmax(reconstruction)
+
+        max_pixel_centre = Grid2DIrregular(
+            values=[mapper.source_plane_mesh_grid.array[max_pixel]]
+        )
+
+        return max_pixel_centre
+
+    def source_clumps_from(
+        self,
+        mapper_index: int = 0,
+        threshold: float = 0.5,
+        min_pixels: int = 3,
+        total_clumps: Optional[int] = None,
+        pix_indexes: Optional[List] = None,
+    ) -> List[np.ndarray]:
+        """
+        Returns the clumps of the reconstruction, each a group of connected mesh pixels which are
+        bright relative to the reconstruction's maximum value.
+
+        Mesh pixels whose reconstructed value exceeds `threshold * max(reconstruction)` are kept,
+        split into connected components over the mesh neighbour graph, filtered by `min_pixels` and
+        ordered brightest first.
+
+        In gravitational lensing a clump is a distinct bright structure of the source galaxy. The
+        `threshold` is therefore the knob which decides what counts as a distinct structure: ~0.5
+        isolates one smooth source, ~0.2 merges two nearby galaxies into one clump and ~0.8 splits
+        a source into its individual star-forming knots.
+
+        Parameters
+        ----------
+        mapper_index
+            The index of the mapper in the inversion whose reconstruction is clumped, where there
+            may be multiple mappers in the inversion.
+        threshold
+            Mesh pixels are in a clump if their reconstructed value exceeds this fraction of the
+            reconstruction's maximum value.
+        min_pixels
+            Connected groups with fewer than this many mesh pixels are discarded.
+        total_clumps
+            The maximum number of clumps returned, keeping the brightest. `None` returns all of them.
+        pix_indexes
+            An explicit list of mesh pixel index groups which bypasses the clump finding entirely,
+            returning them unchanged.
+
+        Returns
+        -------
+        A list of 1D integer arrays, one per clump, ordered by decreasing peak reconstructed value.
+        """
+        from autoarray.inversion.mappings.mapping import connected_components_from
+        from autoarray.inversion.mappings.mapping import pix_index_groups_from
+
+        if pix_indexes is not None:
+            return pix_index_groups_from(pix_indexes=pix_indexes)
+
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+
+        reconstruction = np.asarray(self.reconstruction_dict[mapper])
+
+        if reconstruction.size == 0:
+            return []
+
+        max_value = float(np.max(reconstruction))
+
+        if max_value <= 0.0:
+            return []
+
+        indexes = np.where(reconstruction > threshold * max_value)[0]
+
+        if indexes.size == 0:
+            return []
+
+        clumps = connected_components_from(indexes=indexes, neighbors=mapper.neighbors)
+
+        clumps = [clump for clump in clumps if clump.shape[0] >= min_pixels]
+
+        clumps.sort(key=lambda clump: -float(np.max(reconstruction[clump])))
+
+        if total_clumps is not None:
+            clumps = clumps[:total_clumps]
+
+        return clumps
+
+    def mappings_from(
+        self,
+        mapper_index: int = 0,
+        weight_threshold: float = 0.0,
+        **clump_kwargs,
+    ) -> List["Mapping"]:
+        """
+        Returns the `Mapping` of every clump of the reconstruction, pairing each source-plane clump
+        with the image-plane regions (the multiple images) it maps to.
+
+        Parameters
+        ----------
+        mapper_index
+            The index of the mapper in the inversion whose reconstruction is mapped, where there may
+            be multiple mappers in the inversion.
+        weight_threshold
+            A data pixel is in an image-plane region if its summed mapping weight to the clump
+            exceeds this value.
+        clump_kwargs
+            The `threshold`, `min_pixels`, `total_clumps` and `pix_indexes` inputs
+            of `source_clumps_from`.
+
+        Returns
+        -------
+        One `Mapping` per source-plane clump, ordered by decreasing peak reconstructed value.
+        """
+        from autoarray.inversion.mappings import mapping as mapping_module
+
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+
+        reconstruction = np.asarray(self.reconstruction_dict[mapper])
+
+        clumps = self.source_clumps_from(mapper_index=mapper_index, **clump_kwargs)
+
+        peak_values = [float(np.max(reconstruction[clump])) for clump in clumps]
+
+        return mapping_module.mappings_from(
+            mapper=mapper,
+            pix_indexes=clumps,
+            weight_threshold=weight_threshold,
+            peak_values=peak_values,
+        )

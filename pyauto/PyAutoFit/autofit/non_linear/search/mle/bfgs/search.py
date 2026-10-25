@@ -1,0 +1,434 @@
+from __future__ import annotations
+
+from typing import Optional, TYPE_CHECKING
+
+from autofit import exc
+
+from autofit.mapper.prior_model.abstract import AbstractPriorModel
+from autofit.non_linear.search.abstract_search import NonLinearSearch
+from autofit.non_linear.search.posterior_kind import POINT
+from autofit.non_linear.analysis import Analysis
+from autofit.non_linear.clipper import (
+    AbstractClipper,
+    ClipperNone,
+    ClipperPriorBoxJoint,
+)
+from autofit.non_linear.initializer import AbstractInitializer
+from autofit.non_linear.samples.adapter import RawSamples
+from autofit.non_linear.search import capabilities as cap
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from autofit.database.sqlalchemy_ import sa
+
+
+class AbstractBFGS(NonLinearSearch):
+
+    # Same contract as ``AbstractMultiStartGradient``: bounds handed to scipy
+    # change where the fit converges, so the clipper forks the identifier here
+    # too, re-keying existing (L)BFGS output directories (PyAutoFit#1493).
+    # ``Drawer`` deliberately does NOT declare this: it inherits the attribute
+    # from ``AbstractMLE`` but never consumes it, and a setting that cannot
+    # affect the result must not re-key stored results.
+    # Static capabilities (see ``autofit.non_linear.search.capabilities``); mirrored
+    # by ``search/registry.py``. Never identifier fields.
+    jax_use = cap.JaxUse.OPTIONAL
+    gradient = cap.Gradient.NONE
+    batched = False
+    honours_gradient_mode = False
+    posterior_kind = cap.PosteriorKind.POINT
+    produces_evidence = False
+    resumable = False
+    warm_start = cap.WarmStart.PROVIDER
+    install_extra = ""
+    upstream_url = "https://github.com/scipy/scipy"
+    citation_keys = ("scipy",)
+    status = cap.Status.STABLE
+    test_mode_budget = {"maxiter": 10}
+    objective_target = cap.ObjectiveTarget(cap.ObjectiveQuantity.NEG2_LOG_POSTERIOR, cap.CoordinateSpace.PHYSICAL)
+    # The value a NaN or infinite likelihood reaches the backend as: ``Fitness``
+    # replaces it with ``resample_figure_of_merit=-inf`` and the chi-squared
+    # conversion (x -2) turns that into ``+inf``. The sentinel is conditional: a
+    # ``FitException`` early return (numpy) and a failed traced assertion still return
+    # ``-inf``. Normalising it is the A3 objective adapter's job, not A1's.
+    invalid_value = float("inf")
+
+    __identifier_fields__ = ("clipper",)
+
+    method = None
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        unique_tag: Optional[str] = None,
+        tol: Optional[float] = None,
+        disp: bool = False,
+        eps: float = 1.0e-08,
+        ftol: float = 2.220446049250313e-09,
+        gtol: float = 1.0e-05,
+        iprint: float = -1.0,
+        maxcor: int = 10,
+        maxfun: int = 15000,
+        maxiter: int = 15000,
+        maxls: int = 20,
+        initializer: Optional[AbstractInitializer] = None,
+        clipper: Optional[AbstractClipper] = None,
+        iterations_per_full_update: int = None,
+        iterations_per_quick_update: int = None,
+        silence: bool = False,
+        session: Optional[sa.orm.Session] = None,
+        **kwargs
+    ):
+        """
+        Abstract wrapper for the BFGS and L-BFGS scipy non-linear searches.
+
+        Parameters
+        ----------
+        tol
+            Tolerance for termination.
+        disp
+            Set to True to print convergence messages.
+        maxiter
+            Maximum number of iterations.
+        maxfun
+            Maximum number of function evaluations.
+        clipper
+            Enforcement of prior support (see :mod:`autofit.non_linear.clipper`).
+            Unlike the multi-start gradient searches, which project the parameters
+            themselves after every update, this search declares the box to scipy
+            and lets scipy enforce it — ``L-BFGS-B`` supports box bounds natively.
+
+            Default ``ClipperNone``, under which no ``bounds=`` is passed at all
+            and behaviour is unchanged. Only bound-supporting methods accept a
+            real clipper; see ``_bounds_from``.
+        """
+
+        self.clipper = POINT.clipper_for(clipper)
+
+        super().__init__(
+            name=name,
+            path_prefix=path_prefix,
+            unique_tag=unique_tag,
+            initializer=POINT.initializer_for(initializer),
+            iterations_per_quick_update=iterations_per_quick_update,
+            iterations_per_full_update=iterations_per_full_update,
+            silence=silence,
+            session=session,
+            **kwargs
+        )
+
+        self.tol = tol
+        self.disp = disp
+        self.eps = eps
+        self.ftol = ftol
+        self.gtol = gtol
+        self.iprint = iprint
+        self.maxcor = maxcor
+        self.maxfun = maxfun
+        self.maxiter = maxiter
+        self.maxls = maxls
+
+        self.logger.debug(f"Creating {self.method} Search")
+
+    # The scipy methods that accept box bounds. Plain ``BFGS`` is deliberately
+    # absent: scipy does not reject bounds it cannot use, it *ignores* them behind
+    # a ``UserWarning`` and returns the unconstrained optimum. A user who asked for
+    # prior-support enforcement and received an unbounded fit plus a log line is
+    # exactly the silent-wrong-answer this class is meant to prevent, so
+    # ``_bounds_from`` raises instead.
+    _BOUND_SUPPORTING_METHODS = ("L-BFGS-B", "TNC", "SLSQP")
+
+    def _bounds_from(self, model):
+        """
+        The ``scipy.optimize.Bounds`` for ``model``, or ``None`` when no clipper is
+        configured (in which case no ``bounds=`` is passed at all and behaviour is
+        unchanged).
+
+        The conversion is not incidental. ``AbstractClipper.bounds_from_model``
+        returns ``(lower, upper)`` as two arrays, which is the shape ``project``
+        broadcasts against — but ``optimize.minimize`` reads a ``(lower, upper)``
+        tuple as a *sequence of ``(min, max)`` pairs*. For a two-parameter model
+        that is a valid-looking pair sequence, so scipy pins each parameter to a
+        constant and returns a wrong fit with no error and no warning; at every
+        other dimensionality it raises. Building an explicit ``Bounds`` is what
+        makes the intent unambiguous.
+
+        A :class:`~autofit.non_linear.clipper.ClipperPriorBoxJoint` on a model that
+        actually declares a ball is rejected rather than degraded to its box. A
+        ball is not expressible as a ``scipy.optimize.Bounds`` at all -- no
+        per-coordinate interval can exclude the corners of a square -- so silently
+        handing scipy the box alone would give the caller an
+        unconstrained-in-the-corners fit from a clipper they chose precisely to
+        constrain them, which is the same class of silent wrong answer the
+        ``_BOUND_SUPPORTING_METHODS`` check below exists to prevent.
+
+        The refusal is keyed on the *model*, not on the clipper's type, because
+        the joint clipper is a strict no-op on a model whose classes declare no
+        geometry (see :class:`ClipperPriorBoxJoint`); refusing that case too would
+        stop the clipper being configured once for a whole pipeline.
+        """
+        # Imported lazily, as everywhere else in autofit -- no module in the
+        # package pulls scipy in at import time.
+        from scipy import optimize
+
+        if isinstance(self.clipper, ClipperNone):
+            return None
+
+        if (
+            isinstance(self.clipper, ClipperPriorBoxJoint)
+            and model.ball_constraint_index_pairs()
+        ):
+            raise exc.SearchException(
+                f"A {type(self.clipper).__name__} was passed to "
+                f"{type(self).__name__}, which enforces its bounds through "
+                "scipy, together with a model declaring a ball constraint. A "
+                "ball cannot be expressed as a `scipy.optimize.Bounds` -- only "
+                "the box could be passed on, silently dropping the ball this "
+                "clipper exists for. Use ClipperPriorBox here, or a search that "
+                "projects its own steps (e.g. af.MultiStartAdam)."
+            )
+
+        if self.method not in self._BOUND_SUPPORTING_METHODS:
+            raise exc.SearchException(
+                f"A {type(self.clipper).__name__} was passed to a search using "
+                f"method '{self.method}', which does not support box bounds. "
+                f"SciPy would silently ignore the bounds and return an "
+                f"unconstrained fit. Use one of "
+                f"{', '.join(self._BOUND_SUPPORTING_METHODS)} (e.g. af.LBFGS) or "
+                f"leave the clipper as the default ClipperNone."
+            )
+
+        lower, upper = self.clipper.bounds_from_model(model)
+        return optimize.Bounds(lower, upper)
+
+    @property
+    def options(self):
+        return {
+            "disp": self.disp,
+            "eps": self.eps,
+            "ftol": self.ftol,
+            "gtol": self.gtol,
+            "iprint": self.iprint,
+            "maxcor": self.maxcor,
+            "maxfun": self.maxfun,
+            "maxiter": self.maxiter,
+            "maxls": self.maxls,
+        }
+
+    def fitness_overrides(self, analysis: Analysis) -> dict:
+        """
+        The ``Fitness`` stores its evaluation history when the start point is plotted:
+        the samples are then the whole optimisation path (``raw_samples_from``).
+        """
+        return {"store_history": self.should_plot_start_point}
+
+    def run(self, ctx):
+        """
+        Run scipy's ``minimize`` (the ``run(ctx)`` hook; see ``docs/design/run_ctx.md``)
+        and return its ``OptimizeResult``.
+
+        The optimisation runs in chunks of ``iterations_per_full_update`` iterations, each
+        restarted from the last chunk's optimum, with the result archived
+        (``search_internal.dill``) and the fit updated between chunks. A JAX analysis
+        gives scipy the exact gradient of the ``"value_and_grad"`` objective; a numpy
+        analysis lets scipy take finite differences of the scalar objective.
+
+        Parameters
+        ----------
+        ctx
+            The fit's ``FitContext``.
+        """
+        from scipy import optimize
+
+        model = ctx.model
+        fitness = ctx.fitness
+
+        # Resolved once, before any stepping: an unsupported method should fail
+        # immediately rather than after the first chunk of iterations.
+        bounds = self._bounds_from(model=model)
+
+        try:
+            search_internal_dict = ctx.paths.load_search_internal()
+
+            x0 = search_internal_dict["x0"]
+            total_iterations = search_internal_dict["total_iterations"]
+
+            self.logger.info(
+                "Resuming LBFGS non-linear search (previous samples found)."
+            )
+
+        except (FileNotFoundError, TypeError):
+
+            parameters, _ = ctx.start_points(1)
+
+            x0 = parameters[0]
+
+            total_iterations = 0
+
+            self.logger.info(
+               f"Starting new {self.method} non-linear search (no previous samples found)."
+            )
+
+        while total_iterations < self.maxiter:
+
+            # SciPy tolerates an integral float ``maxiter``, but a fractional one
+            # would quietly acquire ceiling semantics instead of being rejected
+            # (PyAutoFit#1422).
+            iterations = ctx.schedule.next_budget(total_iterations, self.maxiter)
+
+            if iterations > 0:
+                options = dict(self.options)
+                options["maxiter"] = iterations
+
+                # ``bounds`` is ``None`` under the default ``ClipperNone``, and
+                # ``minimize(bounds=None)`` is the same call as omitting it, so the
+                # default path is unchanged.
+                #
+                # Both branches are exposed to the prior-support problem:
+                # ``UniformPrior.log_prior_from_value`` returns ``-inf`` outside
+                # its bounds on the NumPy and JAX paths alike (PyAutoFit#1489
+                # restored the NumPy-side wall), so an unclipped step out of the
+                # box makes the objective non-finite on either branch. Bounds are
+                # passed on both — they are correct on both, and having them
+                # diverge by branch would be a trap of its own.
+                if fitness.analysis.is_jax:
+
+                    # The exact gradient from the "value_and_grad" objective, one jitted
+                    # call per step: no finite differences (which cost n_params + 1
+                    # likelihood calls per gradient). The host-side wrapper books every
+                    # call as `call_wrap` does, so history and quick updates still fire.
+                    search_internal = optimize.minimize(
+                        fun=fitness.call_wrap_value_and_grad,
+                        jac=True,
+                        x0=x0,
+                        method=self.method,
+                        options=options,
+                        tol=self.tol,
+                        bounds=bounds,
+                    )
+                else:
+
+                    search_internal = optimize.minimize(
+                        fun=fitness.__call__,
+                        x0=x0,
+                        method=self.method,
+                        options=options,
+                        tol=self.tol,
+                        bounds=bounds,
+                    )
+
+                total_iterations += search_internal.nit
+
+                search_internal.log_posterior_list = -0.5 * fitness(
+                    parameters=search_internal.x
+                )
+
+                if self.should_plot_start_point:
+
+                    search_internal.parameters_history_list = fitness.parameters_history_list
+                    search_internal.log_likelihood_history_list = fitness.log_likelihood_history_list
+
+                ctx.paths.save_search_internal(
+                    obj=search_internal,
+                )
+
+                x0 = search_internal.x
+
+                if search_internal.nit < iterations:
+                    return search_internal
+
+                ctx.update(search_internal)
+
+        self.logger.info(f"{self.method} sampling complete.")
+
+        return search_internal
+
+    def raw_samples_from(self, model: AbstractPriorModel, search_internal):
+        """
+        The LBFGS internal results as raw samples: the full history when the start
+        point is plotted, otherwise the single optimum ``x``.
+
+        Parameters
+        ----------
+        model
+            Maps input vectors of unit parameter values to physical values and model instances via priors.
+        search_internal
+            The scipy ``OptimizeResult``-like object the search stores.
+        """
+        x0 = search_internal.x
+        total_iterations = search_internal.nit
+
+        samples_info = {
+            "total_iterations": total_iterations,
+            # Prior-support enforcement (PyAutoFit#1477). The name only, with
+            # deliberately NO ``n_clipped_lane_steps`` alongside it: this search
+            # is declarative, handing ``optimize.Bounds`` to scipy and letting
+            # scipy enforce, so ``Clipper.project`` is never called, no mask is
+            # produced and there is nothing to count. Writing a ``0`` here would
+            # read as "the clipper never fired" when it means "this search
+            # cannot know"; the summary renders the absent key as "not measured"
+            # instead.
+            "clipper": type(self.clipper).__name__,
+            "time": self.timer.time if self.timer else None,
+        }
+
+        if self.should_plot_start_point:
+            return RawSamples(
+                parameters=search_internal.parameters_history_list,
+                log_likelihood=search_internal.log_likelihood_history_list,
+                info=samples_info,
+                label="LBFGS",
+            )
+
+        parameter_lists = [list(x0)]
+        log_prior_list = model.log_prior_list_from(parameter_lists=parameter_lists)
+        log_posterior_list = np.array([search_internal.log_posterior_list])
+
+        return RawSamples(
+            parameters=parameter_lists,
+            log_likelihood=[
+                lp - prior for lp, prior in zip(log_posterior_list, log_prior_list)
+            ],
+            log_prior=log_prior_list,
+            info=samples_info,
+            label="LBFGS",
+        )
+
+
+class BFGS(AbstractBFGS):
+    """
+    The BFGS non-linear search, which wraps the scipy Broyden-Fletcher-Goldfarb-Shanno (BFGS) algorithm.
+
+    For a full description of the scipy BFGS method, checkout its documentation:
+
+    https://docs.scipy.org/doc/scipy/reference/optimize.minimize-bfgs.html#optimize-minimize-bfgs
+    """
+
+    method = "BFGS"
+
+
+class LBFGS(AbstractBFGS):
+    """
+    The L-BFGS non-linear search, which wraps the scipy Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS)
+    algorithm.
+
+    For a full description of the scipy L-BFGS method, checkout its documentation:
+
+    https://docs.scipy.org/doc/scipy/reference/optimize.minimize-lbfgsb.html
+    """
+
+    method = "L-BFGS-B"
+
+    # SciPy 1.15 deprecated the L-BFGS-B ``disp`` / ``iprint`` options (removal
+    # slated for 1.18) — the solver no longer emits its Fortran-side verbose
+    # output, so passing them buys nothing but a DeprecationWarning per
+    # ``minimize`` call. The constructor still accepts both for API stability;
+    # they simply never reach scipy for this method.
+    @property
+    def options(self):
+        options = dict(super().options)
+        del options["disp"]
+        del options["iprint"]
+        return options

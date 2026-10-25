@@ -1,22 +1,31 @@
 [project]
 name = "pyautolens-project"
 version = "0.1.0"
-description = "Add your description here"
+description = "COWLS JWST subhalo project (PyAutoLens SLaM chain)"
 readme = "README.md"
-requires-python = ">=3.11"
+# PyAuto >= 2026.10 needs Python >= 3.12; 3.13 matches the HST project's environment.
+requires-python = ">=3.13"
 dependencies = [
-    "autoarray==2026.2.26.4",
-    "autoconf==2026.2.26.4",
-    "autolens==2026.2.26.4",
-    "autofit==2026.2.26.4",
-    "autogalaxy==2026.2.26.4",
+    # On main in the pyauto codespace: pinned PyPI releases.
+    "autolens==2026.10.23.1",
+    "autonerves==2026.10.23.1",
+    # Not on main: vendored branch copies under pyauto/ (see pyauto/PROVENANCE.md).
+    "autoarray",
+    "autofit",
+    "autogalaxy",
     "pyyaml>=6.0.3",
     "scikit-learn<=1.5.1",
     "ipython>=9.10.0",
     "jax>=0.4.38",
-    "numba>=0.65.1",
+    # autoarray's numba fast paths and JAX positive-only solver (not in its base deps).
+    "numba",
+    "jaxnnls",
 ]
+
+[tool.uv.sources]
+autoarray = { path = "pyauto/PyAutoArray", editable = true }
+autofit = { path = "pyauto/PyAutoFit", editable = true }
+autogalaxy = { path = "pyauto/PyAutoGalaxy", editable = true }
+
 [tool.uv]
-override-dependencies = [
-    "scipy==1.17.1"
-]
+package = false

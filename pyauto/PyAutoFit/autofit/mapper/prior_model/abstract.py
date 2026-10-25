@@ -1,0 +1,2924 @@
+import copy
+import inspect
+import json
+import logging
+import random
+import types
+from collections import defaultdict
+from typing import (
+    TYPE_CHECKING,
+    Tuple,
+    Optional,
+    Dict,
+    List,
+    Iterable,
+    Generator,
+    Union,
+    Type,
+)
+
+import numpy as np
+
+from autonerves import conf
+
+if TYPE_CHECKING:
+    from autofit.mapper.prior_model.latent_parameters import LatentParameters
+from autonerves.exc import ConfigException
+from autofit import exc
+from autofit.mapper import model
+from autofit.mapper.model import AbstractModel, frozen_cache
+from autofit.mapper.prior import TruncatedGaussianPrior
+from autofit.mapper.prior import UniformPrior
+from autofit.mapper.prior.abstract import Prior
+from autofit.mapper.prior.constant import Constant
+from autofit.mapper.prior.deferred import DeferredArgument
+from autofit.mapper.prior.tuple_prior import TuplePrior
+from autofit.mapper.prior.width_modifier import WidthModifier
+from autofit.mapper.prior_model.attribute_pair import DeferredNameValue
+from autofit.mapper.prior_model.attribute_pair import (
+    cast_collection,
+    PriorNameValue,
+    InstanceNameValue,
+)
+from autofit.mapper.prior_model.recursion import DynamicRecursionCache
+from autofit.mapper.prior_model.representative import find_groups
+from autofit.mapper.prior_model.util import PriorModelNameValue
+from autofit.text import formatter as frm
+from autofit.text.formatter import TextFormatter
+from autofit.tools.util import info_whitespace
+from autofit.tools.util import split_paths
+
+logger = logging.getLogger(__name__)
+
+
+class Limits:
+    @staticmethod
+    def for_class_and_attributes_name(cls, attribute_name):
+        """Look up the (lower, upper) limits for a class attribute from config.
+
+        Parameters
+        ----------
+        cls
+            The model class.
+        attribute_name
+            The name of the attribute on that class.
+
+        Returns
+        -------
+        tuple
+            A (lower, upper) pair of limit values.
+        """
+        limit_dict = conf.instance.prior_config.for_class_and_suffix_path(
+            cls, [attribute_name, "limits"]
+        )
+        return limit_dict["lower"], limit_dict["upper"]
+
+
+class TuplePathModifier:
+    def __init__(self, model_: "AbstractPriorModel"):
+        """
+        Modifies paths to priors contained in tuples.
+
+        When a tuple is found in a signature a PriorTuple is created.
+
+        The true path to a variable in the tuple is
+        ("some", "preamble", "tuple_name", "tuple_name_0")
+
+        Where 0 is the index of the tuple member. "tuple_name" must be
+        removed from this path for some uses.
+
+        When called, instances of this class remove the name of the tuple
+        i.e:
+        -> ("some", "preamble", "tuple_name_0")
+
+        Parameters
+        ----------
+        model_
+        """
+        tuple_priors = model_.path_instance_tuples_for_class(TuplePrior)
+        try:
+            self.tuple_paths, _ = zip(*tuple_priors)
+        except ValueError:
+            self.tuple_paths = None
+
+    def __call__(self, path):
+        if self.tuple_paths is not None:
+            if path[:-1] in self.tuple_paths:
+                return path[:-2] + (path[-1],)
+        return path
+
+
+Path = Tuple[str, ...]
+
+
+class MeanField:
+    def __init__(self, prior_model: "AbstractPriorModel"):
+        """
+        Implements same interface as graphical code
+
+        Parameters
+        ----------
+        prior_model
+        """
+        self.prior_model = prior_model
+
+    def __getitem__(self, item):
+        """
+        Retrieve a prior by a prior with the same id
+        """
+        for prior in self.prior_model.priors:
+            if prior == item:
+                return prior
+        raise KeyError(f"Could not find {item} in model")
+
+
+def paths_to_tree(paths: List[Tuple[str, ...]], tree: Optional[dict] = None) -> dict:
+    """
+    Recursively convert a list of paths to a tree structure where common paths
+    are matched.
+
+    Parameters
+    ----------
+    paths
+        A list of paths to attributes in the model.
+    tree
+        A tree already embedded in a parent tree.
+
+    Returns
+    -------
+    A tree with depth max(map(len, paths))
+
+    Examples
+    --------
+    paths_to_tree([
+        ("one", "two", "three"),
+        ("one", "two", "four"),
+    ])
+
+    gives
+
+    {
+        "one": {
+            "two": {
+                "three": {},
+                "four": {}
+            }
+        }
+    }
+    """
+    tree = tree or dict()
+    for path in paths:
+        if len(path) == 0:
+            return tree
+        first, *rest = path
+        if first not in tree:
+            child = dict()
+            tree[first] = child
+        tree[first] = paths_to_tree([rest], tree=tree[first])
+    return tree
+
+
+def superscripts_from_component_paths(
+    component_paths: Iterable[Tuple[str, ...]],
+) -> Dict[Tuple[str, ...], str]:
+    """
+    The superscript of every distinct path of named components, keyed by path.
+
+    Names are joined with dots (``lens.bulge``), unchanged in a model with no
+    path three levels deep. A model with such paths would run into the
+    neighbouring labels on a corner-plot axis, so every name below the first
+    level that lies on one is cut short, ``("source", "pixelization",
+    "regularization")`` giving
+    ``source.pix.reg``: the first level is the plane or galaxy that distinguishes
+    the components, and the rest only needs to stay recognisable.
+
+    A name is cut the same way in every path it appears in, so the priors of a
+    basis and those of the profiles inside it read ``lens.bul`` and ``lens.bul.0``,
+    not ``lens.bulge`` and ``lens.bul.0``. It is cut to three characters unless
+    that would match a sibling (another name under the same parent), in which
+    case it keeps as many characters as tell them apart: ``bulge_inner`` and
+    ``bulge_outer`` become ``bulge_i`` and ``bulge_o``. Distinct paths therefore
+    always have distinct superscripts.
+    """
+    component_paths = {tuple(path) for path in component_paths if path}
+
+    # Each name below the first level that lies on a path of three or more.
+    deep = {
+        path[: i + 1]
+        for path in component_paths
+        if len(path) >= 3
+        for i in range(1, len(path))
+    }
+
+    siblings = defaultdict(set)
+    for path in component_paths:
+        for i in range(1, len(path)):
+            siblings[path[:i]].add(path[i])
+
+    short = {}
+    for parent, names in siblings.items():
+        cut = {name: 3 for name in names if parent + (name,) in deep}
+        while True:
+            labels = {
+                name: name[: cut[name]] if name in cut else name for name in names
+            }
+            clashes = defaultdict(list)
+            for name, label in labels.items():
+                clashes[label].append(name)
+            grow = [
+                name
+                for group in clashes.values()
+                if len(group) > 1
+                for name in group
+                if name in cut and cut[name] < len(name)
+            ]
+            if not grow:
+                break
+            for name in grow:
+                cut[name] += 1
+        for name, label in labels.items():
+            short[parent + (name,)] = label
+
+    return {
+        path: ".".join([path[0]] + [short[path[: i + 1]] for i in range(1, len(path))])
+        for path in component_paths
+    }
+
+
+def indices_by_top_level_component(
+    component_paths: List[Tuple[str, ...]],
+) -> Dict[str, List[int]]:
+    """
+    The indices of the parameters belonging to each top-level model component,
+    keyed by the component's name and in model order, from the component path of
+    each parameter (see ``AbstractPriorModel.component_paths``).
+
+    Parameters whose priors sit directly on the model (no named component) are
+    grouped under ``"model"``, or ``"model_root"`` when a component is itself
+    named ``model``, so the two groups (and their per-component corner plots)
+    stay apart.
+    """
+    names = {path[0] for path in component_paths if path}
+    root = "model_root" if "model" in names else "model"
+    groups = {}
+    for i, path in enumerate(component_paths):
+        groups.setdefault(path[0] if path else root, []).append(i)
+    return groups
+
+
+class AbstractPriorModel(AbstractModel):
+    """
+    Abstract model that maps a set of priors to a particular class. Must be
+    overridden by any prior model so that the model mapper recognises its prior \
+    model attributes.
+    @DynamicAttrs
+    """
+
+    def __init__(self, label=None):
+        super().__init__(label=label)
+        self._assertions = list()
+
+    @property
+    def assertions(self):
+        """The list of assertion constraints attached to this model.
+
+        Assertions are checked when creating instances; a failed assertion
+        raises FitException, causing the non-linear search to resample.
+        """
+        return self._assertions
+
+    @assertions.setter
+    def assertions(self, assertions):
+        self._assertions = assertions
+
+    def check_assertions(self, arguments: Dict[Prior, float], xp=np):
+        """
+        Check that all assertions are satisfied by the given arguments.
+
+        This is the **exception** form of the assertion check, and therefore the numpy form: it
+        applies a Python ``not`` to each assertion's value, which is illegal on a traced value.
+        The traced form is `assertions_satisfied_for_arguments`.
+
+        Parameters
+        ----------
+        arguments
+            A dictionary mapping priors to values
+        xp
+            The array module (``numpy`` or ``jax.numpy``) used to realise the values the
+            assertions compare.
+
+        Raises
+        ------
+        FitException
+            If any assertion is not satisfied
+        """
+        failed_assertions = [
+            assertion
+            for assertion in self._assertions
+            if assertion is False
+            or assertion is not True
+            and not assertion.instance_for_arguments(
+                arguments,
+                xp=xp,
+            )
+        ]
+        number_of_failed_assertions = len(failed_assertions)
+        if number_of_failed_assertions > 0:
+            name_string = "\n".join(
+                [
+                    assertion.name
+                    for assertion in failed_assertions
+                    if hasattr(assertion, "name") and assertion.name is not None
+                ]
+            )
+            raise exc.FitException(
+                f"{number_of_failed_assertions} assertions failed!\n{name_string}"
+            )
+
+    def gathered_assertions(self) -> list:
+        """
+        Every assertion attached anywhere in this model's tree.
+
+        Assertions are attached to whichever model object the user happened to hold -- a child
+        `Model` as often as the top-level `Collection` -- and on the numpy path that does not
+        matter, because each model checks its own assertions as its own instance is built. The
+        traced path has no such recursion to hook into: it is handed one model and one parameter
+        vector, so it must find the assertions itself or silently enforce fewer of them than
+        numpy does.
+
+        Returns
+        -------
+        This model's own assertions first, then those of every `AbstractPriorModel` reachable
+        beneath it in walk order, then those attached to the assertions' own operands. A component
+        reachable by more than one path (a shared component) contributes its assertions once.
+        """
+        assertions = list(self._assertions)
+
+        # `_assertions` itself is never walked into by the tree walk below:
+        # `path_instances_of_class` skips attributes whose name starts with an underscore, so the
+        # assertion objects -- which are themselves `AbstractPriorModel`s -- are not mistaken for
+        # components of the model. Their operands are picked up separately, afterwards.
+        seen = {id(self)}
+
+        for _, model in self.attribute_tuples_with_type(
+            AbstractPriorModel,
+            ignore_children=False,
+        ):
+            if id(model) in seen:
+                continue
+            seen.add(id(model))
+            assertions.extend(getattr(model, "_assertions", []))
+
+        # An assertion's operand can itself be a model carrying assertions -- `latent = p + 1` is
+        # a `CompoundPrior`, and `latent.add_assertion(...)` attaches to it. On numpy those fire
+        # when the operand is realised, so they are part of the model's contract; the tree walk
+        # cannot see them, because the operand hangs off the assertion rather than off the model.
+        collected = {id(assertion) for assertion in assertions}
+        visited = set()
+        queue = list(assertions)
+
+        while queue:
+            node = queue.pop(0)
+
+            if id(node) in visited:
+                continue
+            visited.add(id(node))
+
+            if isinstance(node, AbstractPriorModel) and id(node) not in seen:
+                for assertion in node._assertions:
+                    if id(assertion) not in collected:
+                        collected.add(id(assertion))
+                        assertions.append(assertion)
+                        queue.append(assertion)
+
+            for attribute in ("_left", "_right", "assertion_1", "assertion_2"):
+                operand = getattr(node, attribute, None)
+                if operand is not None:
+                    queue.append(operand)
+
+        return assertions
+
+    def assertions_satisfied_for_arguments(
+        self,
+        arguments: Dict[Prior, float],
+        xp=np,
+        assertions=None,
+    ):
+        """
+        Whether every assertion attached to this model is satisfied, returned as a **value**
+        rather than signalled by an exception.
+
+        This is the traced sibling of `check_assertions`. It never applies a Python ``not``,
+        ``and`` or ``if`` to an assertion's value, so under ``jax.jit`` / ``jax.vmap`` -- where
+        each value is a tracer -- it returns a traced boolean instead of raising
+        ``TracerBoolConversionError``. `Fitness` applies that boolean with ``xp.where``,
+        mapping a violating model to the resample figure of merit.
+
+        Parameters
+        ----------
+        arguments
+            A dictionary mapping priors to physical values.
+        xp
+            The array module (``numpy`` or ``jax.numpy``) used to realise and combine the
+            assertion values.
+        assertions
+            The assertions to evaluate. Defaults to `gathered_assertions`, i.e. every assertion
+            in the model tree; a caller that gathers them once (as `Fitness` does, in its
+            constructor) passes them in so the walk is not repeated per likelihood evaluation.
+
+        Returns
+        -------
+        A boolean array which is ``True`` when every assertion holds. A model with no assertions
+        returns ``True``.
+        """
+        if assertions is None:
+            assertions = self.gathered_assertions()
+
+        satisfied = xp.asarray(True)
+
+        for assertion in assertions:
+            if assertion is True:
+                continue
+            if assertion is False:
+                value = xp.asarray(False)
+            else:
+                value = assertion.instance_for_arguments(
+                    arguments,
+                    ignore_assertions=True,
+                    xp=xp,
+                )
+            satisfied = xp.logical_and(satisfied, value)
+
+        return satisfied
+
+    def assertions_satisfied_from_vector(self, vector, xp=np, assertions=None):
+        """
+        Whether every assertion attached to this model is satisfied by a physical parameter
+        vector, returned as a **value** rather than signalled by an exception.
+
+        The vector is mapped to arguments exactly as `instance_from_vector` maps it, so the
+        assertions are evaluated against the same physical values the instance would be built
+        from.
+
+        Parameters
+        ----------
+        vector: [float]
+            A vector of physical parameter values, ordered by prior id.
+        xp
+            The array module (``numpy`` or ``jax.numpy``) used to realise and combine the
+            assertion values.
+        assertions
+            The assertions to evaluate. Defaults to `gathered_assertions` (see
+            `assertions_satisfied_for_arguments`).
+
+        Returns
+        -------
+        A boolean array which is ``True`` when every assertion holds. A model with no assertions
+        returns ``True``.
+        """
+        if len(vector) != self.prior_count:
+            raise AssertionError(
+                f"Vector length {len(vector)} != prior count {self.prior_count}"
+            )
+
+        arguments = dict(
+            map(
+                lambda prior_tuple, physical_unit: (prior_tuple.prior, physical_unit),
+                self.prior_tuples_ordered_by_id,
+                vector,
+            )
+        )
+
+        return self.assertions_satisfied_for_arguments(
+            arguments,
+            xp=xp,
+            assertions=assertions,
+        )
+
+    def set_item_at_path(self, path: Tuple[str, ...], value):
+        """
+        Set an item at a path in the model.
+
+        Parameters
+        ----------
+        path
+            A tuple of strings representing a path to an attribute
+        value
+            The value to be set at the path
+        """
+        obj = self
+        for attribute in path[:-1]:
+            obj = getattr(obj, attribute)
+
+        setattr(obj, path[-1], value)
+
+    def cast(
+        self,
+        value_dict: Dict["AbstractModel", dict],
+        new_class: type,
+    ) -> "AbstractPriorModel":
+        """
+        Cast models to a new type. Allows selected models in within this
+        model to be given a new type and new arguments.
+
+        Parameters
+        ----------
+        value_dict
+            A dictionary mapping models to dictionaries of argument overrides
+        new_class
+            A new class to which specified models should be converted
+
+        Returns
+        -------
+        A model where specified child models have been updated to a new class
+        and new arguments
+        """
+        from .prior_model import Model
+
+        updated = self
+
+        for path, prior_model in self.path_instance_tuples_for_class(Model):
+            try:
+                model_value_dict = value_dict[prior_model]
+                argument_dict = {
+                    **dict(prior_model.direct_prior_tuples),
+                    **dict(prior_model.direct_tuples_with_type(float)),
+                    **model_value_dict,
+                }
+                updated = updated.replacing_for_path(
+                    path, Model(new_class, **argument_dict)
+                )
+
+            except KeyError:
+                pass
+
+        return updated
+
+    def without_attributes(self) -> "AbstractModel":
+        """
+        Returns a copy of this object with all priors, prior models and
+        constants removed.
+        """
+        without_attributes = copy.copy(self)
+        for key in self.__dict__:
+            if not (key.startswith("_") or key in ("cls", "id")):
+                delattr(without_attributes, key)
+        return without_attributes
+
+    def _with_paths(self, tree: dict) -> "AbstractModel":
+        """
+        Recursively generate a copy of this model retaining only objects
+        specified by the tree.
+
+        Parameters
+        ----------
+        tree
+            A tree formed of dictionaries describing which components of the
+            model should be retained.
+
+        Returns
+        -------
+        A copy of this model with a subset of attributes
+        """
+        if len(tree) == 0:
+            return self
+
+        with_paths = self.without_attributes()
+        for name, subtree in tree.items():
+            # noinspection PyProtectedMember
+            new_value = getattr(self, name)
+            if isinstance(
+                new_value,
+                (
+                    AbstractPriorModel,
+                    TuplePrior,
+                ),
+            ):
+                new_value = new_value._with_paths(subtree)
+            setattr(with_paths, name, new_value)
+        return with_paths
+
+    @split_paths
+    def with_paths(self, paths: List[Tuple[str, ...]]) -> "AbstractModel":
+        """
+        Recursively generate a copy of this model retaining only objects
+        specified by the list of paths.
+
+        Parameters
+        ----------
+        paths
+            A list of tuples of strings each of which points to a retained attribute.
+            All children of a given path are retained.
+
+        Returns
+        -------
+        A copy of this model with a subset of attributes
+        """
+        return self._with_paths(paths_to_tree(paths))
+
+    def _without_paths(self, tree: dict) -> "AbstractModel":
+        """
+        Recursively generate a copy of this model removing objects
+        specified by the tree.
+
+        Parameters
+        ----------
+        tree
+            A tree formed of dictionaries describing which components of the
+            model should be removed.
+
+        Returns
+        -------
+        A copy of this model with a subset of attributes
+        """
+        without_paths = copy.deepcopy(self)
+        for name, subtree in tree.items():
+            # noinspection PyProtectedMember
+            if len(subtree) == 0:
+                delattr(without_paths, name)
+            else:
+                new_value = getattr(without_paths, name)
+                if isinstance(
+                    new_value,
+                    (
+                        AbstractPriorModel,
+                        TuplePrior,
+                    ),
+                ):
+                    new_value = new_value._without_paths(subtree)
+                setattr(without_paths, name, new_value)
+        return without_paths
+
+    @split_paths
+    def without_paths(self, paths: List[Tuple[str, ...]]) -> "AbstractModel":
+        """
+        Recursively generate a copy of this model retaining only objects
+        not specified by the list of paths.
+
+        Parameters
+        ----------
+        paths
+            A list of tuples of strings each of which points to removed attribute.
+            All children of a given path are removed.
+
+        Returns
+        -------
+        A copy of this model with a subset of attributes
+        """
+        return self._without_paths(paths_to_tree(paths))
+
+    def index(self, path: Tuple[str, ...]) -> int:
+        """
+        Retrieve the index of a given path in the model
+        """
+        return self.paths.index(path)
+
+    @property
+    def mean_field(self) -> MeanField:
+        """
+        Implements the same interface as the graphical code
+        """
+        return MeanField(self)
+
+    @classmethod
+    def from_json(cls, file: str):
+        """
+        Loads the model from a .json file, which was written using the model's dictionary (`dict`) attribute as
+        follows:
+
+        import json
+
+        with open(filename, "w+") as f:
+            json.dump(model.dict, f, indent=4)
+
+        Parameters
+        ----------
+        file
+            The path and name of the .json file the model is loaded from.
+
+        Returns
+        -------
+        object
+            The model, which may be a `Collection` of `Model` objects or a single `Model`.
+        """
+
+        with open(file) as json_file:
+            model_dict = json.load(json_file)
+
+        return cls.from_dict(d=model_dict)
+
+    def add_assertion(self, assertion, name=""):
+        """
+        Assert that some relationship holds between physical values associated with
+        priors at the point an instance is created.
+
+        The assertion is enforced differently on the two array backends, but with the same
+        outcome -- the non-linear search never selects a violating model:
+
+        - **numpy**: `check_assertions` raises a ``FitException`` when the assertion fails, which
+          :class:`~autofit.non_linear.fitness.Fitness` catches and turns into the resample figure
+          of merit.
+        - **JAX**: raising is impossible inside a trace, so the assertion is instead evaluated as
+          a traced boolean by `assertions_satisfied_from_vector` and applied by
+          :class:`~autofit.non_linear.fitness.Fitness` with ``xp.where``, mapping a violating
+          model to the resample figure of merit. This is a **value-only** penalty, carrying the
+          same gradient caveat as the NaN guards documented on `Fitness.call`.
+
+        Both paths enforce assertions attached anywhere in the model tree: numpy because each
+        model checks its own as its instance is built, JAX because `gathered_assertions` collects
+        them from the whole tree.
+
+        Assertions are part of the model's identifier
+        (:class:`~autofit.mapper.identifier.Identifier`), so a model with an assertion is written
+        to a different output directory than the same model without it and does not resume its
+        result. The identifier records the assertion's type and the paths of its operands, not the
+        ``name``.
+
+        Parameters
+        ----------
+        assertion
+            An assertion that one prior must be greater than another.
+        name
+            A name describing the assertion that is logged when it is violated.
+        """
+        if assertion is True:
+            return
+        try:
+            assertion.name = name
+        except AttributeError:
+            pass
+        self._assertions.append(assertion)
+
+    @property
+    def name(self):
+        """The class name of this prior model (e.g. ``"Model"`` or ``"Collection"``)."""
+        return self.__class__.__name__
+
+    # noinspection PyUnusedLocal
+    @staticmethod
+    def from_object(t, *args, **kwargs):
+        """Convert an arbitrary object into an appropriate prior model representation.
+
+        - Classes become ``Model`` instances.
+        - Lists and dicts become ``Collection`` instances.
+        - Floats become ``Constant`` instances.
+        - Existing prior models and other objects are returned as-is.
+
+        Parameters
+        ----------
+        t
+            A class, list, dict, float, or existing prior model.
+
+        Returns
+        -------
+        An AbstractPriorModel, Constant, or the original object.
+        """
+        if inspect.isclass(t):
+            from .prior_model import Model
+
+            obj = object.__new__(Model)
+            obj.__init__(t, **kwargs)
+        elif isinstance(t, list) or isinstance(t, dict):
+            from autofit.mapper.prior_model import collection
+
+            obj = object.__new__(collection.Collection)
+            obj.__init__(t)
+        else:
+            obj = t
+
+        if isinstance(obj, float):
+            return Constant(obj)
+        return obj
+
+    def take_attributes(self, source: object):
+        """
+        Take all attributes with a matching path from the source prior model.
+
+        For example, if this prior model has a prior "one" and a matching prior
+        is found associated with the source model then that attribute is attached
+        to this model.
+
+        If no matching attribute is found nothing happens.
+
+        Parameters
+        ----------
+        source
+            An instance or prior model from a previous search from which attributes
+            are passed to this model.
+        """
+
+        def assert_no_assertions(obj):
+            if len(getattr(obj, "_assertions", [])) > 0:
+                raise AssertionError(
+                    "take_attributes cannot be called once assertions have been added to the target"
+                )
+
+        assert_no_assertions(self)
+
+        for path, _ in sum(
+            map(self.path_instance_tuples_for_class, (Prior, float, TuplePrior)), []
+        ):
+            try:
+                item = copy.copy(source)
+                if isinstance(item, dict):
+                    from autofit.mapper.prior_model.collection import Collection
+
+                    item = Collection(item)
+                for attribute in path:
+                    if isinstance(attribute, int):
+                        item = item[attribute]
+                    else:
+                        item = copy.copy(getattr(item, attribute))
+
+                target = self
+                for attribute in path[:-1]:
+                    if isinstance(attribute, int):
+                        target = target[attribute]
+                    else:
+                        target = getattr(target, attribute)
+                    assert_no_assertions(target)
+
+                attribute = path[-1]
+                if isinstance(attribute, int):
+                    target[attribute] = item
+                else:
+                    setattr(target, path[-1], item)
+            except AttributeError:
+                pass
+
+    def instance_from_unit_vector(self, unit_vector, ignore_assertions: bool = False):
+        """
+        Returns a ModelInstance, which has an attribute and class instance corresponding
+        to every `Model` attributed to this instance.
+        This method takes as input a unit vector of parameter values, converting each to
+        physical values via their priors.
+        Parameters
+        ----------
+        unit_vector: [float]
+            A unit hypercube vector that is mapped to an instance of physical values via the priors.
+        Returns
+        -------
+        model_instance : autofit.mapper.model.ModelInstance
+            An object containing reconstructed model_mapper instances
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored.
+
+        Raises
+        ------
+        exc.FitException
+            If any assertion attached to this object returns False.
+        """
+        exception_tuples = self.attribute_tuples_with_type(ConfigException)
+        if len(exception_tuples) > 0:
+            for name, exception in exception_tuples:
+                logger.exception(f"Could not load {name} because:\n\n{exception}")
+            names = [name for name, _ in exception_tuples]
+            raise ConfigException(
+                f"No configuration was found for some attributes ({', '.join(names)})"
+            )
+
+        if self.prior_count != len(unit_vector):
+            raise AssertionError(
+                f"prior_count ({self.prior_count}) != len(unit_vector) {len(unit_vector)}"
+            )
+
+        arguments = dict(
+            map(
+                lambda prior_tuple, unit: (
+                    prior_tuple.prior,
+                    prior_tuple.prior.value_for(
+                        unit,
+                    ),
+                ),
+                self.prior_tuples_ordered_by_id,
+                unit_vector,
+            )
+        )
+
+        return self.instance_for_arguments(
+            arguments, ignore_assertions=ignore_assertions
+        )
+
+    @property
+    @cast_collection(PriorNameValue)
+    @frozen_cache
+    def unique_prior_tuples(self):
+        """
+        Returns
+        -------
+        prior_tuple_dict: [(Prior, PriorTuple)]
+            The set of all priors associated with this mapper
+        """
+        return list(
+            {
+                prior_tuple[1]: prior_tuple
+                for prior_tuple in self.attribute_tuples_with_type(Prior)
+            }.values()
+        )
+
+    @property
+    @cast_collection(PriorNameValue)
+    @frozen_cache
+    def prior_tuples_ordered_by_id(self):
+        """
+        Returns
+        -------
+        priors: [Prior]
+            An ordered list of unique priors associated with this mapper
+        """
+        return sorted(
+            list(self.unique_prior_tuples), key=lambda prior_tuple: prior_tuple.prior.id
+        )
+
+    @property
+    def priors_ordered_by_id(self):
+        """Unique priors sorted by their id, defining the canonical parameter ordering."""
+        return [prior for _, prior in self.prior_tuples_ordered_by_id]
+
+    def vector_from_unit_vector(self, unit_vector, xp=np):
+        """
+        Parameters
+        ----------
+        unit_vector: [float]
+            A unit hypercube vector
+        xp
+            Array-module to dispatch on (``numpy`` or ``jax.numpy``). Default ``numpy``.
+            When ``xp is numpy`` the return type stays a plain ``list`` to preserve
+            the existing contract used by Nautilus / Dynesty / Emcee / Zeus. When
+            ``xp is jax.numpy`` an ``xp.stack`` 1-D array is returned so the call
+            is JIT-traceable end-to-end.
+
+        Returns
+        -------
+        values: [float]
+            A vector with values output by priors
+        """
+        if xp is np:
+            return list(
+                map(
+                    lambda prior_tuple, unit: prior_tuple.prior.value_for(
+                        unit,
+                    ),
+                    self.prior_tuples_ordered_by_id,
+                    unit_vector,
+                )
+            )
+        return xp.stack(
+            [
+                prior_tuple.prior.value_for(unit, xp=xp)
+                for prior_tuple, unit in zip(
+                    self.prior_tuples_ordered_by_id, unit_vector
+                )
+            ]
+        )
+
+    def random_unit_vector_within_limits(
+        self, lower_limit: float = 0.0, upper_limit: float = 1.0
+    ) -> List[float]:
+        """
+        Generate a random vector of unit values by drawing uniform random values between 0 and 1.
+
+        Returns
+        -------
+        unit_values
+            A list of unit values constructed by taking random values from each prior.
+        """
+        return [
+            random.uniform(
+                lower_limit,
+                upper_limit,
+            )
+            for prior in self.priors_ordered_by_id
+        ]
+
+    def random_vector_from_priors_within_limits(
+        self, lower_limit: float = 0.0, upper_limit: float = 1.0
+    ) -> List[float]:
+        """
+        Returns a random vector of physical values by drawing uniform random values between lower and upper limits
+        defined as unit values, using the model priors to map them from unit values to physical values.
+
+        This function guesses infinite unit vectors, until one is randomly sampled whose physical parameters are within
+        the model's phyiscal limits.
+
+        This is used for MCMC initialization, whereby the starting points of a walker(s) are confined to a restricted
+        range of prior space. In particular, it is used for generate the "ball" initialization of Emcee.
+
+        Parameters
+        ----------
+        lower_limit
+            The lower limit as a unit value within which unit values (which are converted to physical values via the
+            priors) are generated.
+        upper_limit
+            The upper limit as a unit value within which unit values (which are converted to physical values via the
+            priors) are generated.
+
+        Returns
+        -------
+        physical_values
+            A list of physical values constructed by taking the mean possible value from
+            each prior.
+        """
+        vector = []
+
+        for prior in self.priors_ordered_by_id:
+            vector.append(
+                prior.random(
+                    lower_limit=lower_limit,
+                    upper_limit=upper_limit,
+                )
+            )
+
+        return vector
+
+    def random_instance_from_priors_within_limits(
+        self, lower_limit: float = 0.0, upper_limit: float = 1.0
+    ):
+        """
+        Returns a random instance of physical values by drawing uniform random values between lower and upper limits
+        defined as unit values, using the model priors to map them from unit values to physical values.
+
+        This function guesses infinite unit vectors, until one is randomly sampled whose physical parameters are within
+        the model's phyiscal limits. The final unit vector is then mapped to an instance.
+
+        Parameters
+        ----------
+        lower_limit
+            The lower limit as a unit value within which unit values (which are converted to physical values via the
+            priors) are generated.
+        upper_limit
+            The upper limit as a unit value within which unit values (which are converted to physical values via the
+            priors) are generated.
+
+        Returns
+        -------
+        physical_values
+            A list of physical values constructed by taking the mean possible value from
+            each prior.
+        """
+
+        vector = self.random_vector_from_priors_within_limits(
+            lower_limit=lower_limit, upper_limit=upper_limit
+        )
+
+        return self.instance_from_vector(vector=vector)
+
+    @property
+    def random_vector_from_priors(self):
+        """Generate a random vector of physical values by drawing uniform random values between 0 and 1 and using
+        the model priors to map them from unit values to physical values.
+        Returns
+        -------
+        physical_values: [float]
+            A list of physical values constructed by taking random values from each prior.
+        """
+        return self.random_vector_from_priors_within_limits(
+            lower_limit=0.0, upper_limit=1.0
+        )
+
+    @property
+    def physical_values_from_prior_medians(self):
+        """
+        Returns
+        -------
+        physical_values: [float]
+            A list of physical values constructed by taking the mean possible value from
+            each prior.
+        """
+        return self.vector_from_unit_vector([0.5] * len(self.unique_prior_tuples))
+
+    def instance_from_vector(self, vector, ignore_assertions: bool = False, xp=np):
+        """
+        Returns a ModelInstance, which has an attribute and class instance corresponding
+        to every `Model` attributed to this instance.
+        This method takes as input a physical vector of parameter values, thus omitting
+        the use of priors.
+        Parameters
+        ----------
+        vector: [float]
+            A vector of physical parameter values that is mapped to an instance.
+        ignore_assertions
+            If True, any assertions attached to this object are ignored and not checked.
+
+        Returns
+        -------
+        model_instance : autofit.mapper.model.ModelInstance
+            An object containing reconstructed model_mapper instances
+        """
+        priors = self._vector_priors()
+        if len(vector) != len(priors):
+            raise AssertionError(
+                f"Vector length {len(vector)} != prior count {len(priors)}"
+            )
+        arguments = dict(zip(priors, vector))
+
+        return self.instance_for_arguments(
+            arguments, ignore_assertions=ignore_assertions, xp=xp
+        )
+
+    @frozen_cache
+    def _vector_priors(self) -> tuple:
+        """
+        The unique priors of this model in the canonical (id-sorted) parameter
+        order that ``instance_from_vector`` pairs with the entries of a vector.
+
+        Cached while the model is frozen (a search freezes its model for the whole
+        fit), so the per-call rebuild of the ``prior_tuples_ordered_by_id``
+        name/value wrappers is skipped on the likelihood hot path. Unfrozen models
+        recompute it on every call.
+        """
+        return tuple(
+            prior_tuple.prior for prior_tuple in self.prior_tuples_ordered_by_id
+        )
+
+    def constrained_model_tuples(self):
+        """
+        Every component in this model whose class declares a model constraint.
+
+        Returns
+        -------
+        [(path, model)]
+            Path/model pairs, including this model itself when it declares one.
+        """
+        from autofit.mapper.prior_model.prior_model import Model
+
+        tuples = [
+            (path, model)
+            for path, model in self.attribute_tuples_with_type(
+                Model, ignore_children=False
+            )
+            if model.has_model_constraint
+        ]
+        if isinstance(self, Model) and self.has_model_constraint:
+            tuples = [(("",), self)] + tuples
+        return tuples
+
+    def ball_constraint_index_pairs(self):
+        """
+        The ``(index_0, index_1, radius)`` triples describing every pair of this
+        model's free parameters confined to a disk by a class-declared
+        ``__model_ball_constraints__``.
+
+        The indices are into the physical parameter vector — the same ordering
+        ``instance_from_vector`` and
+        :meth:`~autofit.non_linear.clipper.AbstractClipper.project` use — so a
+        consumer needs nothing but the vector and this list to project onto the
+        ball. See :mod:`autofit.mapper.prior_model.constraint` for why the
+        declaration is structural rather than a second violation measure.
+
+        This is **static geometry**: it depends only on how the model is
+        composed, never on the parameter values, so it is resolved once and
+        cached (following :attr:`parameterization`'s convention of an
+        underscore-prefixed ``__dict__`` key, which the pytree-flattening and
+        ``ModelInstance`` construction paths both skip). A search resolves it
+        outside its step loop and traces only the arithmetic.
+
+        A declared ball is **skipped**, rather than raising, in two cases, both
+        of which are ordinary model composition rather than a mistake:
+
+        - the declaring component has no such attribute at all, because every
+          coordinate was fixed to an instance (a spherical profile pins
+          ``ell_comps`` to ``(0.0, 0.0)``, so there is nothing to project);
+        - fewer than two of the coordinates are free priors, because the user
+          fixed one of them. A ball with a coordinate held constant is an
+          interval on the remainder, which is a different projection and not one
+          this pair-shaped list can express.
+
+        Returns
+        -------
+        A tuple of ``(index_0, index_1, radius)`` triples, sorted and
+        de-duplicated (two components sharing the same linked priors describe one
+        ball, not two). Empty when nothing in the model declares one.
+        """
+        cached = self.__dict__.get("_ball_constraint_index_pairs_cache")
+        if cached is not None:
+            return cached
+
+        from autofit.mapper.prior.tuple_prior import TuplePrior
+        from autofit.mapper.prior_model.constraint import ball_constraints_for
+        from autofit.mapper.prior_model.prior_model import Model
+
+        models = [
+            model
+            for _, model in self.attribute_tuples_with_type(
+                Model, ignore_children=False
+            )
+            if model.has_ball_constraints
+        ]
+        if isinstance(self, Model) and self.has_ball_constraints:
+            models = [self] + models
+
+        pairs = []
+
+        if models:
+            # Keyed on object identity, matching how the model holds its priors:
+            # `priors_ordered_by_id` and a component's `prior_tuples` return the
+            # same objects, so identity is exact and needs no equality semantics
+            # from `Prior`.
+            index_of = {
+                id(prior): index
+                for index, prior in enumerate(self.priors_ordered_by_id)
+            }
+
+            for model in models:
+                for path, radius in ball_constraints_for(model.cls):
+                    obj = model
+                    for name in path:
+                        obj = getattr(obj, name, None)
+                        if obj is None:
+                            break
+
+                    if not isinstance(obj, TuplePrior):
+                        logger.debug(
+                            f"{model.cls.__name__} declares a ball constraint on "
+                            f"{path}, which is not a TuplePrior on this model "
+                            f"(every coordinate is fixed); it is not projected."
+                        )
+                        continue
+
+                    priors = [
+                        prior
+                        for _, prior in sorted(obj.prior_tuples, key=lambda t: t[0])
+                    ]
+
+                    if len(priors) != 2:
+                        logger.debug(
+                            f"{model.cls.__name__} declares a ball constraint on "
+                            f"{path}, which has {len(priors)} free priors rather "
+                            f"than 2 on this model; it is not projected."
+                        )
+                        continue
+
+                    indices = [index_of.get(id(prior)) for prior in priors]
+
+                    if None in indices:
+                        logger.debug(
+                            f"{model.cls.__name__} declares a ball constraint on "
+                            f"{path}, whose priors are not in this model's own "
+                            f"prior vector; it is not projected."
+                        )
+                        continue
+
+                    pairs.append((indices[0], indices[1], radius))
+
+        pairs = tuple(sorted(set(pairs)))
+        self.__dict__["_ball_constraint_index_pairs_cache"] = pairs
+        return pairs
+
+    def model_constraint_from_vector(self, vector, xp=np):
+        """
+        The largest constraint violation any component reports for this vector.
+
+        Zero means every declared constraint is satisfied. The value is traced,
+        so this composes with ``jit``, ``vmap`` and ``grad`` — which is the whole
+        point, since the exception-based path (:meth:`add_assertion`,
+        ``validate_ell_comps``) cannot run inside a trace at all. See
+        :mod:`autofit.mapper.prior_model.constraint`.
+
+        Components are instantiated individually rather than by building the
+        whole model, so a model declaring no constraints costs nothing.
+
+        Note that on the NumPy path a component's own ``__init__`` validation may
+        raise before its constraint is ever evaluated — that is the existing
+        concrete-scalar guard behaviour and is deliberately not suppressed here.
+        This method exists for the traced path, where those guards return early.
+
+        Parameters
+        ----------
+        vector
+            A physical parameter vector, as passed to
+            :meth:`instance_from_vector`.
+        xp
+            The array module, ``numpy`` or ``jax.numpy``.
+
+        Returns
+        -------
+        The maximum violation measure across all constrained components.
+        """
+        from autofit.mapper.prior_model.constraint import violation_for_instance
+
+        constrained = self.constrained_model_tuples()
+        if not constrained:
+            return xp.asarray(0.0)
+
+        arguments = dict(
+            map(
+                lambda prior_tuple, physical_unit: (prior_tuple.prior, physical_unit),
+                self.prior_tuples_ordered_by_id,
+                vector,
+            )
+        )
+
+        violation = xp.asarray(0.0)
+        for _, model in constrained:
+            instance = model.instance_for_arguments(
+                arguments,
+                ignore_assertions=True,
+                xp=xp,
+            )
+            violation = xp.maximum(violation, violation_for_instance(instance, xp=xp))
+        return violation
+
+    def has(self, cls: Union[Type, Tuple[Type, ...]]) -> bool:
+        """
+        Parameters
+        ----------
+        cls
+            The type to check for
+
+        Returns
+        -------
+        True iff this model contains an instance or model with the given
+        type recursively. Includes models which have zero priors.
+        """
+        return self.has_instance(cls) or self.has_model(
+            cls, include_zero_dimension=True
+        )
+
+    def has_instance(self, cls) -> bool:
+        """
+        True iff this model contains an instance of type
+        cls, recursively.
+        """
+        return len(self.attribute_tuples_with_type(cls)) > 0
+
+    def has_model(self, cls, include_zero_dimension=False) -> bool:
+        """
+        True iff this model contains a Model of type
+        cls, recursively.
+        """
+        return (
+            len(
+                self.model_tuples_with_type(
+                    cls,
+                    include_zero_dimension=include_zero_dimension,
+                )
+            )
+            > 0
+        )
+
+    def is_only_model(self, cls) -> bool:
+        """
+        True iff this model contains at least one Model
+        of type cls and contains no PriorModels that are not
+        of type cls, recursively.
+        """
+        from .prior_model import Model
+
+        cls_models = self.model_tuples_with_type(cls)
+        other_models = [
+            value
+            for _, value in self.attribute_tuples_with_type(Model)
+            if value.prior_count > 0
+        ]
+        return len(cls_models) > 0 and len(cls_models) == len(other_models)
+
+    def replacing(self, arguments):
+        """Return a new model with some priors replaced.
+
+        This is a convenience alias for ``mapper_from_partial_prior_arguments``.
+        Priors not present in the arguments dict are kept unchanged.
+
+        Parameters
+        ----------
+        arguments : dict
+            A dictionary mapping existing Prior objects to new priors or fixed values.
+        """
+        return self.mapper_from_partial_prior_arguments(arguments)
+
+    @classmethod
+    def product(cls, models: Iterable["AbstractPriorModel"]) -> "AbstractPriorModel":
+        """
+        Combine multiple models with the same structure by replacing priors with
+        priors that contain a message which is the product of the messages of the
+        priors with the same path in each model.
+
+        Parameters
+        ----------
+        models
+            A list of models to be combined
+
+        Returns
+        -------
+        A model where each prior has a message which is the product of the messages
+        associated with that prior across the models.
+        """
+        first, *rest = models
+
+        arguments = dict()
+
+        for path, prior in first.path_priors_tuples:
+            for other in rest:
+                prior = prior.with_message(
+                    prior.message * other.object_for_path(path).message
+                )
+            arguments[prior] = prior
+        return first.mapper_from_prior_arguments(arguments)
+
+    def mapper_from_partial_prior_arguments(self, arguments):
+        """
+        Returns a new model mapper from a dictionary mapping existing priors to
+        new priors, keeping existing priors where no mapping is provided.
+        Parameters
+        ----------
+        arguments: {Prior: Prior}
+            A dictionary mapping priors to priors
+        Returns
+        -------
+        model_mapper: ModelMapper
+            A new model mapper with updated priors.
+        """
+        original_prior_dict = {prior: prior for prior in self.priors}
+        return self.mapper_from_prior_arguments({**original_prior_dict, **arguments})
+
+    def mapper_from_prior_arguments(self, arguments):
+        """
+        Returns a new model mapper from a dictionary mapping existing priors to
+        new priors.
+        Parameters
+        ----------
+        arguments: {Prior: Prior}
+            A dictionary mapping priors to priors
+        Returns
+        -------
+        model_mapper: ModelMapper
+            A new model mapper with updated priors.
+        """
+        logger.debug(f"Creating a new mapper from arguments")
+
+        return self.gaussian_prior_model_for_arguments(arguments)
+
+    def gaussian_prior_model_for_arguments(self, arguments):
+        raise NotImplementedError()
+
+    def mapper_via_defaults_from(self):
+        """
+        The widths of the new priors are taken from the
+        width_config. The new gaussian priors must be provided in the same order as
+        the priors associated with model.
+        If a is not None then all priors are created with an absolute width of a.
+        If r is not None then all priors are created with a relative width of r.
+        Parameters
+        ----------
+        means
+            The median PDF value of every Gaussian, which centres each `GaussianPrior`.
+        r
+            The relative width to be assigned to gaussian priors
+        a
+            print(tuples[i][1], width)
+            The absolute width to be assigned to gaussian priors
+        tuples
+            A list of tuples each containing the mean and width of a prior
+        Returns
+        -------
+        mapper: ModelMapper
+            A new model mapper with all priors replaced by gaussian priors.
+        """
+
+        prior_tuples = self.prior_tuples_ordered_by_id
+        arguments = {}
+
+        for prior_tuple in prior_tuples:
+
+            prior = prior_tuple.prior
+
+            arguments[prior] = prior
+
+        return self.mapper_from_prior_arguments(arguments)
+
+    def mapper_from_prior_means(self, means, a=None, r=None, no_limits=False):
+        """
+        The widths of the new priors are taken from the
+        width_config. The new gaussian priors must be provided in the same order as
+        the priors associated with model.
+        If a is not None then all priors are created with an absolute width of a.
+        If r is not None then all priors are created with a relative width of r.
+        Parameters
+        ----------
+        means
+            The median PDF value of every Gaussian, which centres each `GaussianPrior`.
+        r
+            The relative width to be assigned to gaussian priors
+        a
+            print(tuples[i][1], width)
+            The absolute width to be assigned to gaussian priors
+        tuples
+            A list of tuples each containing the mean and width of a prior
+        Returns
+        -------
+        mapper: ModelMapper
+            A new model mapper with all priors replaced by gaussian priors.
+        """
+
+        prior_tuples = self.prior_tuples_ordered_by_id
+        prior_class_dict = self.prior_class_dict
+        arguments = {}
+
+        for prior_tuple, mean in zip(prior_tuples, means):
+            prior = prior_tuple.prior
+            cls = prior_class_dict[prior]
+
+            name = prior_tuple.name
+            # Use the name of the collection for configuration when a prior's name
+            # is just a number (i.e. its position in a collection)
+            if name.isdigit():
+                name = self.path_for_prior(prior_tuple.prior)[-2]
+
+            width_modifier = (
+                prior.width_modifier
+                or WidthModifier.for_class_and_attribute_name(cls, name)
+            )
+
+            if a is not None and r is not None:
+                raise exc.PriorException(
+                    "Width of new priors cannot be both relative and absolute."
+                )
+            if a is not None:
+                width = a
+            elif r is not None:
+                width = r * mean
+            else:
+                width = width_modifier(mean)
+                if width <= 0:
+                    path = ".".join(map(str, self.path_for_prior(prior)))
+                    raise exc.PriorException(
+                        f"Prior passing produced a non-positive width "
+                        f"(sigma={width}) for parameter '{path}' (posterior "
+                        f"median mean={mean}). This happens when the posterior "
+                        "median is zero and the parameter's width modifier is "
+                        "relative with no floor. Configure an "
+                        "AbsoluteWidthModifier or set absolute_floor on the "
+                        "RelativeWidthModifier for this parameter in the "
+                        "priors config. (Explicit a=/r= widths are exempt from "
+                        "this check and keep their historical point-mass "
+                        "semantics at mean=0.)"
+                    )
+
+            if no_limits:
+                limits = (float("-inf"), float("inf"))
+            else:
+                try:
+                    limits = Limits.for_class_and_attributes_name(cls, name)
+                except ConfigException:
+                    limits = prior.limits
+
+            sigma = width
+
+            new_prior = TruncatedGaussianPrior(mean, sigma, *limits)
+            new_prior.id = prior.id
+            new_prior.width_modifier = prior.width_modifier
+            arguments[prior] = new_prior
+
+        return self.mapper_from_prior_arguments(arguments)
+
+    def with_limits(self, limits: List[Tuple[float, float]]) -> "AbstractPriorModel":
+        """
+        Create a new instance of this model where each prior is updated to
+        lie between new limits.
+
+        Parameters
+        ----------
+        limits
+            A list of pairs of lower and upper limits, one for each prior.
+
+        Returns
+        -------
+        A new model with updated limits
+        """
+        return self.mapper_from_prior_arguments(
+            {
+                prior: prior.with_limits(*prior_limits)
+                for prior, prior_limits in zip(self.priors_ordered_by_id, limits)
+            }
+        )
+
+    def mapper_from_uniform_floats(self, floats, b):
+        """
+        The widths of the new priors are the `floats` value minus and plus the input bound `b`.
+
+        Parameters
+        ----------
+        floats
+            A list of floats each containing the centre of the new uniform priors.
+        b
+            The bound value which is subtracted from each float to calculate the `lower_limit` and `upper_limit`
+            of each uniform prior.
+
+        Returns
+        -------
+        mapper: ModelMapper
+            A new model mapper with all priors replaced by uniform priors.
+        """
+
+        prior_tuples = self.prior_tuples_ordered_by_id
+        arguments = {}
+
+        for i, prior_tuple in enumerate(prior_tuples):
+            prior = prior_tuple.prior
+
+            new_prior = UniformPrior(
+                lower_limit=floats[i] - b, upper_limit=floats[i] + b
+            )
+            new_prior.id = prior.id
+            arguments[prior] = new_prior
+
+        return self.mapper_from_prior_arguments(arguments)
+
+    def instance_from_prior_medians(self, ignore_assertions: bool = False):
+        """
+        Returns a list of physical values from the median values of the priors.
+        Returns
+        -------
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored
+            and not checked.
+        """
+        return self.instance_from_unit_vector(
+            unit_vector=[0.5] * self.prior_count, ignore_assertions=ignore_assertions
+        )
+
+    def log_prior_list_from_vector(
+        self,
+        vector: [float],
+        xp=np,
+    ):
+        """
+        Compute the log priors of every parameter in a vector, using the Prior of every parameter.
+        The log prior values are used by Emcee to map the log likelihood to the poserior of the model.
+        Parameters
+        ----------
+        vector : [float]
+            A vector of physical parameter values.
+        Returns
+        -------
+        log_prior_list : []
+            An list of the log prior value of every parameter.
+        """
+        return list(
+            map(
+                lambda prior_tuple, value: prior_tuple.prior.log_prior_from_value(
+                    value=value, xp=xp
+                ),
+                self.prior_tuples_ordered_by_id,
+                vector,
+            )
+        )
+
+    def random_instance(self, ignore_assertions: bool = False):
+        """
+        Returns a random instance of the model.
+
+        Parameters
+        ----------
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored.
+        """
+        if ignore_assertions:
+            return self.instance_from_unit_vector(
+                unit_vector=[random.random() for _ in range(self.prior_count)],
+                ignore_assertions=ignore_assertions,
+            )
+        return self.instance_from_unit_vector(
+            unit_vector=[random.random() for _ in range(self.prior_count)],
+        )
+
+    @staticmethod
+    @DynamicRecursionCache()
+    def from_instance(
+        instance,
+        model_classes: Union[type, Iterable[type]] = tuple(),
+        exclude_classes: Union[type, Iterable[type]] = tuple(),
+    ):
+        """
+        Recursively create a prior object model from an object model.
+
+        Parameters
+        ----------
+        model_classes
+            A tuple of classes that should be converted to a prior model
+        exclude_classes
+            A tuple of classes that should not be converted to a prior model
+        instance
+            A dictionary, list, class instance or model instance
+        Returns
+        -------
+        abstract_prior_model
+            A concrete child of an abstract prior model
+        """
+        from autofit.mapper.prior_model import collection
+
+        if isinstance(instance, exclude_classes):
+            return instance
+        if isinstance(instance, (Prior, AbstractPriorModel)):
+            return instance
+        elif isinstance(instance, list):
+            result = collection.Collection(
+                [
+                    AbstractPriorModel.from_instance(
+                        item,
+                        model_classes=model_classes,
+                        exclude_classes=exclude_classes,
+                    )
+                    for item in instance
+                ]
+            )
+        elif isinstance(instance, model.ModelInstance):
+            from autofit.mapper import model_mapper
+
+            result = model_mapper.ModelMapper()
+            for key, value in instance.dict.items():
+                setattr(
+                    result,
+                    key,
+                    AbstractPriorModel.from_instance(
+                        value,
+                        model_classes=model_classes,
+                        exclude_classes=exclude_classes,
+                    ),
+                )
+        elif isinstance(instance, dict):
+            result = collection.Collection(
+                {
+                    key: AbstractPriorModel.from_instance(
+                        value,
+                        model_classes=model_classes,
+                        exclude_classes=exclude_classes,
+                    )
+                    for key, value in instance.items()
+                }
+            )
+        elif isinstance(instance, (np.ndarray, types.FunctionType)):
+            return instance
+        else:
+            from .prior_model import Model
+
+            try:
+                instance_dict = instance.__dict__
+            except AttributeError:
+                return instance
+
+            # Only attributes that are constructor arguments may become model
+            # arguments. Attributes an `__init__` derives from its arguments
+            # (e.g. `self.centre = (0.0, 0.0)` in a class with no `centre`
+            # parameter) are recomputed when the instance is rebuilt; passing
+            # them back to the constructor raises a TypeError, which breaks
+            # `Model.from_dict` and therefore aggregator loading of a
+            # `model.json` written from such a model (issue #1607).
+            try:
+                spec = inspect.getfullargspec(instance.__class__)
+            except TypeError:
+                # Uninspectable constructor: keep every attribute.
+                allowed_keys = None
+            else:
+                if spec.varkw is not None:
+                    # The constructor accepts **kwargs, so any attribute may
+                    # legitimately be passed back to it.
+                    allowed_keys = None
+                else:
+                    allowed_keys = {arg for arg in spec.args if arg != "self"} | set(
+                        spec.kwonlyargs
+                    )
+
+            try:
+                result = Model(
+                    instance.__class__,
+                    **{
+                        key: AbstractPriorModel.from_instance(
+                            value,
+                            model_classes=model_classes,
+                            exclude_classes=exclude_classes,
+                        )
+                        for key, value in instance_dict.items()
+                        if key != "cls"
+                        and (allowed_keys is None or key in allowed_keys)
+                    },
+                )
+            except AttributeError:
+                return instance
+            # Preserve the instance round-trip contract for converted objects.
+            # Explicit Model(...) components remain models even when all fixed.
+            # Private provenance is excluded from identifiers and serialized args.
+            result._serialize_as_instance = True
+        if isinstance(instance, model_classes):
+            return result.as_model()
+        return result
+
+    def items(self):
+        """Return (name, value) pairs for all public, non-internal attributes.
+
+        Excludes private attributes (prefixed with ``_``), ``cls``, ``id``,
+        and any ``cached_property``-style descriptors declared on the class
+        (see ``AbstractModel._cached_property_names``).
+        """
+        excluded = type(self)._cached_property_names()
+        return [
+            (key, value)
+            for key, value in self.__dict__.items()
+            if not key.startswith("_")
+            and key not in ("cls", "id")
+            and key not in excluded
+        ]
+
+    @property
+    @cast_collection(PriorNameValue)
+    def direct_prior_tuples(self):
+        return self.direct_tuples_with_type(Prior)
+
+    @property
+    @cast_collection(InstanceNameValue)
+    def direct_instance_tuples(self):
+        """(name, value) tuples for direct float and Constant attributes."""
+        return self.direct_tuples_with_type(float) + self.direct_tuples_with_type(
+            Constant
+        )
+
+    @property
+    @cast_collection(PriorModelNameValue)
+    def prior_model_tuples(self):
+        """(name, prior_model) tuples for direct child AbstractPriorModel attributes."""
+        return self.direct_tuples_with_type(AbstractPriorModel)
+
+    @property
+    @cast_collection(PriorModelNameValue)
+    def direct_prior_model_tuples(self):
+        """(name, prior_model) tuples for immediate child prior models (non-recursive)."""
+        return self.direct_tuples_with_type(AbstractPriorModel)
+
+    @property
+    @cast_collection(PriorModelNameValue)
+    def direct_tuple_priors(self):
+        """(name, tuple_prior) tuples for direct TuplePrior attributes."""
+        return self.direct_tuples_with_type(TuplePrior)
+
+    @property
+    @cast_collection(PriorNameValue)
+    def tuple_prior_tuples(self):
+        """
+        Returns
+        -------
+        tuple_prior_tuples: [(String, TuplePrior)]
+        """
+        return self.direct_tuples_with_type(TuplePrior)
+
+    @property
+    @cast_collection(PriorNameValue)
+    def direct_prior_tuples(self):
+        """
+        Returns
+        -------
+        direct_priors: [(String, Prior)]
+        """
+        return self.direct_tuples_with_type(Prior)
+
+    @property
+    @cast_collection(DeferredNameValue)
+    def direct_deferred_tuples(self):
+        """(name, deferred_argument) tuples for direct DeferredArgument attributes."""
+        return self.direct_tuples_with_type(DeferredArgument)
+
+    @property
+    @cast_collection(PriorNameValue)
+    def prior_tuples(self):
+        """
+        Returns
+        -------
+        priors: [(String, Prior))]
+        """
+        # noinspection PyUnresolvedReferences
+        return self.attribute_tuples_with_type(Prior, ignore_children=True)
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, AbstractPriorModel)
+            and self.direct_prior_model_tuples == other.direct_prior_model_tuples
+        )
+
+    @property
+    @cast_collection(InstanceNameValue)
+    def instance_tuples(self):
+        """
+        Returns
+        -------
+        instances: [(String, instance)]
+        """
+        return self.attribute_tuples_with_type(float, ignore_class=Prior)
+
+    @property
+    def prior_class_dict(self):
+        """Map each prior to the class it will produce when instantiated.
+
+        Direct priors on this model map to ``self.cls``. Child prior models
+        contribute their own mappings recursively.
+        """
+        from autofit.mapper.prior_model.annotation import AnnotationPriorModel
+
+        d = {prior[1]: self.cls for prior in self.prior_tuples}
+        for prior_model in self.prior_model_tuples:
+            if not isinstance(prior_model[1], AnnotationPriorModel):
+                d.update(prior_model[1].prior_class_dict)
+        return d
+
+    def _instance_for_arguments(
+        self,
+        arguments: Dict[Prior, float],
+        ignore_assertions: bool = False,
+        xp=np,
+    ):
+        raise NotImplementedError()
+
+    def instance_for_arguments(
+        self,
+        arguments: Dict[Prior, float],
+        ignore_assertions: bool = False,
+        xp=np,
+    ):
+        """
+        Returns an instance of the model for a set of arguments
+
+        Parameters
+        ----------
+        arguments
+            Dictionary mapping priors to attribute analysis_path and value pairs
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored.
+
+        Returns
+        -------
+            An instance of the class
+        """
+        # A model with no assertions has nothing to check, so the config lookup
+        # (a hot-path cost on every likelihood call) is skipped for it.
+        if (
+            getattr(self, "_assertions", None)
+            and not ignore_assertions
+            and not conf.instance["general"]["test"]["exception_override"]
+        ):
+            self.check_assertions(arguments, xp=xp)
+
+        return self._instance_for_arguments(
+            arguments, ignore_assertions=ignore_assertions, xp=xp
+        )
+
+    def path_for_name(self, name: str) -> Tuple[str, ...]:
+        """
+        Find the path to a prior in the model that matches
+        a given name.
+
+        For example, name_of_model_name_of_prior could match
+        (name_of_model, name_of_prior). Unfortunately it is
+        possible for ambiguity to occur. For example, another
+        valid path could be (name, of_model, name_of_prior)
+        in which case there is no way to determine which path
+        actually matches the name.
+
+        Parameters
+        ----------
+        name
+            A name for a prior where names of models and the
+            name of the prior have been joined by underscores.
+
+        Returns
+        -------
+        A path to that model
+
+        Raises
+        ------
+        AssertionError
+            Iff no matching path is found
+        """
+
+        def _explode_path(path_):
+            return tuple(string for part in path_ for string in part.split("_"))
+
+        exploded = tuple(name.split("_"))
+        for path, _ in self.path_priors_tuples:
+            exploded_path = _explode_path(path)
+            if exploded_path == exploded:
+                return path
+
+        for path, prior_tuple in self.path_instance_tuples_for_class(TuplePrior):
+            for name, prior in prior_tuple.prior_tuples:
+                total_path = path[:-1] + (name,)
+                exploded_path = _explode_path(total_path)
+                if exploded_path == exploded:
+                    return path + (name,)
+        raise AssertionError(f"No path was found matching {name}")
+
+    def instance_from_prior_name_arguments(
+        self,
+        prior_name_arguments: Dict[str, float],
+        ignore_assertions: bool = False,
+    ):
+        """
+        Instantiate the model from the names of priors and
+        corresponding values.
+
+        Parameters
+        ----------
+        prior_name_arguments
+            The names of priors where names of models and the
+            name of the prior have been joined by underscores,
+            mapped to corresponding values.
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored.
+
+        Returns
+        -------
+        An instance of the model
+        """
+        return self.instance_from_path_arguments(
+            {
+                self.path_for_name(name): value
+                for name, value in prior_name_arguments.items()
+            },
+            ignore_assertions=ignore_assertions,
+        )
+
+    def instance_from_path_arguments(
+        self,
+        path_arguments: Dict[Tuple[str], float],
+        ignore_assertions: bool = False,
+    ):
+        """
+        Create an instance from a dictionary mapping paths to tuples
+        to corresponding values.
+
+        Parameters
+        ----------
+        path_arguments
+            A dictionary mapping paths to priors to corresponding values.
+            Note that, for linked priors, each path only needs to be
+            specified once. If multiple paths for the same prior are
+            specified then the value for the last path will be used.
+        ignore_assertions
+            If True, the assertions attached to this model (e.g. that one parameter > another parameter) are ignored.
+
+        Returns
+        -------
+        An instance of the model
+        """
+        arguments = {
+            self.object_for_path(path): value for path, value in path_arguments.items()
+        }
+        return self._instance_for_arguments(
+            arguments,
+            ignore_assertions=ignore_assertions,
+        )
+
+    @property
+    def prior_count(self) -> int:
+        """
+        How many unique priors does this model contain?
+        """
+        return len(self.unique_prior_tuples)
+
+    @property
+    def total_free_parameters(self) -> int:
+        """
+        Returns the prior count, but with a name that is more easy to interpret for users.
+        """
+        return self.prior_count
+
+    @property
+    def priors(self):
+        """A list of all Prior objects in this model (may contain duplicates for shared priors)."""
+        return [prior_tuple.prior for prior_tuple in self.prior_tuples]
+
+    @property
+    def _prior_id_map(self):
+        return {prior.id: prior for prior in self.priors}
+
+    def prior_with_id(self, prior_id):
+        """Retrieve a prior by its unique integer id.
+
+        Parameters
+        ----------
+        prior_id : int
+            The id of the prior to find.
+
+        Returns
+        -------
+        Prior
+            The prior with the matching id.
+
+        Raises
+        ------
+        KeyError
+            If no prior with the given id exists in this model.
+        """
+        return self._prior_id_map[prior_id]
+
+    def name_for_prior(self, prior):
+        """Get the underscore-separated name for a prior in this model.
+
+        Searches child prior models recursively. Returns None if the prior
+        is not found.
+
+        Parameters
+        ----------
+        prior : Prior
+            The prior to find.
+
+        Returns
+        -------
+        str or None
+            The name path joined by underscores, e.g. ``"galaxy_centre"``.
+        """
+        for prior_model_name, prior_model in self.direct_prior_model_tuples:
+            prior_name = prior_model.name_for_prior(prior)
+            if prior_name is not None:
+                return "{}_{}".format(prior_model_name, prior_name)
+        prior_tuples = self.prior_tuples
+        for name, p in prior_tuples:
+            if p == prior:
+                return name
+
+    def __hash__(self):
+        return self.id
+
+    def __add__(self, other):
+        if isinstance(other, Prior):
+            return other + self
+
+        result = copy.deepcopy(self)
+
+        for key, value in other.__dict__.items():
+            if not hasattr(result, key) or isinstance(value, Prior):
+                setattr(result, key, value)
+                continue
+            result_value = getattr(result, key)
+            if isinstance(value, AbstractPriorModel):
+                if isinstance(result_value, AbstractPriorModel):
+                    setattr(result, key, result_value + value)
+                else:
+                    setattr(result, key, value)
+
+        return result
+
+    def copy_with_fixed_priors(self, instance, excluded_classes=tuple()):
+        """
+        Recursively overwrite priors in the mapper with instance values from the
+        instance except where the containing class is the descendant of a listed class.
+        Parameters
+        ----------
+        excluded_classes
+            Classes that should be left model
+        instance
+            The best fit from the previous search
+        """
+        mapper = copy.deepcopy(self)
+        transfer_classes(instance, mapper, excluded_classes)
+        return mapper
+
+    @property
+    def path_priors_tuples(self) -> List[Tuple[Path, Prior]]:
+        """All (path, prior) tuples in this model, sorted by prior id.
+
+        Unlike ``unique_path_prior_tuples``, this includes duplicate entries
+        when a prior appears at multiple paths (shared priors).
+        """
+        path_priors_tuples = self.path_instance_tuples_for_class(Prior)
+        return sorted(path_priors_tuples, key=lambda item: item[1].id)
+
+    @property
+    def paths(self) -> List[Path]:
+        """
+        A list of paths to all the priors in the model, ordered by their
+        ids
+        """
+        return [path for path, _ in self.path_priors_tuples]
+
+    @property
+    def paths_formatted(self) -> List[Path]:
+        """
+        A list of paths to all the priors in the model, ordered by their
+        ids
+        """
+        return [path for path, _ in self.path_priors_tuples]
+
+    @property
+    def composition(self):
+        """A list of dot-separated path strings for each prior, ordered by prior id.
+
+        For example: ``["galaxy.centre", "galaxy.normalization", "galaxy.sigma"]``.
+        """
+        return [".".join(path) for path in self.paths]
+
+    def sort_priors_alphabetically(self, priors: Iterable[Prior]) -> List[Prior]:
+        """
+        Sort priors by their paths according to this model.
+
+        Parameters
+        ----------
+        priors
+            A set of priors
+
+        Returns
+        -------
+        Those priors sorted alphabetically by path.
+        """
+        return sorted(priors, key=lambda prior: self.path_for_prior(prior))
+
+    def path_for_object(self, obj) -> Optional[Path]:
+        """
+        Find a path that points at the given object.
+
+        Parameters
+        ----------
+        obj
+            An object in the model.
+
+        Returns
+        -------
+        A path, a series of attributes that point to one location of the object.
+        """
+        for path, instance in self.path_instance_tuples_for_class(
+            object, ignore_children=False
+        ):
+            if instance is obj:
+                return path
+        return None
+
+    def path_for_prior(self, prior: Prior) -> Optional[Path]:
+        """
+        Find a path that points at the given tuple.
+        Returns the first path or None if no path is found.
+        Parameters
+        ----------
+        prior
+            A prior representing what's known about some dimension of the model.
+        Returns
+        -------
+        A path, a series of attributes that point to one location of the prior.
+        """
+        for path in self.all_paths_for_prior(prior):
+            return path
+        return None
+
+    def all_paths_for_prior(self, prior: Prior) -> Generator[Path, None, None]:
+        """
+        Find all paths that points at the given tuple.
+
+        Parameters
+        ----------
+        prior
+            A prior representing what's known about some dimension of the model.
+        Yields
+        -------
+        Paths, each a series of attributes that point to one location of the prior.
+        """
+        for path, path_prior in reversed(self.path_priors_tuples):
+            if path_prior == prior:
+                yield path
+
+    @property
+    def path_float_tuples(self):
+        """(path, float) tuples for all fixed float values, excluding Prior objects."""
+        return self.path_instance_tuples_for_class(float, ignore_class=Prior)
+
+    @property
+    def unique_prior_paths(self):
+        """Paths to each unique prior (deduplicated for shared priors), ordered by id."""
+        return [item[0] for item in self.unique_path_prior_tuples]
+
+    @property
+    def unique_path_prior_tuples(self):
+        """(path, prior) tuples deduplicated by prior identity, ordered by id.
+
+        When a prior is shared across multiple paths, only one path is kept.
+        """
+        unique = {item[1]: item for item in self.path_priors_tuples}.values()
+        return sorted(unique, key=lambda item: item[1].id)
+
+    @property
+    def prior_prior_model_dict(self):
+        """
+        Returns
+        -------
+        prior_prior_model_dict: {Prior: Model}
+            A dictionary mapping priors to associated prior models. Each prior will only
+            have one prior model; if a prior is shared by two prior models then one of
+            those prior models will be in this dictionary.
+        """
+        return {
+            prior: prior_model[1]
+            for prior_model in self.prior_model_tuples + [("model", self)]
+            for _, prior in prior_model[1].prior_tuples
+        }
+
+    def log_prior_list_from(self, parameter_lists: List[List]) -> List:
+        """Compute the total log prior for each parameter vector in a list.
+
+        Parameters
+        ----------
+        parameter_lists
+            A list of physical parameter vectors.
+
+        Returns
+        -------
+        list
+            The summed log prior for each vector.
+        """
+        return [
+            sum(self.log_prior_list_from_vector(vector=vector))
+            for vector in parameter_lists
+        ]
+
+    @property
+    def info(self) -> str:
+        """
+        Use the priors that make up the model_mapper to generate information on each
+        parameter of the overall model.
+        This information is extracted from each priors *model_info* property.
+        """
+        formatter = TextFormatter(line_length=info_whitespace())
+
+        def _excluded_by_parent(path):
+            # Honor each parent's `__exclude_identifier_fields__` here so attributes
+            # that classes have already declared "not part of the model's identity"
+            # (e.g. JAX pytree tokens) do not leak into the human-readable model.info.
+            if not path:
+                return False
+            parent = self
+            for step in path[:-1]:
+                try:
+                    if isinstance(step, int):
+                        parent = parent[step]
+                    elif isinstance(parent, dict):
+                        parent = parent[step]
+                    else:
+                        parent = parent.__dict__[step]
+                except (AttributeError, KeyError, IndexError, TypeError):
+                    return False
+            excluded = getattr(type(parent), "__exclude_identifier_fields__", ())
+            return path[-1] in excluded
+
+        for t in find_groups(
+            [
+                t
+                for t in self.path_instance_tuples_for_class(
+                    (Prior, float, Constant, int, tuple, ConfigException),
+                    ignore_children=True,
+                )
+                if t[0][-1] not in ("id", "item_number")
+                and not _excluded_by_parent(t[0])
+            ],
+            limit=1,
+        ):
+            if isinstance(t[1], ConfigException):
+                t = (t[0], "Prior Missing: Enter Manually or Add to Config")
+
+            formatter.add(*t)
+
+        return "\n\n".join(
+            [
+                f"Total Free Parameters = {self.prior_count}",
+                f"{self.parameterization}",
+                formatter.text,
+            ]
+        )
+
+    @property
+    def order_no(self) -> str:
+        """
+        A string that can be used to order models by their
+        parametrisation.
+
+        Priors and constants are ordered by their paths and then
+        joined into a string which means that models with higher
+        associated values are consistently ordered later in a
+        collection.
+        """
+        values = [
+            str(float(value))
+            for _, value in sorted(
+                self.path_instance_tuples_for_class((Prior, float)), key=lambda t: t[0]
+            )
+        ]
+        return ":".join(values)
+
+    @property
+    def parameterization(self) -> str:
+        """
+        Describes the path to each of the PriorModels, its class
+        and its number of free parameters.
+
+        Cached on first access in ``self.__dict__`` under the
+        ``_`` -prefixed key ``_parameterization_cache`` so that
+        ``Collection._instance_for_arguments`` and
+        ``ModelInstance.dict`` (which iterate ``__dict__`` and filter
+        underscore-prefixed keys) do not propagate the cached string
+        onto the constructed ``ModelInstance``. A plain
+        ``functools.cached_property`` writes to ``__dict__[name]``
+        without a leading underscore, which would leak the string as
+        a non-array JAX pytree leaf and break ``jax.jit(fit_from)``.
+
+        The free parameter count of each node is computed bottom-up and
+        memoised by object identity (``_subtree_unique_priors``) rather than
+        read from ``prior_count``. Every prefix of every leaf path is
+        described here, so asking each node for its own ``prior_count``
+        re-walks the whole subtree beneath it once per leaf below it, an
+        ``O(leaves x subtree)`` blowup that dominates the call on a large
+        model; memoising makes it one walk per node.
+        """
+        cached = self.__dict__.get("_parameterization_cache")
+        if cached is not None:
+            return cached
+
+        from .prior_model import Model
+
+        formatter = TextFormatter(line_length=info_whitespace())
+
+        paths = []
+
+        memo = {}
+        prefix_cache = {}
+
+        for t in self.path_instance_tuples_for_class(
+            (
+                Prior,
+                float,
+                Constant,
+                tuple,
+            ),
+            ignore_children=True,
+        ):
+            for i in range(len(t[0])):
+                path = t[0][:i]
+                try:
+                    resolved = prefix_cache[path]
+                except KeyError:
+                    obj = self.object_for_path(path)
+                    if isinstance(obj, TuplePrior):
+                        resolved = None
+                    else:
+                        if isinstance(obj, AbstractPriorModel):
+                            n = len(_subtree_unique_priors(obj, memo))
+                        else:
+                            n = 0
+                        if isinstance(obj, Model):
+                            name = obj.cls.__name__
+                        else:
+                            name = type(obj).__name__
+                        resolved = (name, n)
+                    prefix_cache[path] = resolved
+
+                if resolved is None:
+                    continue
+
+                name, n = resolved
+                paths.append((("model",) + path, f"{name} (N={n})"))
+
+        for group in find_groups(paths, limit=0):
+            formatter.add(*group)
+
+        self.__dict__["_parameterization_cache"] = formatter.text
+        return formatter.text
+
+    @property
+    def all_paths(self) -> List[Tuple[Path]]:
+        """
+        All possible paths to all priors grouped such that all
+        paths to the same prior are collected together in a tuple.
+        """
+        if self.prior_count == 0:
+            return []
+        paths, _ = zip(*self.all_paths_prior_tuples)
+        return paths
+
+    @property
+    def all_paths_prior_tuples(self) -> List[Tuple[Tuple[Path], Prior]]:
+        """
+        Maps a tuple containing all paths to a given prior to that prior.
+        """
+        prior_paths_dict = defaultdict(tuple)
+        for path, prior in self.path_priors_tuples:
+            prior_paths_dict[prior] += (path,)
+        return sorted(
+            [(paths, prior) for prior, paths in prior_paths_dict.items()],
+            key=lambda item: item[1].id,
+        )
+
+    @property
+    def all_names(self) -> List[Tuple[str]]:
+        """
+        All possible names for all priors grouped such that all
+        names for a given prior are collected together in a tuple.
+        """
+        if self.prior_count == 0:
+            return []
+        names, _ = zip(*self.all_name_prior_tuples)
+        return names
+
+    @property
+    def all_name_prior_tuples(self) -> List[Tuple[Tuple[str], Prior]]:
+        """
+        Maps a tuple containing all names for a given prior to that prior.
+        """
+        path_modifier = TuplePathModifier(self)
+        return [
+            (tuple(".".join(path_modifier(path)) for path in paths), prior)
+            for paths, prior in self.all_paths_prior_tuples
+        ]
+
+    @property
+    def model_component_and_parameter_names(self) -> List[str]:
+        """
+        Lists each parameter's name and path, and is used for labeling visualization with parameter labels.
+
+        The parameter names are determined from the class instance names of the model_mapper. Latex tags are properties
+        of each model class.
+        """
+        prior_paths = self.unique_prior_paths
+
+        tuple_filter = TuplePathModifier(self)
+
+        prior_paths = list(map(tuple_filter, prior_paths))
+
+        return [".".join(path) for path in prior_paths]
+
+    @property
+    def joined_paths(self) -> List[str]:
+        """Dot-joined path strings for each unique prior, ordered by id."""
+        prior_paths = self.unique_prior_paths
+
+        return [".".join(path) for path in prior_paths]
+
+    @property
+    def parameter_names(self) -> List[str]:
+        """
+        Returns a list of labels containing the name of every parameter in a model.
+
+        This is used for displaying model results as text and for visualization.
+
+        The parameter labels are defined for every parameter of every model component in the config files label.ini and
+        label_format.ini.
+        """
+        return [parameter_name[-1] for parameter_name in self.unique_prior_paths]
+
+    @property
+    def parameter_labels(self) -> List[str]:
+        """
+        Returns a list of labels containing latex labels of every parameter in a model.
+
+        This is used for displaying model results as text and for visualization.
+
+        The parameter labels are defined for every parameter of every model component in the config files label.ini and
+        label_format.ini.
+        """
+
+        parameter_labels = []
+
+        for parameter_name in self.parameter_names:
+            parameter_label = frm.convert_name_to_label(
+                parameter_name=parameter_name, name_to_label=True
+            )
+            parameter_labels.append(parameter_label)
+
+        return parameter_labels
+
+    def _prior_holder(
+        self, path: Path, sibling_paths: List[Path]
+    ) -> Tuple[Path, Tuple[str, ...], object, str]:
+        """
+        One path to a prior as ``(path, component path, owner, leaf name)``: the
+        named model components on the path (see ``component_paths``), the model
+        component directly owning the prior there (the deepest ``Model`` on the
+        path) and the prior's leaf name, for example ``(..., ("lens", "mass"),
+        <Model PowerLaw>, "ell_comps_0")``.
+
+        ``sibling_paths`` are the paths of the components holding every path to
+        the same prior, which decide whether a list index names anything.
+        """
+        from autofit.mapper.prior_model.collection import Collection
+        from autofit.mapper.prior.tuple_prior import TuplePrior
+
+        component_path = path[:-1]
+        same_length = all(len(other) == len(component_path) for other in sibling_paths)
+
+        names = []
+        owner = self
+        obj = self
+        for i, name in enumerate(component_path):
+            try:
+                obj = getattr(obj, name)
+            except AttributeError:
+                obj = obj[int(name)]
+            if isinstance(obj, (Collection, TuplePrior)):
+                continue
+            owner = obj
+            # A list index that differs between the paths to one shared prior
+            # (the thirty Gaussians of a basis) says nothing and is dropped.
+            if (
+                same_length
+                and name.isdigit()
+                and any(other[i] != name for other in sibling_paths)
+            ):
+                continue
+            names.append(name)
+
+        return tuple(path), tuple(names), owner, path[-1]
+
+    @property
+    @frozen_cache
+    def _prior_holders(self) -> List[List[Tuple[Path, Tuple[str, ...], object, str]]]:
+        """
+        For each unique prior (ordered by id), every path holding it as given by
+        ``_prior_holder``. The first is the path the prior's samples column is
+        named after (``unique_prior_paths``, the last component holding it); the
+        others are where a prior shared between components (a power law's
+        ellipticity linked into its multipoles) also sits.
+
+        Cached while the model is frozen (as during a fit), since the plots and
+        the latent output ask for it several times per update.
+        """
+        paths_by_prior = defaultdict(list)
+        for path, prior in self.path_priors_tuples:
+            paths_by_prior[prior].append(tuple(path))
+
+        holders = []
+        for primary, prior in self.unique_path_prior_tuples:
+            primary = tuple(primary)
+            paths = paths_by_prior[prior]
+            sibling_paths = [path[:-1] for path in paths]
+            holders.append(
+                [
+                    self._prior_holder(path, sibling_paths)
+                    for path in [primary] + [path for path in paths if path != primary]
+                ]
+            )
+        return holders
+
+    @property
+    def _prior_owner_and_leaf_names(self) -> List[Tuple[object, str]]:
+        """
+        For each unique prior (ordered by id), the model component that directly
+        owns it (the deepest ``Model`` on the path its samples column is named
+        after) and the prior's leaf name, for example
+        ``(<Model Gaussian>, "ell_comps_0")``.
+        """
+        return [(holders[0][2], holders[0][3]) for holders in self._prior_holders]
+
+    def latent_parameters_from(
+        self, parameter_array, weights=None, recentre: bool = False
+    ) -> "LatentParameters":
+        """
+        The parameters of this model after each component's declared conversions
+        (its ``latent_parameters`` class attribute, e.g. shear components to a
+        magnitude and angle) are applied to an array of samples; see
+        ``autofit.mapper.prior_model.latent_parameters``.
+
+        Parameters
+        ----------
+        parameter_array
+            Samples of the model's free parameters, shape ``(n_samples, prior_count)``.
+        weights
+            The weight of each sample, which with ``recentre`` centres a periodic
+            latent parameter (an angle) on its posterior; equal by default.
+        recentre
+            Whether to recentre each periodic latent parameter on its circular
+            mean, as a plot does; the latent output keeps the range the
+            conversion gives it, so it does not depend on the fit.
+        """
+        from autofit.mapper.prior_model.latent_parameters import latent_parameters_from
+
+        return latent_parameters_from(
+            self, parameter_array, weights=weights, recentre=recentre
+        )
+
+    @property
+    def has_latent_parameters(self) -> bool:
+        """Whether any component of this model declares a conversion that applies to it."""
+        return self.latent_parameters_from(np.zeros((1, self.prior_count))).has_latent
+
+    @property
+    def component_paths(self) -> List[Path]:
+        """
+        The named model components that own each unique prior, ordered by prior id.
+
+        A prior's path lists everything between the model and the parameter, for
+        example ``galaxies.lens.bulge.profile_list.29.centre.centre_0``. Most of
+        that does not name a component: ``galaxies`` and ``profile_list`` are
+        ``Collection`` containers, ``centre`` is the tuple the parameter sits in,
+        and ``29`` is one of the thirty Gaussians a shared prior appears under.
+        Each is dropped, leaving ``("lens", "bulge")``.
+
+        An index is kept when it distinguishes the prior from its siblings, so a
+        collection of components with independent priors gives ``("0",)``,
+        ``("1",)``; it is dropped only where the paths to a shared prior differ,
+        which is what makes it meaningless. A prior shared between differently
+        named components (a power law's ellipticity linked into its multipoles)
+        takes the path its samples column is named after, the last component
+        holding it: ``("lens", "mass")``, not ``("lens", "multipole_3")``.
+
+        This is what labels parameters in results and plots, and what groups them
+        by component (see ``parameter_indices_by_component``).
+        """
+        return [holders[0][1] for holders in self._prior_holders]
+
+    @property
+    def parameter_indices_by_component(self) -> Dict[str, List[int]]:
+        """
+        The indices of the parameters belonging to each top-level model component,
+        keyed by the component's name and in model order, for example
+        ``{"lens": [0, ..., 14], "source": [15, ..., 18]}``.
+
+        Parameters whose priors sit directly on the model (no named component)
+        are grouped under ``"model"`` (``"model_root"`` if a component is itself
+        named ``model``).
+        """
+        return indices_by_top_level_component(self.component_paths)
+
+    @property
+    def superscripts(self) -> List[str]:
+        """
+        Returns a list of the model component superscripts for every parameter in a model.
+
+        The superscript is the dot-joined path of the names the components owning
+        the parameter were given in the model (see ``component_paths``): a lens
+        model with a lens galaxy and a source galaxy labels the Gaussians of their
+        light ``lens.bulge`` and ``source.bulge``, its shear ``lens.shear``, so every
+        parameter of every component has a distinct label however many components
+        share a class.
+
+        For the example of a 1D Gaussian, if the model component name is `gaussian` three superscripts
+        with this string (corresponding to the parameters `centre`, `normalization` and `sigma`) will
+        be returned.
+
+        A path three or more levels deep keeps its first name whole and cuts the
+        later names short, so ``source.pixelization.regularization`` is labelled
+        ``source.pix.reg`` and the label stays readable on a corner plot; a name is
+        cut only as far as it stays distinct from its siblings (see
+        ``superscripts_from_component_paths``).
+
+        A prior directly on the model (a bare ``Model(Gaussian)``) has no named
+        component; it uses the `notation/label.yaml` config's `superscript:` entry
+        for the model's class if there is one (`Gaussian: g`), else no superscript.
+        See the `superscripts_overwrite_via_config` property.
+
+        This is used for displaying model results as text and for visualization.
+        """
+        component_paths = self.component_paths
+        labels = superscripts_from_component_paths(component_paths)
+        return [
+            labels[path] if path else (superscript_overwrite or None)
+            for path, superscript_overwrite in zip(
+                component_paths, self.superscripts_overwrite_via_config
+            )
+        ]
+
+    @property
+    def superscripts_overwrite_via_config(self) -> List[str]:
+        """
+        Returns a list of the model component superscripts for every parameter in a model, which can be used to
+        overwrite the default superscripts used in the function above.
+
+        The class superscript labels are defined for a model component in the config file `notation/label.ini`. By
+        default, the model component names are used as superscripts (which are loaded via the method `superscripts`).
+        These are overwritten by the superscripts loaded via a  config in this function. If no value is present in the
+        config the model component names are used.
+
+        For the example of a 1D Gaussian, when instatiated as a model component it is typically given the
+        name `gaussian`. Thus, the string `gaussian` will be used as the supersript of every one its parameter labels
+        (`centre`, `normalization` and `sigma`). However, if the config file `label.ini` reads `Gaussian=g`, every
+        superscript for these parameters will instead be given the superscript `g`.
+
+        This is used for displaying model results as text and for visualization with.
+        """
+
+        superscripts = []
+
+        for prior_name, prior in self.prior_tuples_ordered_by_id:
+            cls = self.prior_class_dict[prior]
+            try:
+                superscript = conf.instance["notation"]["label"]["superscript"][
+                    cls.__name__
+                ]
+
+            except KeyError:
+                superscript = ""
+
+            superscripts.append(superscript)
+
+        return superscripts
+
+    @property
+    def parameter_labels_with_superscripts(self) -> List[str]:
+        """
+        Returns a list of the latex parameter label and superscript of every parameter in a model.
+
+        The parameter labels are defined for every parameter of every model component in the config file `label.ini`.
+        This file can also be used to overwrite superscripts, that are assigned based on the model component name.
+
+        This is used for displaying model results as text and for visualization, for example labelling parameters.
+        """
+
+        return [
+            f"{label}^{{\\rm {superscript}}}" if superscript else f"{label}"
+            for label, superscript in zip(self.parameter_labels, self.superscripts)
+        ]
+
+    @property
+    def parameter_labels_with_superscripts_latex(self) -> List[str]:
+        """
+        Returns a list of the latex parameter label and superscript of every parameter in a model.
+
+        The parameter labels are defined for every parameter of every model component in the config file `label.ini`.
+        This file can also be used to overwrite superscripts, that are assigned based on the model component name.
+
+        This is used for displaying model results as text and for visualization, for example labelling parameters.
+        """
+
+        return [f"${label}$" for label in self.parameter_labels_with_superscripts]
+
+
+def _subtree_unique_priors(obj, memo: dict) -> dict:
+    """
+    The distinct ``Prior`` objects reachable from ``obj``, keyed by prior.
+
+    This mirrors, exactly, the set of priors that
+    ``path_instances_of_class(obj, Prior, ignore_class=None, ignore_children=True)``
+    would report (and hence ``obj.prior_count``), but memoised by object
+    identity in ``memo`` so that a node is walked at most once across the
+    whole enclosing call.
+
+    Parameters
+    ----------
+    obj
+        The object to search recursively.
+    memo
+        A dictionary mapping ``id(obj)`` to a ``(obj, result)`` pair. The
+        object itself is kept in the value so that its id cannot be recycled
+        by the garbage collector while the memo is alive.
+
+    Returns
+    -------
+    A dictionary mapping each distinct prior to itself.
+    """
+    key = id(obj)
+    hit = memo.get(key)
+    if hit is not None:
+        return hit[1]
+
+    if isinstance(obj, Prior):
+        result = {obj: obj}
+        memo[key] = (obj, result)
+        return result
+
+    # Inserted before recursing so that a cyclic reference terminates, in the
+    # same way that ``path_instances_of_class`` relies on
+    # ``DynamicRecursionCache``.
+    result = {}
+    memo[key] = (obj, result)
+
+    if isinstance(obj, list):
+        for item in obj:
+            result.update(_subtree_unique_priors(item, memo))
+        return result
+
+    # The AnnotationPriorModel special case in ``path_instances_of_class``
+    # only rewrites the *path* of a result, never its membership, so it has
+    # no bearing on the set of priors collected here.
+    try:
+        d = obj if isinstance(obj, dict) else obj.__dict__
+        for key_, value in d.items():
+            if key_.startswith("_"):
+                continue
+            result.update(_subtree_unique_priors(value, memo))
+    except (AttributeError, TypeError):
+        return result
+
+    return result
+
+
+def transfer_classes(instance, mapper, model_classes=None):
+    """
+    Recursively overwrite priors in the mapper with instance values from the
+    instance except where the containing class is the descendant of a listed class.
+    Parameters
+    ----------
+    model_classes
+        Classes whose descendants should not be overwritten
+    instance
+        The best fit from the previous search
+    mapper
+        The prior model from the previous search
+    """
+    from autofit.mapper.prior_model.annotation import AnnotationPriorModel
+
+    model_classes = model_classes or []
+    for key, instance_value in instance.__dict__.items():
+        try:
+            mapper_value = getattr(mapper, key)
+            if isinstance(mapper_value, Prior) or isinstance(
+                mapper_value, AnnotationPriorModel
+            ):
+                setattr(mapper, key, instance_value)
+                continue
+            if not any(isinstance(instance_value, cls) for cls in model_classes):
+                try:
+                    transfer_classes(instance_value, mapper_value, model_classes)
+                except AttributeError:
+                    setattr(mapper, key, instance_value)
+        except AttributeError:
+            pass

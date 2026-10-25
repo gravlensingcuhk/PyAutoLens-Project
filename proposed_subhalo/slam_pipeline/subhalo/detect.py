@@ -59,9 +59,9 @@ reconstruction of the source's light than fits using light profiles.
 
 """
 
-from autoconf import jax_wrapper  # Sets JAX environment before other imports
+from autonerves import jax_wrapper  # Sets JAX environment before other imports
 
-# from autoconf import setup_notebook; setup_notebook()
+# from autonerves import setup_notebook; setup_notebook()
 
 from pathlib import Path
 import autofit as af

@@ -1,0 +1,27 @@
+general:
+  backend: default
+  dpi: 150
+  imshow_origin: upper
+  log10_min_value: 1.0e-4
+  log10_max_value: 1.0e99
+  zoom_around_mask: true
+  critical_curves_method: marching_squares
+inversion:
+  reconstruction_vmax_factor: 0.5
+  total_mappings_pixels: 8
+zoom:
+  plane_percent: 0.01
+  inversion_percent: 0.01
+colormap: autoarray
+ticks:
+  extent_factor_2d: 0.75
+  number_of_ticks_2d: 3
+contour:
+  total_contours: 10
+  include_values: true
+colorbar:
+  fraction: 0.047
+  pad: 0.01
+  labelrotation: 90
+  labelsize: 16
+  labelsize_subplot: 16

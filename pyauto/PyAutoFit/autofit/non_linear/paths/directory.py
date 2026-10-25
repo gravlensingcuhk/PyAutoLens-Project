@@ -1,0 +1,602 @@
+import shutil
+
+import dill
+import json
+import numpy as np
+import os
+from pathlib import Path
+from typing import Optional, Union, cast, Type
+import logging
+
+from autonerves import conf
+from autonerves.class_path import get_class
+from autonerves.dictable import to_dict, from_dict
+from autonerves.output import conditional_output, should_output
+from autofit.text import formatter
+from autofit.tools.util import open_, open_atomic, NumpyEncoder
+from autofit.non_linear.samples.samples import Samples
+
+from autofit.model_figure.config import model_figure_enabled
+from autofit.non_linear.test_mode import skip_visualization
+
+from .abstract import AbstractPaths, _test_mode_segment
+from ..checkpoint import load_legacy_search_internal
+
+from ..samples import load_from_table
+from autofit.non_linear.samples.pdf import SamplesPDF
+from autofit.non_linear.samples.summary import SamplesSummary
+
+from ...visualise import VisualiseGraph
+
+logger = logging.getLogger(__name__)
+
+
+#: ``model_figure_enabled`` lives in ``autofit.model_figure.config`` so that the
+#: per-search ``model.png`` hook below and the EP factor-graph figures read the
+#: same ``output.yaml`` key through the same strict accessor. The private alias
+#: is kept because it is the name this module's tests import.
+_model_figure_enabled = model_figure_enabled
+
+
+class DirectoryPaths(AbstractPaths):
+    def _path_for_pickle(self, name: str, prefix: str = "") -> Path:
+        return self._files_path / prefix / f"{name}.pickle"
+
+    def _path_for_json(self, name, prefix: str = "") -> Path:
+        if isinstance(name, Path):
+            return name
+        return self._files_path / prefix / f"{name}.json"
+
+    def _path_for_csv(self, name) -> Path:
+        return self._files_path / f"{name}.csv"
+
+    def _path_for_fits(self, name, prefix: str = "") -> Path:
+        os.makedirs(self._files_path / prefix, exist_ok=True)
+
+        return self._files_path / prefix / f"{name}.fits"
+
+    @conditional_output
+    def save_object(self, name: str, obj: object, prefix: str = ""):
+        """
+        Serialise an object using dill and save it to the pickles
+        directory of the search.
+
+        Parameters
+        ----------
+        name
+            The name of the object
+        obj
+            A serialisable object
+        prefix
+            A prefix to add to the path which is the name of the folder the file is saved in.
+        """
+        with open_(self._path_for_pickle(name, prefix), "wb") as f:
+            dill.dump(obj, f)
+
+    @conditional_output
+    def save_json(self, name, object_dict: Union[dict, list], prefix: str = ""):
+        """
+        Save a dictionary as a json file in the jsons directory of the search.
+
+        Parameters
+        ----------
+        name
+            The name of the json file
+        object_dict
+            The dictionary to save
+        prefix
+            A prefix to add to the path which is the name of the folder the file is saved in.
+        """
+        # Two guards, and they answer different halves of the same incident.
+        #
+        # ``NumpyEncoder`` stops a stray ``np.float32`` (or any NumPy scalar
+        # that is not a ``float64``) raising ``TypeError`` here at the very end
+        # of a successful fit -- see the encoder's docstring for why float64
+        # hid this for so long.
+        #
+        # ``open_atomic`` handles the write failing for ANY reason: a plain
+        # "w+" truncates before it writes, so a failure partway leaves a
+        # HALF-WRITTEN file where a valid one was, and the next run of this
+        # search reads that while resuming and dies on it. Written to a sibling
+        # temp file and ``os.replace``d into place, a failed write leaves the
+        # previous file whole instead.
+        with open_atomic(self._path_for_json(name, prefix)) as f:
+            json.dump(object_dict, f, indent=4, cls=NumpyEncoder)
+
+    def load_json(self, name, prefix: str = ""):
+        with open_(self._path_for_json(name, prefix)) as f:
+            return json.load(f)
+
+    @conditional_output
+    def save_array(self, name: str, array: np.ndarray):
+        """
+        Save a numpy array as a csv file in the csvs directory of the search.
+
+        Parameters
+        ----------
+        name
+            The name of the csv file
+        array
+            The numpy array to save
+        """
+        # noinspection PyTypeChecker
+        np.savetxt(self._path_for_csv(name), array, delimiter=",")
+
+    def load_array(self, name: str):
+        return np.loadtxt(self._path_for_csv(name), delimiter=",")
+
+    @conditional_output
+    def save_fits(self, name: str, fits, prefix: str = ""):
+        """
+        Save an HDU as a fits file in the fits directory of the search.
+
+        Parameters
+        ----------
+        name
+            The name of the fits file
+        fits
+            The HDUList to save
+        prefix
+            A prefix to add to the path which is the name of the folder the file is saved in.
+        """
+        fits.writeto(self._path_for_fits(name, prefix), overwrite=True)
+
+    def load_fits(self, name: str, prefix: str = ""):
+        """
+        Load an HDU from a fits file in the fits directory of the search.
+
+        Parameters
+        ----------
+        name
+            The name of the fits file
+        prefix
+            A prefix to add to the path which is the name of the folder the file is saved in.
+
+        Returns
+        -------
+        The loaded HDU.
+        """
+        from astropy.io import fits
+
+        return fits.open(self._path_for_fits(name, prefix))[0]
+
+    def load_object(self, name: str, prefix: str = ""):
+        """
+        Load a serialised object with the given name.
+
+        e.g. if the name is 'model' then pickles/model.pickle is loaded.
+
+        Parameters
+        ----------
+        name
+            The name of a serialised object
+        prefix
+            A prefix to add to the path which is the name of the folder the file is saved in.
+
+        Returns
+        -------
+        The deserialised object
+        """
+        with open_(self._path_for_pickle(name, prefix), "rb") as f:
+            return dill.load(f)
+
+    def remove_object(self, name: str):
+        """
+        Remove the object with the given name from the pickles folder.
+
+        Parameters
+        ----------
+        name
+            The name of a pickle file excluding .pickle
+        """
+        try:
+            os.remove(self._path_for_pickle(name))
+        except FileNotFoundError:
+            pass
+
+    def is_object(self, name: str) -> bool:
+        """
+        Is there a file pickles/{name}.pickle?
+        """
+        return self._path_for_pickle(name).exists()
+
+    @property
+    def is_complete(self) -> bool:
+        """
+        Has the search been completed?
+        """
+        return self._has_completed_path.exists()
+
+    def save_search_internal(self, obj):
+        """
+        Save the internal representation of a non-linear search as dill file.
+
+        The results in this representation are required to use a search's in-built tools for visualization,
+        analysing samples and other tasks.
+        """
+        filename = self.search_internal_path / "search_internal.dill"
+
+        # Atomic for the same reason as ``save_json``, and it matters more
+        # here: ``search_internal`` is what a resumed run restores its step
+        # count and counters from, so a truncated dill does not merely fail to
+        # load -- it is the file the resume path most depends on.
+        with open_atomic(filename, "wb") as f:
+            dill.dump(obj, f)
+
+    def load_search_internal(self):
+        """
+        Load the internal representation of a non-linear search (its archive).
+
+        Loading is injected: the search that owns these paths (``self.search``)
+        loads through its ``checkpointer`` (emcee's HDF backend, the NUTS / SMC
+        pickle, or the dill of every other search), so ``paths`` knows no backend
+        format. A folder opened without its search falls back to format-aware
+        detection (``autofit.non_linear.checkpoint.load_legacy_search_internal``:
+        ``search_internal.hdf``, then ``.pickle``, then ``.dill``), which is also what
+        a checkpointer falls back to when its own file is absent, so outputs written
+        before A3 still load.
+
+        Returns
+        -------
+        The results of the non-linear search in its internal representation.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no internal state is stored (for example a summary-only output, or
+            ``output.search_internal: false``).
+        """
+        checkpointer = getattr(getattr(self, "search", None), "checkpointer", None)
+
+        if checkpointer is not None:
+            return checkpointer.load(self)
+
+        return load_legacy_search_internal(self.search_internal_path)
+
+    def remove_search_internal(self):
+        """
+        Remove the internal representation of a non-linear search.
+
+        This deletes the entire `search_internal` folder, including a .pickle / .dill file containing the interal
+        results and files with the timer values.
+
+        This folder can often have a large filesize, thus deleting it can reduce hard-disk use of the model-fit.
+        """
+        shutil.rmtree(self.search_internal_path)
+
+    def completed(self):
+        """
+        Mark the search as complete by saving a file
+        """
+        open_(self._has_completed_path, "w+").close()
+
+    def load_samples(self):
+        return load_from_table(filename=self._samples_file)
+
+    @property
+    def samples(self):
+        """
+        Load the samples associated with the search from the output directory.
+        """
+        sample_list = self.load_samples()
+        samples_info = self.load_samples_info()
+
+        cls = cast(Type[Samples], get_class(samples_info["class_path"]))
+
+        return cls.from_list_info_and_model(
+            sample_list=sample_list,
+            samples_info=samples_info,
+            model=self.model,
+        )
+
+    def save_latent_samples(
+        self,
+        latent_samples,
+    ):
+        """
+        Write out the latent variables of the model to a file.
+
+        Parameters
+        ----------
+        latent_samples
+            Samples describing the latent variables of the model
+        """
+        self._save_samples(latent_samples, name="latent")
+
+    def save_samples(self, samples):
+        """
+        Save the final-result samples associated with the phase as a pickle
+        """
+        self._save_samples(samples)
+
+    def _save_samples(self, samples, name=None):
+        """
+        Save the final-result samples associated with the phase as a pickle
+        """
+
+        if name is not None:
+            directory = self._files_path / name
+        else:
+            directory = self._files_path
+            name = "samples"
+        if conf.instance["general"]["output"]["samples_to_csv"] and should_output(name):
+            self.save_json(directory / "samples_info.json", samples.samples_info)
+
+            if isinstance(samples, SamplesPDF):
+                try:
+                    samples.save_covariance_matrix(directory / "covariance.csv")
+                except (ValueError, ZeroDivisionError) as e:
+                    logger.warning(
+                        f"Could not save covariance matrix because of the following error:\n{e}"
+                    )
+
+            samples.write_table(filename=directory / "samples.csv")
+
+    def save_samples_summary(
+        self, samples_summary: SamplesSummary, name="samples_summary"
+    ):
+        model = samples_summary.model
+
+        filter_args = tuple(
+            name
+            for name in (
+                "errors_at_sigma_1",
+                "errors_at_sigma_3",
+                "values_at_sigma_1",
+                "values_at_sigma_3",
+                "max_log_likelihood_sample",
+                "median_pdf_sample",
+            )
+            if not should_output(name)
+        )
+
+        samples_summary.model = None
+        self.save_json(
+            name,
+            to_dict(
+                samples_summary,
+                filter_args=filter_args,
+            ),
+        )
+        samples_summary.model = model
+
+    def load_samples_summary(self) -> SamplesSummary:
+        samples_summary = from_dict(self.load_json(name="samples_summary"))
+        samples_summary.model = self.model
+
+        return samples_summary
+
+    def load_latent_samples(self):
+        return load_from_table(filename=self._files_path / "latent/samples.csv")
+
+    def load_samples_info(self):
+        with open_(self._info_file) as infile:
+            return json.load(infile)
+
+    def save_all(self, search_config_dict=None, info=None):
+        info = info or {}
+
+        self.save_identifier()
+        self.save_parent_identifier()
+        self._save_model_info(model=self.model)
+        # VisualiseGraph(
+        #     model=self.model,
+        # ).save(str(self.output_path / "model_graph.html"))
+
+        if info:
+            self.save_json("info", info)
+
+        self.save_json("search", to_dict(self.search))
+        try:
+            info_start = self.search.initializer.info_from_model(model=self.model)
+            self._save_model_start_point(info=info_start)
+        except (NotImplementedError, AttributeError):
+            pass
+
+        self.save_json("model", to_dict(self.model))
+
+    @AbstractPaths.parent.setter
+    def parent(self, parent: AbstractPaths):
+        """
+        The search performed before this search. For example, a search
+        that is then compared to searches during a grid search.
+        """
+        self._parent = parent
+
+    def save_parent_identifier(self):
+        if self.parent is not None:
+            with open_(self._parent_identifier_path, "w+") as f:
+                f.write(self.parent.identifier)
+            self.parent.save_unique_tag()
+
+    def save_unique_tag(self, is_grid_search=False):
+        if is_grid_search:
+            with open_(self._grid_search_path, "w+") as f:
+                if self.unique_tag is not None:
+                    f.write(self.unique_tag)
+
+    @property
+    def _parent_identifier_path(self) -> Path:
+        return self.output_path / ".parent_identifier"
+
+    @property
+    def _grid_search_path(self) -> Path:
+        return self.output_path / ".is_grid_search"
+
+    @property
+    def is_grid_search(self) -> bool:
+        """
+        Is this a grid search which comprises a number of child searches?
+        """
+        return self._grid_search_path.exists()
+
+    def create_child(
+        self,
+        name: Optional[str] = None,
+        path_prefix: Optional[str] = None,
+        is_identifier_in_paths: Optional[bool] = None,
+        identifier: Optional[str] = None,
+    ) -> "AbstractPaths":
+        """
+        Create a paths object which is the child of some parent
+        paths object. This is done during a GridSearch so that
+        results can be stored in the correct directory.
+
+        Parameters
+        ----------
+        name
+        path_prefix
+        is_identifier_in_paths
+            If False then this path's identifier will not be
+            added to its output path.
+        identifier
+
+        Returns
+        -------
+        A new paths object
+        """
+        child = type(self)(
+            name=name or self.name,
+            path_prefix=path_prefix or self.path_prefix,
+            is_identifier_in_paths=(
+                is_identifier_in_paths
+                if is_identifier_in_paths is not None
+                else self.is_identifier_in_paths
+            ),
+            parent=self,
+        )
+        child.model = self.model
+        child.search = self.search
+        child._identifier = identifier
+        return child
+
+    def for_sub_analysis(self, analysis_name: str):
+        """
+        Paths for an analysis which is a child of another analysis.
+
+        The analysis name forms a new directory on the end of the original
+        analysis output path.
+        """
+        from .sub_directory_paths import SubDirectoryPaths
+
+        return SubDirectoryPaths(parent=self, analysis_name=analysis_name)
+
+    def _save_model_info(self, model):
+        """
+        Save the model.info file, which summarises every parameter and prior.
+
+        A search that applies a per-parameter step scale
+        (:mod:`autofit.non_linear.scaler`) appends its scale vector to the bottom
+        of the same file. It goes in the FILE rather than into ``model.info`` the
+        property because the scale is a property of the *search*, which the model
+        knows nothing about — a search-dependent block cannot be rendered by a
+        model-only property, and splitting it into a second file would leave the
+        canonical "what is this model" artefact silently omitting the fact that
+        the search does not step in the units the file lists.
+
+        Guarded the same way ``_save_model_start_point``'s source is: a search
+        with no scaler, an older pickled search, or a scaler that declines to
+        describe itself all fall through to writing ``model.info`` alone.
+        """
+        info = model.info
+
+        # Header: the search and its static capabilities (jax_use, gradient,
+        # posterior kind, ...), so the file says what produced the fit. Guarded
+        # for paths without a search (or a search double with no declarations).
+        search = getattr(self, "search", None)
+        if search is not None and getattr(type(search), "objective_target", None):
+            from autofit.non_linear.search.capabilities import capability_summary_from
+
+            info = f"{capability_summary_from(search)}\n{info}"
+
+        try:
+            scaler_info = self.search.scaler.info_from_model(model=model)
+        except (NotImplementedError, AttributeError):
+            scaler_info = ""
+
+        if scaler_info:
+            info += f"\n\n{scaler_info}"
+
+        with open_(self.output_path / "model.info", "w+") as f:
+            f.write(info)
+
+        if should_output("model_graph") and hasattr(model, "graph_info"):
+            with open_(self.output_path / "model.graph", "w+") as f:
+                f.write(model.graph_info)
+
+        if _model_figure_enabled() and not skip_visualization():
+            try:
+                from autofit.model_figure import ModelPlotter
+
+                ModelPlotter(model).figure(
+                    path=self.output_path,
+                    filename="model",
+                    format="png",
+                )
+            except Exception as e:
+                logger.info(f"model.png not written: {e!r}")
+
+    def _save_model_start_point(self, info):
+        """
+        Save the model.start file, which summarises the start point of every parameter.
+        """
+        with open_(self.output_path / "model.start", "w+") as f:
+            f.write(info)
+
+    def _save_parameter_names_file(self, model):
+        """
+        Create the param_names file listing every parameter's label and Latex tag, which is used for corner.py
+        visualization.
+
+        The parameter labels are determined using the label.ini and label_format.ini config files.
+        """
+
+        parameter_names = model.model_component_and_parameter_names
+        parameter_labels = model.parameter_labels
+        subscripts = model.superscripts_overwrite_via_config
+        parameter_labels_with_subscript = [
+            f"{label}_{subscript}"
+            for label, subscript in zip(parameter_labels, subscripts)
+        ]
+
+        parameter_name_and_label = []
+
+        for i in range(model.prior_count):
+            line = formatter.add_whitespace(
+                str0=parameter_names[i],
+                str1=parameter_labels_with_subscript[i],
+                whitespace=70,
+            )
+            parameter_name_and_label += [f"{line}\n"]
+
+        formatter.output_list_of_strings_to_file(
+            file=self._files_path / "model.paramnames",
+            list_of_strings=parameter_name_and_label,
+        )
+
+    @property
+    def _info_file(self) -> Path:
+        return self._files_path / "samples_info.json"
+
+    @property
+    def _has_completed_path(self) -> Path:
+        """
+        A file indicating that a `NonLinearSearch` has been completed previously
+        """
+        return self.output_path / ".completed"
+
+    def _make_path(self) -> str:
+        """
+        Returns the path to the folder at which the metadata should be saved
+
+        The path terminates with the identifier, unless the identifier has already
+        been added to the path.
+        """
+        path_ = Path(conf.instance.output_path)
+        segment = _test_mode_segment()
+        if segment:
+            path_ = path_ / segment
+        path_ = path_ / self.path_prefix / self.name
+        if self.is_identifier_in_paths:
+            path_ = path_ / self.identifier
+        return path_

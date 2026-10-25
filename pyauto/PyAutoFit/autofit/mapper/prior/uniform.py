@@ -1,0 +1,202 @@
+import numpy as np
+from typing import Optional
+
+from autofit.messages.normal import UniformNormalMessage
+from .abstract import Prior
+from .abstract import epsilon
+from ...messages.composed_transform import TransformedMessage
+from ...messages.transform import LinearShiftTransform
+
+from autofit import exc
+
+class UniformPrior(Prior):
+    __identifier_fields__ = ("lower_limit", "upper_limit")
+    __database_args__ = ("lower_limit", "upper_limit", "id_")
+
+    def __init__(
+        self,
+        lower_limit: float = 0.0,
+        upper_limit: float = 1.0,
+        id_: Optional[int] = None,
+    ):
+        """
+        A prior with a uniform distribution, defined between a lower limit and upper limit.
+
+        The conversion of an input unit value, ``u``, to a physical value, ``p``, via the prior is as follows:
+
+        .. math::
+
+        For example for ``prior = UniformPrior(lower_limit=0.0, upper_limit=2.0)``, an
+        input ``prior.value_for(unit=0.5)`` is equal to 1.0.
+
+        [Rich describe how this is done via message]
+
+        Parameters
+        ----------
+        lower_limit
+            The lower limit of the uniform distribution defining the prior.
+        upper_limit
+            The upper limit of the uniform distribution defining the prior.
+
+        Examples
+        --------
+
+        prior = af.UniformPrior(lower_limit=0.0, upper_limit=2.0)
+
+        physical_value = prior.value_for(unit=0.2)
+        """
+
+        self.lower_limit = float(lower_limit)
+        self.upper_limit = float(upper_limit)
+
+        if self.lower_limit >= self.upper_limit:
+            raise exc.PriorException(
+                "The upper limit of a prior must be greater than its lower limit"
+            )
+
+        message = TransformedMessage(
+            UniformNormalMessage,
+            LinearShiftTransform(shift=self.lower_limit, scale=self.upper_limit - self.lower_limit),
+        )
+        super().__init__(
+            message,
+            id_=id_,
+        )
+
+    def tree_flatten(self):
+        """Flatten this prior into a JAX-compatible PyTree representation.
+
+        Returns
+        -------
+        tuple
+            A (children, aux_data) pair where children are (lower_limit, upper_limit, id).
+        """
+        return (self.lower_limit, self.upper_limit, self.id), ()
+
+    @property
+    def width(self):
+        """The width of the uniform distribution (upper_limit - lower_limit)."""
+        return self.upper_limit - self.lower_limit
+
+    def with_limits(
+        self,
+        lower_limit: float,
+        upper_limit: float,
+    ) -> "Prior":
+        """Create a new UniformPrior with different bounds.
+
+        Parameters
+        ----------
+        lower_limit
+            The new lower bound.
+        upper_limit
+            The new upper bound.
+        """
+        return UniformPrior(
+            lower_limit=lower_limit,
+            upper_limit=upper_limit,
+        )
+
+    def logpdf(self, x):
+        """Compute the log probability density at x.
+
+        Adjusts boundary values by epsilon to avoid evaluating exactly at
+        the distribution edges where the PDF is undefined.
+
+        Parameters
+        ----------
+        x
+            The value(s) at which to evaluate the log PDF. May be a scalar or a
+            numpy array.
+        """
+        # Nudge values sitting exactly on a boundary inwards by epsilon, where the
+        # PDF is otherwise undefined. The scalar path is kept bit-identical to the
+        # historical behaviour; the array path vectorises the same snap with
+        # ``np.where`` (the previous scalar-only ``==`` comparison raised on arrays).
+        if np.ndim(x) == 0:
+            if x == self.lower_limit:
+                x += epsilon
+            elif x == self.upper_limit:
+                x -= epsilon
+        else:
+            x = np.where(x == self.lower_limit, x + epsilon, x)
+            x = np.where(x == self.upper_limit, x - epsilon, x)
+        return self.message.logpdf(x)
+
+    def dict(self) -> dict:
+        """
+        Return a dictionary representation of this GaussianPrior instance,
+        including mean and sigma.
+
+        Returns
+        -------
+        Dictionary containing prior parameters.
+        """
+        prior_dict = super().dict()
+        return {**prior_dict, "lower_limit": self.lower_limit, "upper_limit": self.upper_limit}
+
+    @property
+    def parameter_string(self) -> str:
+        """A human-readable string summarizing the prior's lower and upper limits."""
+        return f"lower_limit = {self.lower_limit}, upper_limit = {self.upper_limit}"
+
+    def value_for(self, unit, xp=np):
+        """
+        Returns a physical value from an input unit value according to the limits of the uniform prior.
+
+        Parameters
+        ----------
+        unit
+            A unit value between 0 and 1.
+        xp
+            Array-module to dispatch on (``numpy`` or ``jax.numpy``). Default ``numpy``.
+            The NumPy path preserves the historical ``float(round(..., 14))`` snap
+            (used as a hash key in ``model.priors``); the JAX path uses the
+            closed-form ``lower + (upper - lower) * unit`` so the trace stays symbolic.
+
+        Returns
+        -------
+        value
+            The unit value mapped to a physical value according to the prior.
+
+        Examples
+        --------
+
+        prior = af.UniformPrior(lower_limit=0.0, upper_limit=2.0)
+
+        physical_value = prior.value_for(unit=0.2)
+        """
+        if xp is np:
+            return float(
+                round(super().value_for(unit), 14)
+            )
+        return self.lower_limit + (self.upper_limit - self.lower_limit) * unit
+
+    def log_prior_from_value(self, value, xp=np):
+        """
+        Returns the log prior of a physical value, so the log likelihood of a model evaluation can be converted to a
+        posterior as log_prior + log_likelihood.
+
+        This is used by certain non-linear searches (e.g. Emcee) in the log likelihood function evaluation.
+
+        For a UniformPrior this is zero inside ``[lower_limit, upper_limit]`` (the constant
+        ``-log(upper - lower)`` is dropped, see ``log_normalisation``) and ``-inf`` outside it,
+        on both the NumPy and JAX paths.
+
+        The bound test here is the only support enforcement in the search fitness path: since
+        the removal of ``assert_within_limits`` / ``PriorLimitException`` (shipped 2025.10.16.1),
+        ``instance_from_vector`` accepts out-of-support vectors without raising, so a
+        ``log_prior_from_value`` that skipped the test left the box entirely unenforced for
+        the NumPy-path searches that form a log posterior (Emcee, Zeus, Drawer, LBFGS) —
+        see PyAutoFit#1489. The ``-inf`` is what makes an out-of-box MCMC proposal a
+        rejected move.
+        """
+        if xp is np and np.ndim(value) == 0:
+            return 0.0 if self.lower_limit <= value <= self.upper_limit else -np.inf
+        in_bounds = (value >= self.lower_limit) & (value <= self.upper_limit)
+        return xp.where(in_bounds, xp.zeros_like(value), -xp.inf)
+
+    def log_normalisation(self, xp=np) -> float:
+        """The constant ``-log(upper - lower)`` dropped from ``log_prior_from_value``
+        (which returns ``0.0``). See ``Prior.log_normalisation``."""
+        return -xp.log(self.upper_limit - self.lower_limit)

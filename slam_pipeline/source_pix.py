@@ -1,21 +1,168 @@
+"""
+SOURCE PIX PIPELINE
+===================
+
+The two searches that replace the MGE source of SOURCE LP with an adaptive pixelization, and
+the adapt-image helpers both runners share.
+
+__The Source Mesh (2026-10)__
+
+Until 2026-10 both searches used a Delaunay mesh on Hilbert image-mesh points with `AdaptSplit`
+regularization. On COSJ100018+022138 (J18) `source_pix[1]` ran 13 days / 130k samples without
+leaving Nautilus's sampling phase: the posterior had an effective sample size of ~2, because the
+likelihood is rugged at the ~100 nat level on 0.1-sigma steps of the mass parameters. Two
+things make it so. The Delaunay mesh re-triangulates as the traced points move, and
+`AdaptSplit` sets each pixel's regularization from the adapt image divided by the *integer*
+number of sub-pixels that land in it, which jumps by whole units.
+
+The setup now follows Sam's HST project (pyauto `z_projects/HST_lensing_mass_light`):
+
+- `RectangularRTUAdaptDensity` (search 1) / `RectangularRTUAdaptImage` (search 2), a fixed
+  `RECT_SHAPE` x `RECT_SHAPE` lattice warped by a kernel (erf-sum) CDF of the traced points
+  (Enzi et al., arXiv:2606.30620). The topology never changes, so the likelihood is a continuous
+  function of the mass. Search 2 also fits the mesh's `weight_power` and `weight_floor`
+  (library priors), which the Hilbert scheme hard-coded at 3.5 / 0.01.
+- `AdaptPower` regularization (coefficients at lambda^2, single-counted graph Laplacian), with
+  `config/general.yaml [inversion] pixel_signal_normalisation: weights`, which normalises the
+  pixel signals by the sum of the (continuous) mapping weights instead of the integer count.
+  This needs the vendored PyAutoArray `production/hst` branch (see `pyauto/PROVENANCE.md`).
+- Nautilus stops shell-building at `SETUP_F_LIVE` (0.05, library 0.01) and every search has a
+  likelihood-call cap `SETUP_N_LIKE_MAX` (~2x the most calls a converged HST run needed). A
+  capped search still writes its result, so the chain continues, but `report_if_capped` says so
+  in the job log and appends to `<output>/capped_searches.txt`.
+
+Scans of J18's `source_pix[1]` maximum-likelihood model (einstein_radius stepped by 0.12 sigma,
+2026-10-24): Delaunay+AdaptSplit 120 nats RMS about a quadratic, max step 366; RTU 30x30 +
+AdaptPower with weights normalisation 0.01-0.2 RMS, max step 0.5. The rectangular meshes
+ignore `image_plane_mesh_grid`, so the Hilbert mesh, the ring of circle edge points and
+`zeroed_pixels` are gone; edge zeroing is `use_edge_zeroed_pixels` in general.yaml.
+
+__The Adapt Image__
+
+Both searches cap the source adapt image at S/N `ADAPT_SNR_CAP` on a copy: the adapt mesh and
+AdaptPower are max-normalised ((adapt/max)**power), so without the cap the single brightest
+source pixel dominates and starves the extended arc. The *uncapped* image drives the
+pixelization over-sampling map (sub-size 4 where the source S/N > 3, else 2), which must see the
+true S/N. Keep that ordering.
+"""
 import autofit as af
 import autolens as al
 
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Tuple, Union
+
+import numpy as np
+from autonerves import conf
+
+SOURCE_KEY = "('galaxies', 'source')"
+
+# The source mesh, see "__The Source Mesh__". 25 x 25 (HST project: 30 x 30 on 3.5" masks; the
+# COWLS masks are 1.5" at 0.03-0.06"/px).
+RECT_SHAPE = (25, 25)
+
+# See "__The Adapt Image__".
+ADAPT_SNR_CAP = 3.0
+PIX_OVER_SAMPLE_THRESHOLD = 3.0
+PIX_OVER_SAMPLE_SIZES = (4, 2)  # (where source S/N > threshold, elsewhere)
+
+# Nautilus stopping (HST project search_util): see "__The Source Mesh__".
+SETUP_F_LIVE = 0.05
+SETUP_N_LIKE_MAX = {
+    "source_pix_1": 100_000,
+    "source_pix_2": 10_000,  # at 75 live points; run_2 scales it by n_live // 75
+}
+
+
+def adapt_images_from(result: af.Result, adapt_snr_cap: float = ADAPT_SNR_CAP):
+    """
+    The adapt images for a rectangular adaptive mesh, built from `result`'s source image.
+
+    Returns `(adapt_images, source_image_raw)`: the adapt images carry the S/N-capped copy of
+    the source image, `source_image_raw` is the uncapped one for the over-sampling map (see
+    "__The Adapt Image__").
+    """
+    galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(result=result)
+    source_image_raw = galaxy_image_name_dict[SOURCE_KEY]
+
+    source_adapt_image = source_image_raw.copy()
+    source_adapt_image[source_adapt_image > adapt_snr_cap] = adapt_snr_cap
+    galaxy_image_name_dict[SOURCE_KEY] = source_adapt_image
+
+    return al.AdaptImages(galaxy_name_image_dict=galaxy_image_name_dict), source_image_raw
+
+
+def apply_pixelization_over_sampling(
+    dataset,
+    mask,
+    source_image_raw,
+    over_sample_size_lp=None,
+    signal_to_noise_threshold: float = PIX_OVER_SAMPLE_THRESHOLD,
+    sizes: Tuple[int, int] = PIX_OVER_SAMPLE_SIZES,
+):
+    """Sub-size `sizes[0]` where the (uncapped) source image exceeds the S/N threshold, else `sizes[1]`."""
+    arc, rest = sizes
+    over_sample_size_pixelization = al.Array2D(
+        values=np.where(source_image_raw > signal_to_noise_threshold, arc, rest), mask=mask
+    )
+    kwargs = {} if over_sample_size_lp is None else {"over_sample_size_lp": over_sample_size_lp}
+    return dataset.apply_over_sampling(
+        over_sample_size_pixelization=over_sample_size_pixelization, **kwargs
+    )
+
+
+def pixelization_from(search: int, shape: Tuple[int, int] = RECT_SHAPE) -> af.Model:
+    """
+    The `af.Model(al.Pixelization)` of search 1 (density-adapted RTU mesh) or search 2
+    (adapt-image RTU mesh with free `weight_power` / `weight_floor`), both with `AdaptPower`.
+    """
+    mesh_cls = al.mesh.RectangularRTUAdaptDensity if search == 1 else al.mesh.RectangularRTUAdaptImage
+    return af.Model(
+        al.Pixelization,
+        mesh=af.Model(mesh_cls, shape=shape),
+        regularization=af.Model(al.reg.AdaptPower),
+    )
+
+
+def report_if_capped(search: af.Nautilus, result, stage: str) -> None:
+    """
+    Warn, and record in `<output>/capped_searches.txt`, when a search stopped at its
+    `n_like_max` rather than converging (HST project `search_util.report_if_capped`).
+    """
+    n_like_max = search.n_like_max
+    try:
+        total = result.samples.total_samples
+    except (AttributeError, KeyError, TypeError):
+        return
+    if n_like_max is None or n_like_max == float("inf") or total < n_like_max:
+        return
+
+    path = str(search.paths.output_path)
+    print(
+        f"\nWARNING: {stage} STOPPED AT ITS LIKELIHOOD-CALL CAP ({total} >= {n_like_max}) "
+        f"without converging: {path}\nCheck this fit by eye before trusting what it seeds.\n"
+    )
+
+    log = Path(conf.instance.output_path) / "capped_searches.txt"
+    seen = log.read_text() if log.is_file() else ""
+    if path not in seen:
+        with open(log, "a") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M}  {stage}  {total}/{n_like_max}  {path}\n")
 
 
 def run_1(
     settings_search: af.SettingsSearch,
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
     source_lp_result: af.Result,
-    mesh_init: af.Model(al.AbstractMesh) = af.Model(al.mesh.Delaunay),
-    regularization_init: af.Model(al.AbstractRegularization) = af.Model(
-        al.reg.AdaptSplit
-    ),
+    mesh_init: Optional[af.Model] = None,
+    regularization_init: Optional[af.Model] = None,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
     fixed_mass_model: bool = False,
+    n_live: int = 200,
     n_batch: int = 16,
+    f_live: float = SETUP_F_LIVE,
+    n_like_max: float = SETUP_N_LIKE_MAX["source_pix_1"],
 ) -> af.Result:
     """
     The first SLaM SOURCE PIX PIPELINE, which initializes a lens model which uses a pixelized source for the source
@@ -39,11 +186,10 @@ def run_1(
     source_lp_result
         The results of the SLaM SOURCE LP PIPELINE which ran before this pipeline.
     mesh_init
-        The mesh, which defines how the source is reconstruction in the source-plane, used by the pixelization
-        in the first search which initializes the source.
+        The mesh of the pixelization; by default `RectangularRTUAdaptDensity` of `RECT_SHAPE`
+        (see "__The Source Mesh__").
     regularization_init
-        The regularization, which places a smoothness prior on the source reconstruction, used by the pixelization
-        which fits the source light in the initialization search (`search[1]`).
+        The regularization of the pixelization; by default `AdaptPower`.
     extra_galaxies
         Additional extra galaxies containing light and mass profiles, which model nearby line of sight galaxies.
     dataset_model
@@ -53,6 +199,9 @@ def run_1(
         Whether the mass model is fixed from the SOURCE LP PIPELINE, which is generally used for multi-band fitting
         where the mass model is fixed to the first band, albeit it may work for standard fitting if the SOURCE LP
         PIPELINE provides a good mass model.
+    n_live, n_batch, f_live, n_like_max
+        Nautilus settings; the defaults are the HST project's stability choices (n_batch 16 for the
+        16-core CPU jobs, see run_job_*.sh).
     """
 
     """
@@ -61,17 +210,14 @@ def run_1(
     Search 1 of the SOURCE PIX PIPELINE fits a lens model where:
 
     - The lens galaxy light is modeled using light profiles [parameters fixed to result of SOURCE LP PIPELINE].
-
      - The lens galaxy mass is modeled using a total mass distribution [model initialized from the results of the 
      SOURCE LP PIPELINE].
-
-     - The source galaxy's light is the input initialization image mesh, mesh and regularization scheme [parameters of 
-     regularization free to vary].
+     - The source galaxy's light is a density-adapted rectangular RTU mesh with AdaptPower regularization
+     [regularization parameters free to vary].
 
     This search improves the lens mass model by modeling the source using a pixelization and computes the adapt
     images that are used in search 2.
     """
-
     if not fixed_mass_model:
         mass = al.util.chaining.mass_from(
             mass=source_lp_result.model.galaxies.lens.mass,
@@ -79,10 +225,15 @@ def run_1(
             unfix_mass_centre=True,
         )
         shear = source_lp_result.model.galaxies.lens.shear
-
     else:
         mass = source_lp_result.instance.galaxies.lens.mass
         shear = source_lp_result.instance.galaxies.lens.shear
+
+    pixelization = pixelization_from(search=1)
+    if mesh_init is not None:
+        pixelization.mesh = mesh_init
+    if regularization_init is not None:
+        pixelization.regularization = regularization_init
 
     model = af.Collection(
         galaxies=af.Collection(
@@ -98,11 +249,7 @@ def run_1(
             source=af.Model(
                 al.Galaxy,
                 redshift=source_lp_result.instance.galaxies.source.redshift,
-                pixelization=af.Model(
-                    al.Pixelization,
-                    mesh=mesh_init,
-                    regularization=regularization_init,
-                ),
+                pixelization=pixelization,
             ),
         ),
         extra_galaxies=extra_galaxies,
@@ -112,11 +259,15 @@ def run_1(
     search = af.Nautilus(
         name="source_pix[1]",
         **settings_search.search_dict,
-        n_live=150,
+        n_live=n_live,
         n_batch=n_batch,
+        f_live=f_live,
+        n_like_max=n_like_max,
     )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
+
+    report_if_capped(search, result, "source_pix_1")
 
     return result
 
@@ -126,10 +277,13 @@ def run_2(
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
     source_lp_result: af.Result,
     source_pix_result_1: af.Result,
-    mesh: af.Model(al.AbstractMesh) = af.Model(al.mesh.Delaunay),
-    regularization: af.Model(al.AbstractRegularization) = af.Model(al.reg.AdaptSplit),
+    mesh: Optional[af.Model] = None,
+    regularization: Optional[af.Model] = None,
     dataset_model: Optional[af.Model] = None,
+    n_live: int = 300,
     n_batch: int = 16,
+    f_live: float = SETUP_F_LIVE,
+    n_like_max: Optional[float] = None,
 ) -> af.Result:
     """
     The second SLaM SOURCE PIX PIPELINE, which fits a fixed lens model which uses a pixelized source for the source
@@ -149,20 +303,19 @@ def run_2(
         The analysis class which includes the `log_likelihood_function` and can be customized for the SLaM model-fit.
     source_lp_result
         The results of the SLaM SOURCE LP PIPELINE which ran before this pipeline.
-    image_mesh
-        The image mesh, which defines how the mesh centres are computed in the image-plane, used by the pixelization
-        in the final search which improves the source adaption.
+    source_pix_result_1
+        The results of the first SOURCE PIX PIPELINE, whose source image is the adapt image of this search.
     mesh
-        The mesh, which defines how the source is reconstruction in the source-plane, used by the pixelization
-        in the final search which improves the source adaption.
+        The mesh of the pixelization; by default `RectangularRTUAdaptImage` of `RECT_SHAPE` with free
+        `weight_power` and `weight_floor` (see "__The Source Mesh__").
     regularization
-        The regularization, which places a smoothness prior on the source reconstruction, used by the pixelization
-        in the final search which improves the source adaption.
-    extra_galaxies
-        Additional extra galaxies containing light and mass profiles, which model nearby line of sight galaxies.
+        The regularization of the pixelization; by default `AdaptPower`.
     dataset_model
         Add aspects of the dataset to the model, for example the arc-second (y,x) offset between two datasets for
         multi-band fitting or the background sky level.
+    n_live, n_batch, f_live, n_like_max
+        Nautilus settings; the defaults are the HST project's. `n_like_max` defaults to
+        `SETUP_N_LIKE_MAX["source_pix_2"]` scaled by `n_live // 75`.
     """
 
     """
@@ -172,10 +325,20 @@ def run_2(
 
     - The lens galaxy light is modeled using a light profiles [parameters fixed to result of SOURCE LP PIPELINE].
     - The lens galaxy mass is modeled using a total mass distribution [parameters fixed to result of search 1].
-    - The source galaxy's light is the input final mesh and regularization.
+    - The source galaxy's light is an adapt-image RTU mesh (free weight_power / weight_floor) with AdaptPower
+    regularization.
 
     This search initializes the pixelization's mesh and regularization.
     """
+    if n_like_max is None:
+        n_like_max = SETUP_N_LIKE_MAX["source_pix_2"] * max(1, n_live // 75)
+
+    pixelization = pixelization_from(search=2)
+    if mesh is not None:
+        pixelization.mesh = mesh
+    if regularization is not None:
+        pixelization.regularization = regularization
+
     model = af.Collection(
         galaxies=af.Collection(
             lens=af.Model(
@@ -190,25 +353,30 @@ def run_2(
             source=af.Model(
                 al.Galaxy,
                 redshift=source_lp_result.instance.galaxies.source.redshift,
-                pixelization=af.Model(
-                    al.Pixelization,
-                    mesh=mesh,
-                    regularization=regularization,
-                ),
+                pixelization=pixelization,
             ),
         ),
         extra_galaxies=source_pix_result_1.instance.extra_galaxies,
         dataset_model=dataset_model,
     )
 
+    # With the mass fixed, a one-parameter regularization leaves a one-dimensional search, which
+    # Nautilus refuses; an unused uniform parameter integrates out of the evidence (HST project).
+    if model.prior_count < 2:
+        model.nautilus_dummy = af.UniformPrior(lower_limit=0.0, upper_limit=1.0)
+
     search = af.Nautilus(
         name="source_pix[2]",
         **settings_search.search_dict,
-        n_live=75,
+        n_live=n_live,
         n_batch=n_batch,
+        f_live=f_live,
+        n_like_max=n_like_max,
     )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
+
+    report_if_capped(search, result, "source_pix_2")
 
     return result
 
@@ -328,7 +496,7 @@ def run_1__multi(
     settings_search: af.SettingsSearch,
     analysis_list: Union[al.AnalysisImaging, al.AnalysisInterferometer],
     source_lp_result: af.Result,
-    mesh_init: af.Model(al.AbstractMesh) = af.Model(al.mesh.RectangularAdaptDensity),
+    mesh_init: af.Model(al.AbstractMesh) = af.Model(al.mesh.RectangularRTUAdaptDensity),
     regularization_init: af.Model(al.AbstractRegularization) = af.Model(
         al.reg.Constant
     ),
@@ -467,7 +635,7 @@ def run_2__multi(
     analysis_list: Union[al.AnalysisImaging, al.AnalysisInterferometer],
     source_lp_result: af.Result,
     source_pix_result_1: af.Result,
-    mesh: af.Model(al.AbstractMesh) = af.Model(al.mesh.RectangularAdaptDensity),
+    mesh: af.Model(al.AbstractMesh) = af.Model(al.mesh.RectangularRTUAdaptDensity),
     regularization: af.Model(al.AbstractRegularization) = af.Model(al.reg.AdaptSplit),
     dataset_model: Optional[af.Model] = None,
     n_batch: int = 16,
