@@ -84,6 +84,8 @@ _SCHEDULER_JOB_ENV = (
     ("sge", "JOB_ID"),
 )
 
+_PID_START_TOLERANCE_SECONDS = 10.0  # ``etime`` has second resolution; two probes straddle a tick
+
 _HEARTBEATS = {}  # lock path -> (threading.Event, threading.Thread); never pickled with Paths
 
 
@@ -174,14 +176,29 @@ def _scheduler_job_alive(scheduler: Optional[str], job: str) -> Optional[bool]:
     return None
 
 
-def _pid_start_time(pid) -> Optional[str]:
-    """The start time ``ps`` reports for ``pid`` (POSIX), to tell a reused pid from the holder."""
+def _pid_start_time(pid) -> Optional[float]:
+    """
+    When ``pid`` started, as a POSIX timestamp, to tell a reused pid from the lock's holder.
+
+    Derived from the elapsed time ``ps`` reports (``etime``, ``[[dd-]hh:]mm:ss``), which is
+    locale- and timezone-free, unlike ``lstart``; compared with a tolerance by ``_pid_alive``.
+    """
     if os.name != "posix":
         return None
-    done = _run(["ps", "-o", "lstart=", "-p", str(pid)], timeout=10)
+    done = _run(["ps", "-o", "etime=", "-p", str(pid)], timeout=10)
     if done is None or done.returncode != 0:
         return None
-    return done.stdout.strip() or None
+    text = done.stdout.strip()
+    if not text:
+        return None
+    days, _, clock = text.rpartition("-")
+    parts = clock.split(":")
+    try:
+        seconds = sum(int(part) * 60**i for i, part in enumerate(reversed(parts)))
+        seconds += int(days or 0) * 86400
+    except ValueError:
+        return None
+    return time.time() - seconds
 
 
 def _pid_alive(pid, pid_start: Optional[str] = None) -> Optional[bool]:
@@ -196,10 +213,13 @@ def _pid_alive(pid, pid_start: Optional[str] = None) -> Optional[bool]:
         pass  # exists, owned by someone else
     except (OSError, ValueError, OverflowError):
         return None
-    if pid_start:
+    if pid_start is not None:
         now = _pid_start_time(pid)
-        if now is not None and now != pid_start:
-            return False  # the pid was reused by an unrelated process
+        try:
+            if now is not None and abs(now - float(pid_start)) > _PID_START_TOLERANCE_SECONDS:
+                return False  # the pid was reused by an unrelated process
+        except (TypeError, ValueError):
+            pass  # a holder file from before the timestamp form; trust the kill probe
     return True
 
 

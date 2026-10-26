@@ -9,7 +9,7 @@ plus a `.postN` for commits beyond it, so the intra-family `>=` floors stay sati
 | Package     | Branch                        | Commit                                     | Version            |
 |-------------|-------------------------------|--------------------------------------------|--------------------|
 | autoarray   | `production/hst`              | `40ae61b47b36991bf021a4fd14cc9b804ec9ce2d` | 2026.10.23.1.post3 |
-| autofit     | `production/hst`              | `c9264d112` (2026-10-26) + local lock patch | 2026.10.23.1.post1 |
+| autofit     | `production/hst`              | `production/hst` head, 2026-10-26 (lock patch committed upstream) | 2026.10.23.1.post1 |
 | autogalaxy  | `feature/elliptical-multipole`| `b1f4cabfe4276bebcd2c64cf22dcaebf10ff8d7b` | 2026.10.16.1.post5 |
 
 `autolens` and `autonerves` (the renamed `autoconf`) are on `main` in the codespace and are
@@ -25,7 +25,7 @@ branch carries `PowerLawEllipticalMultipole`. See `slam_pipeline/source_pix.py`.
 
 To refresh: re-run the export from the codespace and update this table.
 
-Local patch on autofit (2026-10-26, also applied uncommitted to the codespace checkout):
+Lock patch on autofit (2026-10-26, committed on `production/hst` and `feature/paths-running-lock-replay` in the codespace, pushed to the fork):
 `autofit/non_linear/paths/abstract.py` running-search lock made scheduler-agnostic. The holder
 records host, pid, pid start time and a generic job id (`PYAUTO_JOB_ID`, SLURM, PBS, LSF, SGE or
 the HTCondor job ad); liveness is decided by own-process / own-job, a pid probe on the same host,
