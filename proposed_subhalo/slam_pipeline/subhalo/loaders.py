@@ -4,7 +4,7 @@ Result-loading helpers for the tiled subhalo analysis
 
 The whole point of the tiled job is **not** to re-run the
 source -> light -> mass SLaM chain (days each). Those results are already on
-disk under ``output/`` from your submitted ``main_runner_*.py`` runs. This
+disk under ``updated_output/`` from your submitted ``main_runner_*.py`` runs. This
 module loads them back in two complementary ways:
 
 1. ``load_search_output(...)`` returns the lightweight Aggregator

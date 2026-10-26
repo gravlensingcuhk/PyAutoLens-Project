@@ -7,7 +7,7 @@ single delta-log-evidence map over the image plane.
 
     python combine_tiles.py COSJ100024+021749 F444W
 
-Reads ``output/subhalo_tiles/<dataset>/<filter>/tile_###.json``, prints the
+Reads ``updated_output/subhalo_tiles/<dataset>/<filter>/tile_###.json``, prints the
 ``n x n`` maps of delta-log-evidence and best-fit subhalo mass/centre, flags
 any missing tiles, and saves a CSV.
 """
@@ -25,7 +25,7 @@ def main():
     filt = str(sys.argv[2]) if len(sys.argv) > 2 else "F444W"
 
     cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
-    output_path = path.join(cosma_path, "output")
+    output_path = path.join(cosma_path, "updated_output")
     summary_dir = path.join(output_path, "subhalo_tiles", dataset_name, filt)
 
     files = sorted(f for f in os.listdir(summary_dir) if f.endswith(".json"))

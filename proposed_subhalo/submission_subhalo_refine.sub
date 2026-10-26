@@ -6,7 +6,7 @@
 # per-tile summaries, takes the highest-evidence tile's best-fit subhalo
 # position as a Gaussian centre prior, and refits the whole image plane. The
 # refined log-evidence vs the no-subhalo baseline is the final detection
-# significance (written to output/subhalo_tiles/<dataset>/<filter>/refine.json).
+# significance (written to updated_output/subhalo_tiles/<dataset>/<filter>/refine.json).
 #
 # EDIT the arguments to match the target:
 #   $1 dataset  $2 filter  $3 source prefix  $4 mass prefix  $5 mass name

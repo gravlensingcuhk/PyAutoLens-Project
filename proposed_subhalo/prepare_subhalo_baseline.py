@@ -11,7 +11,7 @@ This script:
 
   1. loads the masked dataset exactly as the main runners do;
   2. loads the already-completed ``source_pix[1]`` and ``mass_multipole`` results
-     from ``output/`` via the Aggregator (the chain is NOT re-run);
+     from ``updated_output/`` via the Aggregator (the chain is NOT re-run);
   3. runs ONE ``af.Nautilus`` fit of the mass model *without* a subhalo,
      writing it to a tile-independent ``unique_tag`` so every tile job loads
      the same baseline.
@@ -53,7 +53,7 @@ from slam_pipeline.subhalo.loaders import load_search_output, log_evidence_of
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "output")
+output_path = path.join(cosma_path, "updated_output")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, "data", "cowls")

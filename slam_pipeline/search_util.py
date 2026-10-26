@@ -32,7 +32,7 @@ Nautilus chases it indefinitely (J18's old Delaunay/AdaptSplit `source_pix[1]`: 
 days, ESS 2). Every setup search therefore has a hard ceiling, `SETUP_N_LIKE_MAX`, at about twice
 the most calls a converged HST run of that stage needed. A search that reaches it stops and
 writes its result as usual (good enough to seed the next stage), but `report_if_capped` says so
-in the job log and appends a line to `<output>/capped_searches.txt`, so a capped lens is looked
+in the job log and appends a line to `<output_path>/capped_searches.txt`, so a capped lens is looked
 at rather than trusted silently. `n_like_max` is not part of the output identifier either.
 
 __The Sampler Pool__
@@ -124,7 +124,7 @@ def analysis_settings() -> al.Settings:
 
 def report_if_capped(search: af.Nautilus, result, stage: str) -> None:
     """
-    Warn, and record in `<output>/capped_searches.txt`, when a search stopped at its
+    Warn, and record in `<output_path>/capped_searches.txt`, when a search stopped at its
     `n_like_max` rather than converging. See "__Likelihood-Call Caps__".
     """
     n_like_max = search.n_like_max

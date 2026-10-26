@@ -48,7 +48,7 @@ from slam_pipeline.subhalo.loaders import load_result
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "output")
+output_path = path.join(cosma_path, "updated_output")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, "data", "cowls")
@@ -131,7 +131,7 @@ dataset = dataset.apply_sparse_operator_cpu()
 
 
 # ---------------------------------------------------------------------------
-# Load the completed chain results from output/ (chain is NOT re-run).
+# Load the completed chain results from updated_output/ (chain is NOT re-run).
 # ---------------------------------------------------------------------------
 source_analysis = al.AnalysisImaging(
     dataset=dataset,

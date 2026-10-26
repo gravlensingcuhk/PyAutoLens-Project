@@ -19,7 +19,7 @@ This directory is **self-contained**: it ships its own complete
 | File | Purpose |
 |------|---------|
 | `slam_pipeline/subhalo/tiling.py` | `make_tiles()`, `subhalo_tile()` (one tile fit), `subhalo_refine()` (final whole-frame fit), and the shared `analysis_from()` / lens-model builder. |
-| `slam_pipeline/subhalo/loaders.py` | Load completed results from `output/` via the directory `Aggregator` **without re-running** them. |
+| `slam_pipeline/subhalo/loaders.py` | Load completed results from `updated_output/` via the directory `Aggregator` **without re-running** them. |
 | `slam_pipeline/subhalo/detect.py` | Reference in-process pipeline (`subhalo_no_subhalo`, `subhalo_grid_search`, `subhalo_refine`). The baseline stage calls `detect.subhalo_no_subhalo`. |
 | `slam_pipeline/subhalo/database.py` | Standalone example that scrapes results into a `.sqlite`. Run it directly; it is **not** imported by the pipeline. |
 | `prepare_subhalo_baseline.py` | Run **once**: fits the no-subhalo baseline under a tile-independent `unique_tag` so all 16 tiles *and* the refine share one reference evidence. |
@@ -101,7 +101,7 @@ change), update the `arguments =` line in **all three** `.sub` files to match.
 ## Output layout
 
 ```
-output/
+updated_output/
   subhalo/
     <dataset>_subhalo_baseline/subhalo_base/...        # one shared baseline
     <dataset>_subhalo_tile_000/subhalo_tile_000/...    # per-tile fits
@@ -140,7 +140,7 @@ for iy in range(n):       # y, top -> bottom
    Aggregator loading + one shared baseline.
 3. The reference `main_subhalo.py` hard-coded the cosma path but mixed in a
    `summary_dir` relative to cwd; paths are now all rooted at the workspace
-   `output/` consistently.
+   `updated_output/` consistently.
 4. `combine_tiles.py` now reports **missing tiles** (NaN cells) instead of
    silently producing a partial map, and writes a mass CSV too.
 

@@ -13,8 +13,8 @@
 #   uv sync --extra gpu
 #   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
 #
-# Results land in $PROJECT_ROOT/output with the same layout the HTCondor subhalo stages read
-# (output/<prefix>/<lens>/<search>/<id>.zip) and travel through git (README.md here).
+# Results land in $PROJECT_ROOT/updated_output with the same layout the HTCondor subhalo stages read
+# (updated_output/<prefix>/<lens>/<search>/<id>.zip) and travel through git (README.md here).
 
 export PROJECT_ROOT=${PROJECT_ROOT:-/home/user/lange/phygpu/PyAutoLens-Project}
 export PYAUTOLENS_PROJECT_ROOT=$PROJECT_ROOT   # read by main_runner_J18.py / J24.py

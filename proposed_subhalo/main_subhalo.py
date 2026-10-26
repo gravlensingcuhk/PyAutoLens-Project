@@ -5,7 +5,7 @@ Subhalo Detection Runner (one job per image-plane tile)
 This is the efficient "load-from-output" mode. It does **not** re-run the
 source -> light -> mass SLaM chain. Your submitted ``main_runner_*.py`` jobs
 (and ``prepare_subhalo_baseline.py``) already wrote those results to
-``output/``; this script loads them back via the Aggregator and runs only the
+``updated_output/``; this script loads them back via the Aggregator and runs only the
 single subhalo tile it is responsible for.
 
 Launch 16 independent jobs, one per tile, e.g.:
@@ -22,7 +22,7 @@ argv[2]  tile index     0 .. (NUMBER_OF_TILES**2 - 1)
 argv[3]  filter         (optional, default "F444W")
 
 Each job writes its own result under a tile-specific ``unique_tag`` and a small
-summary JSON under ``output/subhalo_tiles/<dataset>/tile_###.json``. After all
+summary JSON under ``updated_output/subhalo_tiles/<dataset>/tile_###.json``. After all
 16 finish, run ``combine_tiles.py <dataset>`` to assemble the delta-log-evidence
 map.
 """
@@ -53,7 +53,7 @@ from slam_pipeline.subhalo.loaders import (
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "output")
+output_path = path.join(cosma_path, "updated_output")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, "data", "cowls")
@@ -166,7 +166,7 @@ dataset = dataset.apply_sparse_operator_cpu()
 
 
 # ---------------------------------------------------------------------------
-# Load the COMPLETED chain results from output/ (the chain is NOT re-run).
+# Load the COMPLETED chain results from updated_output/ (the chain is NOT re-run).
 # ---------------------------------------------------------------------------
 # source_pix[1] -- full Result (needed for positions_likelihood_from + adapt images)
 source_analysis = al.AnalysisImaging(
@@ -197,7 +197,7 @@ mass_result = load_result(
     name=MASS_NAME,
     analysis=mass_analysis,
 )
-print(f"Loaded source_pix[1] and {MASS_NAME} results from output/.")
+print(f"Loaded source_pix[1] and {MASS_NAME} results from updated_output/.")
 
 
 # ---------------------------------------------------------------------------

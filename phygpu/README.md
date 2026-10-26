@@ -29,9 +29,9 @@ sbatch -J j18   phygpu/run_lens   COSJ100018+022138                     # one le
 
 Logs: `phygpu/outputs/m2_<tag>.<job>.out` (SLURM), `phygpu/outputs/<lens>.<job>.log` (each
 runner), `phygpu/outputs/gpu_<tag>.<job>.out` (GPU use every 30 s; summarise with the HST
-project's `hpc/gpu_usage.py`). Results: `output/<prefix>/<lens>/<search>/<id>.zip`, the layout
+project's `hpc/gpu_usage.py`). Results: `updated_output/<prefix>/<lens>/<search>/<id>.zip`, the layout
 the HTCondor side reads, tracked in git. A job that hits the 48 h wall is resubmitted with the same command; every
-search resumes from its folder. `output/capped_searches.txt` lists setup searches that stopped at
+search resumes from its folder. `updated_output/capped_searches.txt` lists setup searches that stopped at
 their likelihood-call cap; look at those before trusting what they seeded.
 
 Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
@@ -42,7 +42,7 @@ Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
 | `PYAUTOLENS_MIXED_PRECISION` | 1 | PyAutoArray mixed precision (mapping cube and PSF FFT in fp32, solve in fp64). Not in the identifier. |
 | `PYAUTOLENS_SAMPLER_PROCESSES` | 4 | CPU pool for Nautilus's network training, so the GPU is not idle-killed. |
 | `PYAUTOLENS_SPARSE_CURVATURE` | unset | Sparse curvature matrix (autoarray 2026-10-26). Off until benchmarked on COWLS data. |
-| `PYAUTOLENS_PROJECT_ROOT` | the clone | Where the runners find `config/`, `data/` and write `output/`. |
+| `PYAUTOLENS_PROJECT_ROOT` | the clone | Where the runners find `config/`, `data/` and write `updated_output/`. |
 
 ## Getting results to the HTCondor cluster
 
@@ -50,7 +50,7 @@ Results travel through git. On phygpu, once a stage (or the whole chain) has fin
 
 ```bash
 cd /home/user/lange/phygpu/PyAutoLens-Project
-git add output/model_setup_free_source output/mass_models
+git add updated_output/model_setup_free_source updated_output/mass_models
 git commit -m "J18/J24 outputs from phygpu"
 git push origin sam            # then merge sam onto master
 ```

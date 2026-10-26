@@ -192,6 +192,7 @@ autolens/autonerves) with a plain `uv sync`.
 
 ## Operational notes
 
+- **Output directories.** New fits write to `updated_output/` (runners and `proposed_subhalo/` both point there). The previous Hilbert/Delaunay results moved from `output/` to `output_v3/` as an archive.
 - **Refit from source_pix[1].** The model changed, so the old `source_pix`, `light` and `mass`
   results have new identifiers and are not reused. `source_lp[1]` results reload under their old
   identifier (verified for J18; its sampler state is rebuilt from `samples.csv`, with a benign
