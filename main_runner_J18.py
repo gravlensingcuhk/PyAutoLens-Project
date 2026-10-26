@@ -252,6 +252,12 @@ mass_result = slam_pipeline.mass_total.run(
 
 """
 Multipole
+
+Elliptical multipoles (al.mp.PowerLawEllipticalMultipole, PyAutoGalaxy feature/elliptical-multipole):
+the m=3 and m=4 terms deform the power law's elliptical isodensity contours, with strength k_m and
+shape angle s_m measured from the major axis, rather than adding a circular multipole in the sky
+frame (the old al.mp.PowerLawMultipole). They share the power law's centre, ell_comps,
+einstein_radius and slope by prior links (slam_pipeline.mass_total.link_multipole).
 """
 
 multipole_result = slam_pipeline.mass_total.run(
@@ -262,8 +268,8 @@ multipole_result = slam_pipeline.mass_total.run(
     light_result=light_result,
     mass=af.Model(al.mp.PowerLaw),
     multipole_1=None,
-    multipole_3=af.Model(al.mp.PowerLawMultipole),
-    multipole_4=af.Model(al.mp.PowerLawMultipole),
+    multipole_3=af.Model(al.mp.PowerLawEllipticalMultipole),
+    multipole_4=af.Model(al.mp.PowerLawEllipticalMultipole),
     reset_shear_prior=True,
     name='mass_multipole'
 )

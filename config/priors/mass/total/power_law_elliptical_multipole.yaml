@@ -1,0 +1,97 @@
+PowerLawEllipticalMultipole:
+  m:
+    type: Constant
+    value: 4
+  centre_0:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  centre_1:
+    type: Gaussian
+    mean: 0.0
+    sigma: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.05
+    limits:
+      lower: -inf
+      upper: inf
+  einstein_radius:
+    type: Uniform
+    lower_limit: 0.0
+    upper_limit: 8.0
+    width_modifier:
+      type: Relative
+      value: 0.25
+    limits:
+      lower: 0.0
+      upper: inf
+  ell_comps_0:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.3
+    lower_limit: -1.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: -1.0
+      upper: 1.0
+  ell_comps_1:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.3
+    lower_limit: -1.0
+    upper_limit: 1.0
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: -1.0
+      upper: 1.0
+  slope:
+    type: Uniform
+    lower_limit: 1.5
+    upper_limit: 3.0
+    width_modifier:
+      type: Absolute
+      value: 0.2
+    limits:
+      lower: 1.0
+      upper: 3.0
+  # Project prior (2026-10-26): the same TruncatedGaussian(0, 0.01) on [-0.1, 0.1] this project
+  # already used for the circular PowerLawMultipole's multipole_comps, carried over to the
+  # elliptical strength components (k_m sin m s_m, k_m cos m s_m); k_m is a fractional contour
+  # deformation of the same order. The HST project samples broader (sigma 0.05, +-0.15 for m=3)
+  # and reweights afterwards; widen here if the posterior presses on the bounds.
+  shape_multipole_comps_0:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1
+  shape_multipole_comps_1:
+    type: TruncatedGaussian
+    mean: 0.0
+    sigma: 0.01
+    lower_limit: -0.1
+    upper_limit: 0.1
+    width_modifier:
+      type: Absolute
+      value: 0.01
+    limits:
+      lower: -0.1
+      upper: 0.1

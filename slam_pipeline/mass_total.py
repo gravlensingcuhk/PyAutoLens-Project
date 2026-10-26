@@ -4,6 +4,24 @@ import autolens as al
 from typing import Union, Optional, Tuple
 
 
+
+def link_multipole(multipole: af.Model, m: int, mass: af.Model) -> af.Model:
+    """
+    Tie a multipole of order `m` to `mass`'s geometry by prior links (not copies).
+
+    `al.mp.PowerLawEllipticalMultipole` (the project default since 2026-10-26) perturbs the
+    power law's *elliptical* isodensity contours, so it must share the power law's `centre`,
+    `ell_comps`, `einstein_radius` and `slope`; the legacy circular `al.mp.PowerLawMultipole`
+    has no `ell_comps` and only the other three are linked.
+    """
+    multipole.m = m
+    multipole.centre = mass.centre
+    if hasattr(multipole, "ell_comps"):
+        multipole.ell_comps = mass.ell_comps
+    multipole.einstein_radius = mass.einstein_radius
+    multipole.slope = mass.slope
+    return multipole
+
 def run(
     settings_search: af.SettingsSearch,
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
@@ -108,22 +126,13 @@ def run(
         point = light_result.instance.galaxies.lens.point
 
     if multipole_1 is not None:
-        multipole_1.m = 1
-        multipole_1.centre = mass.centre
-        multipole_1.einstein_radius = mass.einstein_radius
-        multipole_1.slope = mass.slope
+        link_multipole(multipole_1, m=1, mass=mass)
 
     if multipole_3 is not None:
-        multipole_3.m = 3
-        multipole_3.centre = mass.centre
-        multipole_3.einstein_radius = mass.einstein_radius
-        multipole_3.slope = mass.slope
+        link_multipole(multipole_3, m=3, mass=mass)
 
     if multipole_4 is not None:
-        multipole_4.m = 4
-        multipole_4.centre = mass.centre
-        multipole_4.einstein_radius = mass.einstein_radius
-        multipole_4.slope = mass.slope
+        link_multipole(multipole_4, m=4, mass=mass)
 
     source = al.util.chaining.source_from(
         result=source_result_for_source,
@@ -272,22 +281,13 @@ def run__multi(
             point = light_result[i].instance.galaxies.lens.point
 
         if multipole_1 is not None:
-            multipole_1.m = 1
-            multipole_1.centre = mass.centre
-            multipole_1.einstein_radius = mass.einstein_radius
-            multipole_1.slope = mass.slope
+            link_multipole(multipole_1, m=1, mass=mass)
 
         if multipole_3 is not None:
-            multipole_3.m = 3
-            multipole_3.centre = mass.centre
-            multipole_3.einstein_radius = mass.einstein_radius
-            multipole_3.slope = mass.slope
+            link_multipole(multipole_3, m=3, mass=mass)
 
         if multipole_4 is not None:
-            multipole_4.m = 4
-            multipole_4.centre = mass.centre
-            multipole_4.einstein_radius = mass.einstein_radius
-            multipole_4.slope = mass.slope
+            link_multipole(multipole_4, m=4, mass=mass)
 
         source = al.util.chaining.source_from(
             result=source_result_for_source[i],

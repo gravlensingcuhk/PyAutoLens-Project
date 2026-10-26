@@ -108,15 +108,20 @@ def subhalo_no_subhalo(
     if use_chained_model:
         lens=mass_result.model_centred.galaxies.lens
         if reset_multipoles:
-            if hasattr(lens, 'multipole_1'):
-                lens.multipole_1 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_1.m = 1
-            if hasattr(lens, 'multipole_3'):
-                lens.multipole_3 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_3.m = 3
-            if hasattr(lens, 'multipole_4'):
-                lens.multipole_4 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_4.m = 4
+            # Fresh elliptical multipoles (al.mp.PowerLawEllipticalMultipole, as in the
+            # mass_multipole stage), tied to the power law's geometry by prior links: the
+            # profile perturbs the power law's elliptical contours, so it must share its
+            # centre, ell_comps, einstein_radius and slope.
+            for m in (1, 3, 4):
+                name = f"multipole_{m}"
+                if hasattr(lens, name):
+                    multipole = af.Model(al.mp.PowerLawEllipticalMultipole)
+                    multipole.m = m
+                    multipole.centre = lens.mass.centre
+                    multipole.ell_comps = lens.mass.ell_comps
+                    multipole.einstein_radius = lens.mass.einstein_radius
+                    multipole.slope = lens.mass.slope
+                    setattr(lens, name, multipole)
         if reset_shear:
             lens.shear = af.Model(al.mp.ExternalShear)
     else:
@@ -200,15 +205,17 @@ def subhalo_grid_search(
     if subhalo_no_subhalo_settings_dict['chaining']:
         lens=mass_result.model_centred.galaxies.lens
         if subhalo_no_subhalo_settings_dict['reset_multipoles']:
-            if hasattr(lens, 'multipole_1'):
-                lens.multipole_1 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_1.m = 1
-            if hasattr(lens, 'multipole_3'):
-                lens.multipole_3 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_3.m = 3
-            if hasattr(lens, 'multipole_4'):
-                lens.multipole_4 = af.Model(al.mp.PowerLawMultipole)
-                lens.multipole_4.m = 4
+            # Elliptical multipoles linked to the power law, as in the baseline above.
+            for m in (1, 3, 4):
+                name = f"multipole_{m}"
+                if hasattr(lens, name):
+                    multipole = af.Model(al.mp.PowerLawEllipticalMultipole)
+                    multipole.m = m
+                    multipole.centre = lens.mass.centre
+                    multipole.ell_comps = lens.mass.ell_comps
+                    multipole.einstein_radius = lens.mass.einstein_radius
+                    multipole.slope = lens.mass.slope
+                    setattr(lens, name, multipole)
         if subhalo_no_subhalo_settings_dict['reset_shear']:
             lens.shear = af.Model(al.mp.ExternalShear)
     else:
