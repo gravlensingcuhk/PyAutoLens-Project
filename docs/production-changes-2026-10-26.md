@@ -161,6 +161,35 @@ The change lives in `autofit/non_linear/paths/abstract.py` on PyAutoFit `product
 here. Side effect: the heartbeat thread makes the process multi-threaded, so a search that forks
 a multiprocessing pool sees Python's fork warning; the JAX path used here has no pool.
 
+## GPU runs on phygpu, CPU replay on HTCondor
+
+The chain through `mass_multipole` runs on phygpu (SLURM, one lens per GPU); the archives are then
+copied to the HTCondor cluster's `output/` for the CPU-side subhalo stages. `phygpu/README.md` has
+the bring-up, submission and sync commands. Everything GPU-specific is an environment switch with
+a CPU default, read by `slam_pipeline/search_util.py` (ported from the HST project):
+
+| Variable | phygpu | CPU default | Effect |
+| --- | --- | --- | --- |
+| `PYAUTOLENS_N_BATCH` | 20 | 16 | JAX vmap batch of live points; not in the search identifier |
+| `PYAUTOLENS_MIXED_PRECISION` | 1 | off | PyAutoArray mixed precision (fp32 mapping cube and PSF FFT, fp64 solve); not in the identifier |
+| `PYAUTOLENS_SAMPLER_PROCESSES` | 4 | 1 (no pool) | CPU process pool for Nautilus's network training, so the GPU is not idle-killed |
+| `PYAUTOLENS_SPARSE_CURVATURE` | unset | off | autoarray's new sparse curvature matrix (`production/hst` 82cc4396, re-vendored); unbenchmarked on COWLS data |
+
+Infrastructure: `pyproject.toml` gains a `gpu` extra (`uv sync --extra gpu` installs the CUDA 12
+jaxlib on Linux); `phygpu/activate.sh` (environment, GPU-use log), `phygpu/multi_run2` (exclusive
+2-GPU node, both lenses), `phygpu/run_lens` (one GPU, tests), `phygpu/sync_to_condor.sh` (rsync of
+`*.zip` only, same `output/<prefix>/<lens>/<search>/<id>.zip` layout, no checkpoints, locks or
+replay folders). Both runners are wrapped in `main()`: the pool's spawned workers import the
+script as `__mp_main__`, and without the guard they re-ran the whole chain (caught in the local
+smoke test).
+
+Why CPU replay works: archives hold only JSON, CSV and images; Nautilus's checkpoint is dropped on
+completion; the saved analysis settings (`use_mixed_precision`) are valid on CPU JAX; the subhalo
+stages build their own analyses with CPU defaults; none of the switches enters a search identifier
+(checked: `source_pix[1]` has the same identifier at n_batch 16 and 20). The one requirement is
+that the HTCondor side runs the same commit of this repository (vendored `pyauto/`, pinned
+autolens/autonerves) with a plain `uv sync`.
+
 ## Operational notes
 
 - **Refit from source_pix[1].** The model changed, so the old `source_pix`, `light` and `mass`
@@ -194,5 +223,6 @@ a multiprocessing pool sees Python's fork warning; the JAX path used here has no
 | PyAutoLens-Project `sam` | `ef307be` | autofit lock: scheduler-agnostic liveness, heartbeat thread |
 | PyAutoLens-Project `sam` | `4efaf22` | autofit lock: locale-free pid start time (vendored follow-up) |
 | PyAutoLens-Project `sam` | `7c05a2f` | elliptical multipoles in mass_total and subhalo reset, project prior |
+| PyAutoLens-Project `sam` | `e606db7` | GPU runs on phygpu: search_util, env settings, SLURM scripts, autoarray re-vendor |
 | PyAutoFit `production/hst` (fork) | `e6fcb6bd8`, `8a9ae493f` | lock change and follow-up |
 | PyAutoFit `feature/paths-running-lock-replay` (fork) | `068a66dae`, `f7422754d` | same two, on top of `db6ad6b45` |
