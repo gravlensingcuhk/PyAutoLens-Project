@@ -6,6 +6,7 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import zipfile
 import zlib
@@ -60,6 +61,146 @@ def _remove_dead_replay_dirs(base_output_path):
             shutil.rmtree(folder, ignore_errors=True)
         except PermissionError:
             pass  # alive, another user's process
+
+
+# ---------------------------------------------------------------------------------------------
+# Running-search lock: job identity and liveness, independent of the scheduler.
+#
+# A lock's holder is identified by host + pid (+ the pid's start time, against pid reuse) and,
+# when the process runs under a batch scheduler, by that scheduler's job id. Liveness is decided
+# in this order: the same process or the same job -> its own lock; same host -> the pid is
+# probed directly; a known scheduler -> its queue is asked, if its client is on PATH; otherwise
+# the lock's heartbeat decides. The heartbeat is refreshed by a daemon thread for as long as the
+# lock is held, so the fallback works for a plain local run, HTCondor, SLURM, PBS, LSF, SGE or
+# anything else, and never depends on how often the search writes an update.
+# ---------------------------------------------------------------------------------------------
+
+# ``PYAUTO_JOB_ID`` lets any launcher name its job explicitly; otherwise the first scheduler
+# variable found decides.
+_SCHEDULER_JOB_ENV = (
+    ("slurm", "SLURM_JOB_ID"),
+    ("pbs", "PBS_JOBID"),
+    ("lsf", "LSB_JOBID"),
+    ("sge", "JOB_ID"),
+)
+
+_HEARTBEATS = {}  # lock path -> (threading.Event, threading.Thread); never pickled with Paths
+
+
+def _htcondor_job_id() -> Optional[str]:
+    """``<ClusterId>.<ProcId>`` from the job ad HTCondor hands every job, else None."""
+    ad = os.environ.get("_CONDOR_JOB_AD")
+    if not ad:
+        return None
+    try:
+        text = Path(ad).read_text()
+    except OSError:
+        return None
+    ids = {}
+    for key in ("ClusterId", "ProcId"):
+        match = re.search(rf"^{key}\s*=\s*(\d+)", text, re.MULTILINE)
+        if match:
+            ids[key] = match.group(1)
+    if "ClusterId" not in ids:
+        return None
+    return f"{ids['ClusterId']}.{ids.get('ProcId', '0')}"
+
+
+def _current_job() -> tuple:
+    """``(scheduler, job id)`` of the batch job this process runs in, or ``(None, None)``."""
+    explicit = os.environ.get("PYAUTO_JOB_ID")
+    if explicit:
+        return "explicit", explicit
+    for scheduler, variable in _SCHEDULER_JOB_ENV:
+        value = os.environ.get(variable)
+        if value:
+            return scheduler, value
+    condor = _htcondor_job_id()
+    if condor:
+        return "htcondor", condor
+    return None, None
+
+
+def _run(command, timeout=30) -> Optional[subprocess.CompletedProcess]:
+    """Run a scheduler client; None when it is not installed or did not answer."""
+    if shutil.which(command[0]) is None:
+        return None
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _scheduler_job_alive(scheduler: Optional[str], job: str) -> Optional[bool]:
+    """
+    Ask ``scheduler`` whether ``job`` is still queued or running: True / False, or None when
+    the question cannot be answered here (unknown scheduler, client missing, call failed), in
+    which case the caller falls back to the lock's heartbeat.
+    """
+    if scheduler == "slurm":
+        done = _run(["squeue", "-h", "-j", str(job), "-o", "%T"])
+        if done is None:
+            return None
+        state = done.stdout.strip()
+        return state not in ("", "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL",
+                             "OUT_OF_MEMORY", "PREEMPTED", "COMPLETING", "BOOT_FAIL", "DEADLINE")
+    if scheduler == "htcondor":
+        done = _run(["condor_q", str(job), "-af", "JobStatus"])
+        if done is None:
+            return None
+        state = done.stdout.strip().split()
+        # 1 idle, 2 running, 5 held, 6 transferring output, 7 suspended: still owns the job.
+        # 3 removed, 4 completed, or no longer in the queue: it does not.
+        return bool(state) and state[0] in ("1", "2", "5", "6", "7")
+    if scheduler == "pbs":
+        done = _run(["qstat", "-f", str(job)])
+        if done is None:
+            return None
+        if done.returncode != 0:
+            return False
+        match = re.search(r"job_state\s*=\s*(\w)", done.stdout)
+        return match is None or match.group(1) not in ("C", "E", "F")
+    if scheduler == "lsf":
+        done = _run(["bjobs", "-noheader", "-o", "stat", str(job)])
+        if done is None:
+            return None
+        state = done.stdout.strip().split()
+        return bool(state) and state[0] not in ("DONE", "EXIT", "ZOMBI")
+    if scheduler == "sge":
+        done = _run(["qstat", "-j", str(job)])
+        if done is None:
+            return None
+        return done.returncode == 0
+    return None
+
+
+def _pid_start_time(pid) -> Optional[str]:
+    """The start time ``ps`` reports for ``pid`` (POSIX), to tell a reused pid from the holder."""
+    if os.name != "posix":
+        return None
+    done = _run(["ps", "-o", "lstart=", "-p", str(pid)], timeout=10)
+    if done is None or done.returncode != 0:
+        return None
+    return done.stdout.strip() or None
+
+
+def _pid_alive(pid, pid_start: Optional[str] = None) -> Optional[bool]:
+    """Whether ``pid`` runs on this host; None when that cannot be told here."""
+    if os.name != "posix":
+        return None
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # exists, owned by someone else
+    except (OSError, ValueError, OverflowError):
+        return None
+    if pid_start:
+        now = _pid_start_time(pid)
+        if now is not None and now != pid_start:
+            return False  # the pid was reused by an unrelated process
+    return True
 
 
 class SearchInProgressError(RuntimeError):
@@ -445,10 +586,14 @@ class AbstractPaths(ABC):
 
     # Held from ``restore`` to ``_zip`` by the process fitting (starting or resuming) an
     # unfinished search; a second process finding it refuses to start (see
-    # ``_acquire_running_lock``). A holder whose liveness cannot be checked is presumed dead
-    # once its heartbeat (touched by ``touch_running_lock``) is older than this.
+    # ``_acquire_running_lock``). While held, a daemon thread refreshes the lock's heartbeat
+    # every ``running_lock_heartbeat_seconds``; a holder whose process cannot be probed
+    # directly (another host, no scheduler that can be asked) is presumed dead once the
+    # heartbeat is older than ``running_lock_stale_seconds``. The margin covers a node whose
+    # clock or filesystem lags; a holder that really is alive refreshes it every minute.
     _running_lock_held = False
-    running_lock_stale_seconds = 6 * 3600
+    running_lock_heartbeat_seconds = 60
+    running_lock_stale_seconds = 30 * 60
 
     # Whether this Paths owns an output folder on disk that the two locks above guard;
     # ``NullPaths`` and ``DatabasePaths`` do not.
@@ -496,13 +641,12 @@ class AbstractPaths(ABC):
         A search that is starting or resuming writes its checkpoint and archive in place, so
         two processes on the same output folder corrupt each other (a job resubmitted while
         its predecessor still runs, or two benchmarks of one lens writing into one prefix).
-        The lock is a directory beside the output folder holding the claimant's host, pid
-        and SLURM job id. A second process finding one checks whether the holder is alive --
-        its SLURM job through ``squeue`` when that exists, else its pid when on the same host,
-        else its heartbeat against ``running_lock_stale_seconds`` -- and raises
-        ``SearchInProgressError`` if so. A dead holder's lock is taken over with a warning,
-        as is a lock left by the same SLURM job (a runner that re-executed itself after an
-        out-of-memory retry).
+        The lock is a directory beside the output folder holding the claimant's host, pid,
+        pid start time and, under a batch scheduler, its job id. A second process finding one
+        decides whether the holder is alive without assuming any particular scheduler (see
+        ``_lock_holder_alive``) and raises ``SearchInProgressError`` if so. A dead holder's
+        lock is taken over with a warning, as is a lock left by the same job (a runner that
+        re-executed itself after an out-of-memory retry) or by this very process.
         """
         if not self.locks_output_folder:
             return
@@ -525,9 +669,11 @@ class AbstractPaths(ABC):
             )
         self._write_lock_holder(lock, holder)
         self._running_lock_held = True
+        self._start_lock_heartbeat()
 
     def _release_running_lock(self):
         if self._running_lock_held:
+            self._stop_lock_heartbeat()
             shutil.rmtree(self._running_lock_path, ignore_errors=True)
             self._running_lock_held = False
 
@@ -539,12 +685,36 @@ class AbstractPaths(ABC):
             except OSError:
                 pass
 
+    def _start_lock_heartbeat(self):
+        """Refresh the heartbeat from a daemon thread until the lock is released."""
+        key = str(self._running_lock_path)
+        self._stop_lock_heartbeat()
+        stop = threading.Event()
+        interval = self.running_lock_heartbeat_seconds
+
+        def beat():
+            while not stop.wait(interval):
+                self.touch_running_lock()
+
+        thread = threading.Thread(target=beat, name="pyauto-running-lock-heartbeat", daemon=True)
+        thread.start()
+        _HEARTBEATS[key] = (stop, thread)
+
+    def _stop_lock_heartbeat(self):
+        entry = _HEARTBEATS.pop(str(self._running_lock_path), None)
+        if entry is not None:
+            entry[0].set()
+
     @staticmethod
     def _running_lock_holder() -> dict:
+        scheduler, job = _current_job()
+        pid = os.getpid()
         return {
             "host": socket.gethostname(),
-            "pid": os.getpid(),
-            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            "pid": pid,
+            "pid_start": _pid_start_time(pid),
+            "scheduler": scheduler,
+            "job": job,
             "time": time.ctime(),
         }
 
@@ -563,31 +733,32 @@ class AbstractPaths(ABC):
             return {}
 
     def _lock_holder_alive(self, other: dict, me: dict) -> bool:
-        """Whether the process described by ``other`` (a lock's holder file) still runs."""
+        """
+        Whether the process described by ``other`` (a lock's holder file) still runs.
+
+        Scheduler-agnostic: the same process or the same batch job is its own lock; a holder
+        on this host is probed by pid (and start time, against pid reuse); a holder under a
+        scheduler whose client is available is looked up in its queue; anything else is
+        decided by the heartbeat, which the holder's thread refreshes every minute while it
+        lives.
+        """
         if not other:
             return self._lock_heartbeat_fresh()
-        if other.get("host") == me.get("host") and other.get("pid") == me.get("pid"):
+        same_host = other.get("host") == me.get("host")
+        if same_host and other.get("pid") == me.get("pid"):
             return False  # this very process: an earlier fit here raised before releasing it
-        job = other.get("slurm_job_id")
-        if job and job == me.get("slurm_job_id"):
-            return False  # the same SLURM job, re-executed: its own lock
-        if job and shutil.which("squeue"):
-            try:
-                state = subprocess.run(
-                    ["squeue", "-h", "-j", str(job), "-o", "%T"],
-                    capture_output=True, text=True, timeout=30,
-                ).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                state = None
-            if state is not None:
-                return state not in ("", "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT",
-                                     "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "COMPLETING")
-        if other.get("host") == me.get("host") and other.get("pid"):
-            try:
-                os.kill(int(other["pid"]), 0)
-                return True
-            except (OSError, ValueError):
-                return False
+        job = other.get("job") or other.get("slurm_job_id")  # the latter: pre-2026-10-26 locks
+        if job and job == me.get("job"):
+            return False  # the same batch job, re-executed: its own lock
+        if same_host and other.get("pid"):
+            alive = _pid_alive(other["pid"], other.get("pid_start"))
+            if alive is not None:
+                return alive
+        if job:
+            scheduler = other.get("scheduler") or ("slurm" if "slurm_job_id" in other else None)
+            alive = _scheduler_job_alive(scheduler, job)
+            if alive is not None:
+                return alive
         return self._lock_heartbeat_fresh()
 
     def _lock_heartbeat_fresh(self) -> bool:
