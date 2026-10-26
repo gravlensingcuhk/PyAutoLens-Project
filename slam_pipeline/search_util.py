@@ -75,8 +75,9 @@ device-specific: `files/` holds JSON (model, search, settings, samples summary) 
 (`output.yaml search_internal: false`). What has to match is the code: the CPU side must run
 the same commit of this repository (the vendored `pyauto/` packages travel with it) with a plain
 `uv sync`; the GPU side adds `--extra gpu`. The settings above are environment-driven with CPU
-defaults, so the CPU runs build exactly the analyses they did before. Keep the output layout
-`output/<prefix>/<lens>/<search>/<id>.zip` when copying results across (`phygpu/sync_to_condor.sh`).
+defaults, so the CPU runs build exactly the analyses they did before. The archives travel through
+git: committed from the phygpu clone, merged onto `master`, pulled on the HTCondor cluster
+(`phygpu/README.md`).
 """
 import atexit
 import multiprocessing

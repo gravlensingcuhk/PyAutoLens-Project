@@ -9,3 +9,7 @@ phygpu/outputs/*
 phygpu/errors/*
 !phygpu/outputs/.gitkeep
 !phygpu/errors/.gitkeep
+# Never commit a running search's state, only finished archives (phygpu/README.md)
+output/**/*.hdf5
+output/**/*.running/
+output/**/*.replay-*/

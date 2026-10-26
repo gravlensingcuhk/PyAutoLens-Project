@@ -163,8 +163,9 @@ a multiprocessing pool sees Python's fork warning; the JAX path used here has no
 
 ## GPU runs on phygpu, CPU replay on HTCondor
 
-The chain through `mass_multipole` runs on phygpu (SLURM, one lens per GPU); the archives are then
-copied to the HTCondor cluster's `output/` for the CPU-side subhalo stages. `phygpu/README.md` has
+The chain through `mass_multipole` runs on phygpu (SLURM, one lens per GPU); the finished archives are
+committed to the branch, merged onto `master` and pulled on the HTCondor cluster for the CPU-side
+subhalo stages. `phygpu/README.md` has
 the bring-up, submission and sync commands. Everything GPU-specific is an environment switch with
 a CPU default, read by `slam_pipeline/search_util.py` (ported from the HST project):
 
@@ -177,9 +178,8 @@ a CPU default, read by `slam_pipeline/search_util.py` (ported from the HST proje
 
 Infrastructure: `pyproject.toml` gains a `gpu` extra (`uv sync --extra gpu` installs the CUDA 12
 jaxlib on Linux); `phygpu/activate.sh` (environment, GPU-use log), `phygpu/multi_run2` (exclusive
-2-GPU node, both lenses), `phygpu/run_lens` (one GPU, tests), `phygpu/sync_to_condor.sh` (rsync of
-`*.zip` only, same `output/<prefix>/<lens>/<search>/<id>.zip` layout, no checkpoints, locks or
-replay folders). Both runners are wrapped in `main()`: the pool's spawned workers import the
+2-GPU node, both lenses), `phygpu/run_lens` (one GPU, tests). `.gitignore` keeps checkpoints, `.running`
+locks and replay folders out of the tracked `output/`. Both runners are wrapped in `main()`: the pool's spawned workers import the
 script as `__mp_main__`, and without the guard they re-ran the whole chain (caught in the local
 smoke test).
 
