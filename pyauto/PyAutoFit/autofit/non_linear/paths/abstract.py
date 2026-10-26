@@ -1,7 +1,12 @@
+import atexit
+import json
 import logging
 import os
 import re
 import shutil
+import socket
+import subprocess
+import time
 import zipfile
 import zlib
 from abc import ABC, abstractmethod
@@ -20,6 +25,45 @@ from autofit.text import text_util
 from autofit.tools.util import open_, zip_directory
 
 logger = logging.getLogger(__name__)
+
+
+_REPLAY_DIRS = set()
+
+
+def _replay_dir_for(base_output_path) -> Path:
+    """The folder this process replays the finished archive at ``base_output_path`` into."""
+    return Path(f"{base_output_path}.replay-{socket.gethostname()}-{os.getpid()}")
+
+
+def _cleanup_replay_dirs():
+    """Drop every private replay folder this process extracted (registered with ``atexit``)."""
+    while _REPLAY_DIRS:
+        shutil.rmtree(_REPLAY_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup_replay_dirs)
+
+
+def _remove_dead_replay_dirs(base_output_path):
+    """
+    Drop the private replay folders left beside ``base_output_path`` by processes of this
+    host that no longer exist (a job killed before ``atexit`` could run).
+    """
+    host = socket.gethostname()
+    for folder in Path(base_output_path).parent.glob(f"{Path(base_output_path).name}.replay-{host}-*"):
+        try:
+            pid = int(folder.name.rsplit("-", 1)[-1])
+            os.kill(pid, 0)
+        except (ValueError, IndexError):
+            continue
+        except ProcessLookupError:
+            shutil.rmtree(folder, ignore_errors=True)
+        except PermissionError:
+            pass  # alive, another user's process
+
+
+class SearchInProgressError(RuntimeError):
+    """Another live process is fitting the same unfinished search (see ``_acquire_running_lock``)."""
 
 pattern = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -347,8 +391,21 @@ class AbstractPaths(ABC):
     def output_path(self) -> Path:
         """
         The path to the output information for a search.
-        """
 
+        While a finished archive is being replayed (``restore`` found ``.completed`` in the
+        zip and ``remove_files`` is set) this is the process-private folder the archive was
+        extracted into, ``<base>.replay-<host>-<pid>``, for as long as that folder exists;
+        every ``Paths`` of this process for the same search resolves to it, since callers
+        (the sensitivity grid, expectation propagation) read a result through their own copy
+        of the paths. The zip, the locks and the folder an unfinished fit writes stay at
+        ``_base_output_path``.
+        """
+        base = self._base_output_path
+        replay = _replay_dir_for(base)
+        return replay if replay.exists() else base
+
+    @property
+    def _base_output_path(self) -> Path:
         strings = list(
             filter(
                 None,
@@ -379,6 +436,24 @@ class AbstractPaths(ABC):
             pass
         return files_path
 
+    # Set by ``restore`` when the archive it extracted holds ``.completed``: the replay of a
+    # finished fit is read-only (see ``restore``) and goes into a process-private folder
+    # (``_replay_dir_for``), which ``output_path`` then points at until the process
+    # exits (``_cleanup_replay_dirs``), so a second process replaying the same archive can
+    # never delete a folder this one is still reading or writing its caches into.
+    _archive_is_complete = False
+
+    # Held from ``restore`` to ``_zip`` by the process fitting (starting or resuming) an
+    # unfinished search; a second process finding it refuses to start (see
+    # ``_acquire_running_lock``). A holder whose liveness cannot be checked is presumed dead
+    # once its heartbeat (touched by ``touch_running_lock``) is older than this.
+    _running_lock_held = False
+    running_lock_stale_seconds = 6 * 3600
+
+    # Whether this Paths owns an output folder on disk that the two locks above guard;
+    # ``NullPaths`` and ``DatabasePaths`` do not.
+    locks_output_folder = True
+
     def zip_remove(self):
         """
         Copy files from the sym linked search folder then remove the sym linked folder.
@@ -387,6 +462,15 @@ class AbstractPaths(ABC):
         self._zip()
 
     def _zip(self):
+        if self._archive_is_complete:
+            # Read-only replay of a finished fit: the zip was never removed and nothing in
+            # the extracted folder has changed (a cache written after completion goes into
+            # the zip through ``preserve_in_zip``). The private extracted copy is kept until
+            # the process exits: later stages still read from, and write caches into, this
+            # result's folder, and the folder is this process's alone.
+            self._archive_is_complete = False
+            return
+
         try:
             zip_directory(self.output_path, self._zip_path)
 
@@ -398,6 +482,123 @@ class AbstractPaths(ABC):
 
         except FileNotFoundError:
             pass
+        finally:
+            self._release_running_lock()
+
+    @property
+    def _running_lock_path(self) -> Path:
+        return Path(f"{self._base_output_path}.running")
+
+    def _acquire_running_lock(self):
+        """
+        Claim an unfinished search for this process, or refuse to touch it.
+
+        A search that is starting or resuming writes its checkpoint and archive in place, so
+        two processes on the same output folder corrupt each other (a job resubmitted while
+        its predecessor still runs, or two benchmarks of one lens writing into one prefix).
+        The lock is a directory beside the output folder holding the claimant's host, pid
+        and SLURM job id. A second process finding one checks whether the holder is alive --
+        its SLURM job through ``squeue`` when that exists, else its pid when on the same host,
+        else its heartbeat against ``running_lock_stale_seconds`` -- and raises
+        ``SearchInProgressError`` if so. A dead holder's lock is taken over with a warning,
+        as is a lock left by the same SLURM job (a runner that re-executed itself after an
+        out-of-memory retry).
+        """
+        if not self.locks_output_folder:
+            return
+        lock = self._running_lock_path
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = self._running_lock_holder()
+        try:
+            os.mkdir(lock)
+        except FileExistsError:
+            other = self._read_lock_holder(lock)
+            if self._lock_holder_alive(other, holder):
+                raise SearchInProgressError(
+                    f"The search at {self.output_path} is being fitted by another process "
+                    f"({other}); refusing to start on it. Give this run its own output "
+                    f"prefix, or wait for that process to finish."
+                )
+            logger.warning(
+                f"Taking over the running-search lock {lock} left by {other}, which is no "
+                f"longer alive."
+            )
+        self._write_lock_holder(lock, holder)
+        self._running_lock_held = True
+
+    def _release_running_lock(self):
+        if self._running_lock_held:
+            shutil.rmtree(self._running_lock_path, ignore_errors=True)
+            self._running_lock_held = False
+
+    def touch_running_lock(self):
+        """Refresh the heartbeat of the running-search lock this process holds (if any)."""
+        if self._running_lock_held:
+            try:
+                os.utime(self._running_lock_path / "holder")
+            except OSError:
+                pass
+
+    @staticmethod
+    def _running_lock_holder() -> dict:
+        return {
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            "time": time.ctime(),
+        }
+
+    @staticmethod
+    def _write_lock_holder(lock: Path, holder: dict):
+        try:
+            (lock / "holder").write_text(json.dumps(holder))
+        except OSError:
+            pass
+
+    @staticmethod
+    def _read_lock_holder(lock: Path) -> dict:
+        try:
+            return json.loads((lock / "holder").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _lock_holder_alive(self, other: dict, me: dict) -> bool:
+        """Whether the process described by ``other`` (a lock's holder file) still runs."""
+        if not other:
+            return self._lock_heartbeat_fresh()
+        if other.get("host") == me.get("host") and other.get("pid") == me.get("pid"):
+            return False  # this very process: an earlier fit here raised before releasing it
+        job = other.get("slurm_job_id")
+        if job and job == me.get("slurm_job_id"):
+            return False  # the same SLURM job, re-executed: its own lock
+        if job and shutil.which("squeue"):
+            try:
+                state = subprocess.run(
+                    ["squeue", "-h", "-j", str(job), "-o", "%T"],
+                    capture_output=True, text=True, timeout=30,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                state = None
+            if state is not None:
+                return state not in ("", "COMPLETED", "CANCELLED", "FAILED", "TIMEOUT",
+                                     "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "COMPLETING")
+        if other.get("host") == me.get("host") and other.get("pid"):
+            try:
+                os.kill(int(other["pid"]), 0)
+                return True
+            except (OSError, ValueError):
+                return False
+        return self._lock_heartbeat_fresh()
+
+    def _lock_heartbeat_fresh(self) -> bool:
+        try:
+            age = time.time() - (self._running_lock_path / "holder").stat().st_mtime
+        except OSError:
+            try:
+                age = time.time() - self._running_lock_path.stat().st_mtime
+            except OSError:
+                return False
+        return age < self.running_lock_stale_seconds
 
     def preserve_in_zip(self, file_path):
         """
@@ -503,22 +704,63 @@ class AbstractPaths(ABC):
     def restore(self):
         """
         Copy files from the ``.zip`` file to the samples folder.
+
+        An archive of a *finished* fit (one holding ``.completed``) is replayed read-only:
+        the zip stays in place and is extracted into a folder private to this process,
+        ``<output>.replay-<host>-<pid>``, which ``output_path`` points at from then on
+        and which is removed when the process exits. Before 2026-10-24 every replay removed
+        the zip and re-created it from the folder, so two processes reading one finished
+        search at the same time could leave a corrupt archive behind; a lock directory then
+        serialised replays of a shared folder, but a stage that reads a result's files
+        (PyAutoGalaxy's adapt-image cache) after its replay still found the folder deleted
+        by the next process's replay (2026-10-26, four SLaM chains sharing one SOURCE LP).
+        An archive of an unfinished fit is restored as before, into the folder beside the
+        zip: the zip is removed and rebuilt when the resumed fit completes.
         """
 
-        if Path(self._zip_path).exists():
-            shutil.rmtree(self.output_path, ignore_errors=True)
+        if not Path(self._zip_path).exists():
+            # A fresh start, or a folder left by a run that never archived: claim it.
+            if not self._running_lock_held:
+                self._acquire_running_lock()
+            return
 
+        try:
+            with zipfile.ZipFile(self._zip_path, "r") as f:
+                complete = ".completed" in f.namelist()
+        except zipfile.BadZipFile as e:
+            raise zipfile.BadZipFile(
+                f"Unable to restore the zip file at the path {self._zip_path}"
+            ) from e
+
+        if complete and self.remove_files:
+            # A private folder per process (and per Paths): two processes replaying one
+            # finished archive at the same time never touch each other's copy.
+            _remove_dead_replay_dirs(self._base_output_path)
+            _REPLAY_DIRS.add(_replay_dir_for(self._base_output_path))
+        elif not complete and not self._running_lock_held:
+            self._acquire_running_lock()
+
+        target = (
+            _replay_dir_for(self._base_output_path)
+            if complete and self.remove_files
+            else self._base_output_path
+        )
+        shutil.rmtree(target, ignore_errors=True)
+
+        try:
             try:
-                try:
-                    with zipfile.ZipFile(self._zip_path, "r") as f:
-                        f.extractall(self.output_path)
-                except FileExistsError:
-                    pass
-            except zipfile.BadZipFile as e:
-                raise zipfile.BadZipFile(
-                    f"Unable to restore the zip file at the path {self._zip_path}"
-                ) from e
+                with zipfile.ZipFile(self._zip_path, "r") as f:
+                    f.extractall(target)
+            except FileExistsError:
+                pass
+        except zipfile.BadZipFile as e:
+            raise zipfile.BadZipFile(
+                f"Unable to restore the zip file at the path {self._zip_path}"
+            ) from e
 
+        self._archive_is_complete = complete
+
+        if not complete:
             try:
                 os.remove(self._zip_path)
             except FileNotFoundError:
@@ -535,7 +777,7 @@ class AbstractPaths(ABC):
 
     @property
     def _zip_path(self) -> str:
-        return f"{self.output_path}.zip"
+        return f"{self._base_output_path}.zip"
 
     @abstractmethod
     def save_json(self, name, object_dict: dict, prefix: str = ""):

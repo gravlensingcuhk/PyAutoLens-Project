@@ -9,15 +9,15 @@ plus a `.postN` for commits beyond it, so the intra-family `>=` floors stay sati
 | Package     | Branch                        | Commit                                     | Version            |
 |-------------|-------------------------------|--------------------------------------------|--------------------|
 | autoarray   | `production/hst`              | `40ae61b47b36991bf021a4fd14cc9b804ec9ce2d` | 2026.10.23.1.post3 |
-| autofit     | `production/hst`              | `d3a7721294652f81ec726b92931ab610ed27e3ac` | 2026.10.23.1       |
+| autofit     | `production/hst`              | `c9264d112` (2026-10-26)                   | 2026.10.23.1.post1 |
 | autogalaxy  | `feature/elliptical-multipole`| `b1f4cabfe4276bebcd2c64cf22dcaebf10ff8d7b` | 2026.10.16.1.post5 |
 
 `autolens` and `autonerves` (the renamed `autoconf`) are on `main` in the codespace and are
 pinned to their PyPI releases in `pyproject.toml` instead.
 
 Exported 2026-10-25 with `git archive <branch> <package> pyproject.toml setup.py README.md LICENSE MANIFEST.in`.
-The committed branch state was copied; uncommitted working-tree edits in the codespace (PyAutoFit
-had an in-progress running-lock change in `autofit/non_linear/paths/`) were not.
+The committed branch state was copied. autofit was re-exported on 2026-10-26 after its running-search
+lock / read-only archive replay change (`c9264d112`) was committed.
 
 Why these branches: `production/hst` autoarray carries the `pixel_signal_normalisation: weights`
 option (continuous adaptive-regularization signals) and the RTU rectangular meshes; autogalaxy's

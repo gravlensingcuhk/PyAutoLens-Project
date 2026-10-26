@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 class DatabasePaths(AbstractPaths):
     stores_search_internal = False
+    locks_output_folder = False
     has_timer = False
 
     def __init__(

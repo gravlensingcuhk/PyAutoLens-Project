@@ -149,6 +149,8 @@ class SearchUpdatesMixin:
         concern (samples, latent variables, visualization, profiling,
         summary) into its own method.
         """
+        self.paths.touch_running_lock()
+
         return self._updater.update(
             model=model,
             analysis=analysis,

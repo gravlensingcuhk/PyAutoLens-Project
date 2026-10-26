@@ -169,6 +169,11 @@ class NonLinearSearch(
 
     __identifier_fields__ = tuple()
 
+    # Set by a search whose last run ended at its likelihood-call cap (`n_like_max`)
+    # without converging (`Nautilus.call_search`). `_complete_fit` then leaves the fit
+    # resumable instead of archiving it as complete.
+    stopped_at_n_like_max = False
+
     # Static capability declarations (``autofit.non_linear.search.capabilities``).
     # These are the defaults for a search that declares nothing; every public search
     # overrides them and the registry (``search/registry.py``) mirrors its values.
@@ -489,6 +494,16 @@ class NonLinearSearch(
         still on disk, and the next run resumes and finalizes again, rather than
         loading a "completed" fit whose archive never landed.
         """
+        # Test mode caps every search at one call, which is not a stalled fit.
+        if self.stopped_at_n_like_max and test_mode_level() == 0:
+            self.logger.warning(
+                "The search stopped at its likelihood-call cap (n_like_max) without "
+                "converging: its result is returned but the fit is left resumable "
+                "(checkpoint kept, no .completed), so a rerun with a higher cap "
+                "continues from here."
+            )
+            return
+
         if not skip_fit_output():
             self.finalize_search_internal(search_internal=search_internal)
 

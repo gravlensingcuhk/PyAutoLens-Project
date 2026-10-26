@@ -805,15 +805,17 @@ class Nautilus(NonLinearSearch):
 
             iterations_after_run = self.iterations_from(search_internal=search_internal)[1]
 
-            if (
-                converged
-                or total_iterations == iterations_after_run
-                or (
-                    self.n_like_max is not None
-                    and iterations_after_run >= self.n_like_max
-                )
-            ):
+            capped = (
+                self.n_like_max is not None
+                and iterations_after_run >= self.n_like_max
+            )
+
+            if converged or total_iterations == iterations_after_run or capped:
                 finished = True
+                # A run the call cap ended, not convergence, is left resumable by
+                # `_complete_fit`: its checkpoint stays and no `.completed` is written,
+                # so a rerun under a higher `n_like_max` continues where it stopped.
+                self.stopped_at_n_like_max = bool(capped and not converged)
 
             if not finished:
 

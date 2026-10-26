@@ -71,10 +71,11 @@ class SubDirectoryPathsDirectory(
             self.parent = parent
 
     @property
-    def output_path(self) -> Path:
+    def _base_output_path(self) -> Path:
         """
         The output path is customised to place output in a named directory in
-        the analyses directory.
+        the analyses directory (``output_path`` adds the replay redirection of
+        ``AbstractPaths``).
         """
         return self._output_path
 
@@ -120,9 +121,10 @@ class SubDirectoryPathsDatabase(
             self.parent = parent
 
     @property
-    def output_path(self) -> Path:
+    def _base_output_path(self) -> Path:
         """
         The output path is customised to place output in a named directory in
-        the analyses directory.
+        the analyses directory (``output_path`` adds the replay redirection of
+        ``AbstractPaths``).
         """
         return self._output_path
