@@ -1,6 +1,6 @@
 # COWLS SLaM: production changes on branch `sam`
 
-As of 2026-10-26. Living copy: https://claude.ai/artifact/9fnRyHrZQWNbN8BvY13eT1
+As of 2026-10-26.
 
 ## Summary
 
