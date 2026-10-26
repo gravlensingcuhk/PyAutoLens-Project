@@ -1,6 +1,8 @@
 import autofit as af
 import autolens as al
 
+from . import search_util
+
 from typing import Union, Optional, Tuple
 
 
@@ -38,7 +40,7 @@ def run(
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
     reset_shear_prior: bool = False,
-    n_batch: int = 16,
+    n_batch: Optional[int] = None,
     use_prior_chaining=False
 ) -> af.Result:
     """
@@ -169,7 +171,10 @@ def run(
     else:
         nlive = 300
 
-    search = af.Nautilus(
+    if n_batch is None:
+        n_batch = search_util.n_batch()
+
+    search = search_util.Nautilus(
         name=name,
         **settings_search.search_dict,
         n_live=nlive,
@@ -195,7 +200,7 @@ def run__multi(
     mass_centre: Optional[Tuple[float, float]] = None,
     extra_galaxies: Optional[af.Collection] = None,
     dataset_model: Optional[af.Model] = None,
-    n_batch: int = 16,
+    n_batch: Optional[int] = None,
 ) -> af.Result:
     """
     The SLaM MASS TOTAL PIPELINE, which fits a lens model with a total mass distribution (e.g. a power-law).
@@ -320,7 +325,10 @@ def run__multi(
 
     factor_graph = af.FactorGraphModel(*analysis_factor_list, use_jax=True)
 
-    search = af.Nautilus(
+    if n_batch is None:
+        n_batch = search_util.n_batch()
+
+    search = search_util.Nautilus(
         name="mass_total[1]",
         **settings_search.search_dict,
         n_live=300,

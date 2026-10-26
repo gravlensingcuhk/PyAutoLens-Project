@@ -1,3 +1,4 @@
+from . import search_util
 from . import source_lp
 from . import source_pix
 from . import light_lp

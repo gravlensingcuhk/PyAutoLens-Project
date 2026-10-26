@@ -1,6 +1,8 @@
 import autofit as af
 import autolens as al
 
+from . import search_util
+
 from typing import Union, Optional
 
 
@@ -82,11 +84,11 @@ def run(
         dataset_model=dataset_model,
     )
 
-    search = af.Nautilus(
+    search = search_util.Nautilus(
         name="light[1]",
         **settings_search.search_dict,
         n_live=150,
-        n_batch=16,
+        n_batch=search_util.n_batch(),
     )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)

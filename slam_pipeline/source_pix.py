@@ -48,12 +48,11 @@ true S/N. Keep that ordering.
 import autofit as af
 import autolens as al
 
-from datetime import datetime
-from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import numpy as np
-from autonerves import conf
+
+from . import search_util
 
 SOURCE_KEY = "('galaxies', 'source')"
 
@@ -66,12 +65,11 @@ ADAPT_SNR_CAP = 3.0
 PIX_OVER_SAMPLE_THRESHOLD = 3.0
 PIX_OVER_SAMPLE_SIZES = (4, 2)  # (where source S/N > threshold, elsewhere)
 
-# Nautilus stopping (HST project search_util): see "__The Source Mesh__".
-SETUP_F_LIVE = 0.05
-SETUP_N_LIKE_MAX = {
-    "source_pix_1": 100_000,
-    "source_pix_2": 10_000,  # at 75 live points; run_2 scales it by n_live // 75
-}
+# Nautilus stopping and caps live in search_util (shared with the other stages); re-exported
+# here because the runners and docs refer to them as source_pix's.
+SETUP_F_LIVE = search_util.SETUP_F_LIVE
+SETUP_N_LIKE_MAX = search_util.SETUP_N_LIKE_MAX
+report_if_capped = search_util.report_if_capped
 
 
 def adapt_images_from(result: af.Result, adapt_snr_cap: float = ADAPT_SNR_CAP):
@@ -124,32 +122,6 @@ def pixelization_from(search: int, shape: Tuple[int, int] = RECT_SHAPE) -> af.Mo
     )
 
 
-def report_if_capped(search: af.Nautilus, result, stage: str) -> None:
-    """
-    Warn, and record in `<output>/capped_searches.txt`, when a search stopped at its
-    `n_like_max` rather than converging (HST project `search_util.report_if_capped`).
-    """
-    n_like_max = search.n_like_max
-    try:
-        total = result.samples.total_samples
-    except (AttributeError, KeyError, TypeError):
-        return
-    if n_like_max is None or n_like_max == float("inf") or total < n_like_max:
-        return
-
-    path = str(search.paths.output_path)
-    print(
-        f"\nWARNING: {stage} STOPPED AT ITS LIKELIHOOD-CALL CAP ({total} >= {n_like_max}) "
-        f"without converging: {path}\nCheck this fit by eye before trusting what it seeds.\n"
-    )
-
-    log = Path(conf.instance.output_path) / "capped_searches.txt"
-    seen = log.read_text() if log.is_file() else ""
-    if path not in seen:
-        with open(log, "a") as f:
-            f.write(f"{datetime.now():%Y-%m-%d %H:%M}  {stage}  {total}/{n_like_max}  {path}\n")
-
-
 def run_1(
     settings_search: af.SettingsSearch,
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
@@ -160,7 +132,7 @@ def run_1(
     dataset_model: Optional[af.Model] = None,
     fixed_mass_model: bool = False,
     n_live: int = 200,
-    n_batch: int = 16,
+    n_batch: Optional[int] = None,
     f_live: float = SETUP_F_LIVE,
     n_like_max: float = SETUP_N_LIKE_MAX["source_pix_1"],
 ) -> af.Result:
@@ -200,8 +172,8 @@ def run_1(
         where the mass model is fixed to the first band, albeit it may work for standard fitting if the SOURCE LP
         PIPELINE provides a good mass model.
     n_live, n_batch, f_live, n_like_max
-        Nautilus settings; the defaults are the HST project's stability choices (n_batch 16 for the
-        16-core CPU jobs, see run_job_*.sh).
+        Nautilus settings; the defaults are the HST project's stability choices (n_batch from
+        `search_util.n_batch()`: 16 on the CPU jobs, 20 on phygpu).
     """
 
     """
@@ -256,7 +228,10 @@ def run_1(
         dataset_model=dataset_model,
     )
 
-    search = af.Nautilus(
+    if n_batch is None:
+        n_batch = search_util.n_batch()
+
+    search = search_util.Nautilus(
         name="source_pix[1]",
         **settings_search.search_dict,
         n_live=n_live,
@@ -281,7 +256,7 @@ def run_2(
     regularization: Optional[af.Model] = None,
     dataset_model: Optional[af.Model] = None,
     n_live: int = 300,
-    n_batch: int = 16,
+    n_batch: Optional[int] = None,
     f_live: float = SETUP_F_LIVE,
     n_like_max: Optional[float] = None,
 ) -> af.Result:
@@ -365,7 +340,10 @@ def run_2(
     if model.prior_count < 2:
         model.nautilus_dummy = af.UniformPrior(lower_limit=0.0, upper_limit=1.0)
 
-    search = af.Nautilus(
+    if n_batch is None:
+        n_batch = search_util.n_batch()
+
+    search = search_util.Nautilus(
         name="source_pix[2]",
         **settings_search.search_dict,
         n_live=n_live,

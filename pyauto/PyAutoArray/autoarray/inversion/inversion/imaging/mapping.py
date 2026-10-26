@@ -88,7 +88,34 @@ class InversionImagingMapping(AbstractInversionImaging):
         version of that property added `H` into `F` in place and deleted this cached value to force its
         recomputation, which is what this docstring described; the in-place form was removed in `0766edd4`
         (2025-06-26).
+
+        Two routes compute the same matrix. The default is the dense product
+        ``(B / sigma)^T (B / sigma)`` of the concatenated blurred mapping matrix. With
+        `Settings.use_sparse_curvature` on the JAX backend, and at least one `Mapper` under a
+        non-over-sampled PSF, the mapper rows come from the sparse transposed-blur identity
+        ``A^T (P^T Sigma^-1 B)`` instead
+        (`inversion_imaging_util.curvature_matrix_via_sparse_transpose_from`), which replaces the
+        ``N_pix * S**2`` product by one more FFT blur and a sparse contraction. The result is the
+        same matrix up to round-off; the NumPy backend keeps the dense product, which is cheaper
+        there, unless the setting is passed explicitly (the reference implementation for tests).
         """
+
+        if self._use_sparse_curvature:
+            return inversion_imaging_util.curvature_matrix_via_sparse_transpose_from(
+                operated_mapping_matrix=self.operated_mapping_matrix,
+                noise_map=self.noise_map.array,
+                psf=self.psf,
+                mask=self.mask,
+                mapper_triplets_list=[
+                    mapper.sparse_triplets_data
+                    for mapper in self.cls_list_from(cls=Mapper)
+                ],
+                mapper_param_range_list=self.param_range_list_from(cls=Mapper),
+                settings=self.settings,
+                add_to_curvature_diag=True,
+                no_regularization_index_list=self.no_regularization_index_list,
+                xp=self._xp,
+            )
 
         return inversion_util.curvature_matrix_via_mapping_matrix_from(
             mapping_matrix=self.operated_mapping_matrix,
@@ -98,6 +125,23 @@ class InversionImagingMapping(AbstractInversionImaging):
             no_regularization_index_list=self.no_regularization_index_list,
             xp=self._xp,
         )
+
+    @property
+    def _use_sparse_curvature(self) -> bool:
+        """
+        Whether `curvature_matrix` takes the sparse transposed-blur route: the setting is on, the
+        inversion holds a `Mapper`, and the PSF is not over-sampled (the slim-embed transpose
+        argument of the route has not been checked for `convolve_over_sample_size > 1`). On the
+        NumPy backend the setting counts only when passed explicitly to `Settings`, never from the
+        configuration, so a NumPy fit stays the fp64 dense reference of a JAX one.
+        """
+        if not self.settings.use_sparse_curvature:
+            return False
+        if self._xp is np and self.settings._use_sparse_curvature is None:
+            return False
+        if self.total(cls=Mapper) == 0:
+            return False
+        return self.psf.convolve_over_sample_size == 1
 
     def _mapped_reconstructed_data_dict_from(
         self,

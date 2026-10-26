@@ -8,7 +8,7 @@ plus a `.postN` for commits beyond it, so the intra-family `>=` floors stay sati
 
 | Package     | Branch                        | Commit                                     | Version            |
 |-------------|-------------------------------|--------------------------------------------|--------------------|
-| autoarray   | `production/hst`              | `40ae61b47b36991bf021a4fd14cc9b804ec9ce2d` | 2026.10.23.1.post3 |
+| autoarray   | `production/hst`              | `82cc43968e62572d2cf7a8cf1f8a391abf013b9e` (2026-10-26) | 2026.10.23.1.post5 |
 | autofit     | `production/hst`              | `production/hst` head, 2026-10-26 (lock patch committed upstream) | 2026.10.23.1.post1 |
 | autogalaxy  | `feature/elliptical-multipole`| `b1f4cabfe4276bebcd2c64cf22dcaebf10ff8d7b` | 2026.10.16.1.post5 |
 
@@ -32,3 +32,7 @@ the HTCondor job ad); liveness is decided by own-process / own-job, a pid probe 
 a scheduler queue query when that client exists, else a heartbeat that a daemon thread refreshes
 every 60 s while the lock is held (stale after 30 min). Before, only SLURM was queried and the
 heartbeat was only touched on search updates (never, with `iterations_per_quick_update: 1e99`).
+
+autoarray re-exported 2026-10-26 at `82cc4396`: adds the opt-in sparse curvature
+(`Settings(use_sparse_curvature=True)` / `[inversion] use_sparse_curvature`, exact so identifiers are
+unchanged, JAX backend only) with the transposed PSF blur in column blocks.

@@ -1,0 +1,36 @@
+#!/bin/bash -l
+#
+# One lens on one GPU, sharing the node: a quick test. Production runs use multi_run2, which
+# takes a whole node (phygpu does not fence jobs sharing a node; see the HST project's multi_run2).
+#
+#   sbatch -J j18 phygpu/run_lens COSJ100018+022138
+#
+# 48 hours is partition a/c's maximum. Every search resumes from its output folder, so a job
+# that hits the wall is resubmitted. 8 CPUs: the runner plus its 4-process sampler pool.
+
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH -p a,c
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=closest
+#SBATCH --mem-per-gpu=47G
+#SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/r_%x.%A.out
+#SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/r_%x.%A.err
+#SBATCH -t 48:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
+
+source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
+
+[ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_lens <lens>"; exit 1; }
+RUNNER=$(cowls_runner_for "$1") || exit 1
+
+nvidia-smi
+cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
+
+cd "$PROJECT_ROOT"
+python3 -u "$RUNNER" "$1"
+RC=$?
+cowls_gpu_log_stop
+exit $RC

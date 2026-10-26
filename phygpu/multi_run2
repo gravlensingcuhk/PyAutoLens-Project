@@ -1,0 +1,63 @@
+#!/bin/bash -l
+#
+# Up to 2 lenses in parallel, one per GPU, on a whole 2-GPU node (a1-a6, c1) of its own.
+#
+#   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
+#
+# Why a whole node, why one runner per GPU pinned with CUDA_VISIBLE_DEVICES, why --exclusive
+# with --exclude=a8,a9: the HST project's hpc/mass/batch/multi_run2 (__Why A Whole Node__).
+# Each runner gets an equal share of the node's CPUs for Nautilus's host-side work.
+#
+# 48 hours is the partition maximum. Every search resumes from its output folder, so if the
+# chain is not through mass_multipole by then, resubmit the same command.
+
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --exclusive
+#SBATCH --mem=0
+#SBATCH -p a,c
+#SBATCH --exclude=a8,a9
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=closest
+#SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/m2_%x.%A.out
+#SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/m2_%x.%A.err
+#SBATCH -t 48:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
+
+N_SLOTS=2
+
+if [ $# -lt 1 ] || [ $# -gt $N_SLOTS ]; then
+    echo "Usage: sbatch -J <tag> phygpu/multi_run$N_SLOTS <lens_1> [<lens_2>]"
+    exit 1
+fi
+
+IFS=',' read -ra GPUS <<< "$CUDA_VISIBLE_DEVICES"
+
+# Read by activate.sh in place of SLURM_CPUS_PER_TASK.
+export COWLS_THREADS=$(( ${SLURM_CPUS_ON_NODE:-${#GPUS[@]}} / ${#GPUS[@]} ))
+
+source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
+
+nvidia-smi
+cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
+echo "node $SLURMD_NODENAME: ${#GPUS[@]} GPUs, ${SLURM_CPUS_ON_NODE} CPUs, $COWLS_THREADS threads per runner"
+
+cd "$PROJECT_ROOT"
+LENSES=("$@")
+for i in "${!LENSES[@]}"; do
+    RUNNER=$(cowls_runner_for "${LENSES[$i]}") || exit 1
+    echo "GPU ${GPUS[$i]}: ${LENSES[$i]} -> $(basename "$RUNNER")"
+    CUDA_VISIBLE_DEVICES="${GPUS[$i]}" python3 -u "$RUNNER" "${LENSES[$i]}" \
+        > "$PROJECT_ROOT/phygpu/outputs/${LENSES[$i]}.${SLURM_JOB_ID}.log" 2>&1 &
+    PIDS+=($!)
+done
+
+# The runners only: a bare `wait` would also wait on the GPU logger. Any runner failing fails
+# the job, so SLURM does not report a crashed run as COMPLETED.
+RC=0
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || RC=1
+done
+cowls_gpu_log_stop
+exit $RC

@@ -365,6 +365,58 @@ class Convolver:
             convolve_over_sample_size=self.convolve_over_sample_size,
         )
 
+    @cached_property
+    def transposed(self) -> "Convolver":
+        """
+        The convolver whose convolution is the exact transpose (adjoint) of this one's, on any
+        mask, for both the image and the mapping-matrix paths.
+
+        For an odd kernel this is `reversed_kernel`: flipping both axes turns the convolution
+        into a correlation, and the centre pixel stays put. For an even axis the flip moves the
+        centre: this convolver applies its kernel about ``c = (k - 1) // 2``, the flipped kernel
+        about ``k - 1 - c = c + 1``, so the plain flip is the transpose shifted by one pixel along
+        that axis. Appending one zero row (or column) at the end of the flipped kernel makes the
+        axis odd with centre ``k // 2 = c + 1``, which lands the flipped taps back on the transposed
+        positions::
+
+            (P x)[i]   = sum_d k[d] x[i - d + c]                       forward, this kernel
+            (P^T y)[j] = sum_d k[d] y[j + d - c]                       its transpose
+                       = sum_e k'[e] y[j - e + c']   with k'[e] = k[k - 1 - e] for e < k, k'[k] = 0,
+                                                        c' = k // 2      (equal to c when k is odd)
+
+        Convolving with this convolver is therefore ``P^T`` of the forward operator restricted
+        to the mask (the slim-embed-blur-slim of `convolved_mapping_matrix_from` is self-adjoint
+        in its embedding, so no boundary term is lost). It is what
+        `inversion_imaging_util.curvature_matrix_via_sparse_transpose_from` applies to the
+        noise-weighted blurred mapping matrix.
+
+        Inherits this convolver's ``use_fft`` policy (an even kernel is FFT-only anyway) and
+        ``convolve_over_sample_size``, and preloads the FFT geometry when this convolver has one
+        and is not over-sampled, as `reversed_kernel` does. Cached for the same reason.
+        """
+        kernel_native = np.asarray(self.kernel.native.array)[::-1, ::-1]
+        ky, kx = kernel_native.shape
+        kernel_native = np.pad(kernel_native, ((0, 1 - ky % 2), (0, 1 - kx % 2)))
+
+        kernel = Array2D.no_mask(
+            values=kernel_native.copy(),
+            pixel_scales=self.kernel.pixel_scales,
+            origin=self.kernel.origin,
+        )
+
+        state = (
+            ConvolverState(kernel=kernel, mask=self._state.source_mask)
+            if self._state is not None and self.convolve_over_sample_size == 1
+            else None
+        )
+
+        return Convolver(
+            kernel=kernel,
+            state=state,
+            use_fft=self._use_fft,
+            convolve_over_sample_size=self.convolve_over_sample_size,
+        )
+
     def state_from(self, mask):
 
         if self.convolve_over_sample_size > 1:

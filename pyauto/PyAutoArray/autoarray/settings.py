@@ -29,6 +29,8 @@ class Settings:
         certified_fallback: Optional[str] = None,
         certified_tau_rel: Optional[float] = None,
         nnls_preconditioning_no_mapper: Optional[str] = None,
+        use_sparse_curvature: Optional[bool] = None,
+        sparse_curvature_mixed_precision: Optional[bool] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -265,6 +267,31 @@ class Settings:
             Inversions containing a `Mapper` always use ``"jacobi"``
             (`AbstractInversion.positive_only_preconditioning_used` records the decision). The NumPy path always
             runs fnnls and ignores this.
+        use_sparse_curvature
+            How an imaging inversion that holds a `Mapper` forms its curvature matrix ``F`` on the JAX backend.
+            `None` (default) reads ``general.yaml`` ``[inversion] use_sparse_curvature`` (packaged `False`).
+
+            - `False` -- the dense product ``F = (B / sigma)^T (B / sigma)`` of the blurred mapping matrix ``B``
+              (:func:`autoarray.inversion.inversion.inversion_util.curvature_matrix_via_mapping_matrix_from`),
+              whose cost grows as ``N_pix * S**2`` in the number of image pixels and linear parameters.
+            - `True` -- the exact rewrite ``F[m, :] = A^T (P^T Sigma^-1 B)`` for every mapper block ``m``
+              (:func:`autoarray.inversion.inversion.imaging.inversion_imaging_util.curvature_matrix_via_sparse_transpose_from`):
+              the already-blurred ``B`` is noise-weighted, blurred once more with the *transposed* PSF
+              (`Convolver.transposed`) and contracted with the mapper's sparse unblurred mapping
+              triplets. One extra FFT blur (``~ S``) and a sparse contraction (``~ nnz(A) * S``) replace the
+              dense ``N_pix * S**2`` product, which is the dominant term of a likelihood call for pixelizations
+              of several hundred pixels and up, and grows fastest with mesh size. Linear-func rows are the
+              transpose of the mapper rows and their own block stays dense. Exact in exact arithmetic: it is a
+              per-call speed-up, not a change of model (search identifiers are unchanged).
+
+            Only the JAX backend with a non-over-sampled PSF honours it; the NumPy backend, an inversion with no
+            mapper, and ``convolve_over_sample_size > 1`` fall back to the dense product.
+        sparse_curvature_mixed_precision
+            Whether the transposed blur of `use_sparse_curvature` runs the mixed-precision FFT (fp32 input cube
+            and complex64 forward FFT, as the forward blur does under `use_mixed_precision`). `None` (default)
+            reads ``general.yaml`` ``[inversion] sparse_curvature_mixed_precision`` (packaged `False`): the
+            transposed blur feeds ``F`` directly, and an fp32 ``F`` has been measured to shift the log likelihood
+            of an HST-sized pixelized fit by several nats, so it stays fp64 until measured otherwise.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -291,6 +318,8 @@ class Settings:
         self._certified_fallback = certified_fallback
         self._certified_tau_rel = certified_tau_rel
         self._nnls_preconditioning_no_mapper = nnls_preconditioning_no_mapper
+        self._use_sparse_curvature = use_sparse_curvature
+        self._sparse_curvature_mixed_precision = sparse_curvature_mixed_precision
 
         # Validate explicit values eagerly, so a typo fails at construction rather than deep inside a fit.
         if positive_only_solver is not None:
@@ -335,6 +364,41 @@ class Settings:
             return conf.instance["general"]["inversion"]["use_border_relocator"]
 
         return self._use_border_relocator
+
+    @property
+    def use_sparse_curvature(self) -> bool:
+        """
+        Whether an imaging inversion with a `Mapper` forms its curvature matrix through the sparse
+        transposed-blur route on the JAX backend (see the constructor). A configuration without the
+        key (an older workspace config) reads as `False`, the dense product.
+        """
+        if self._use_sparse_curvature is None:
+            try:
+                return bool(
+                    conf.instance["general"]["inversion"]["use_sparse_curvature"]
+                )
+            except KeyError:
+                return False
+
+        return self._use_sparse_curvature
+
+    @property
+    def sparse_curvature_mixed_precision(self) -> bool:
+        """
+        Whether the transposed blur of the sparse curvature route runs the mixed-precision FFT
+        (see the constructor). A configuration without the key reads as `False`, fp64.
+        """
+        if self._sparse_curvature_mixed_precision is None:
+            try:
+                return bool(
+                    conf.instance["general"]["inversion"][
+                        "sparse_curvature_mixed_precision"
+                    ]
+                )
+            except KeyError:
+                return False
+
+        return self._sparse_curvature_mixed_precision
 
     @property
     def no_regularization_add_to_curvature_diag_value(self):

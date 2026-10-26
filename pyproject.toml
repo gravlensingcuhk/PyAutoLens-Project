@@ -22,6 +22,13 @@ dependencies = [
     "jaxnnls",
 ]
 
+# GPU (phygpu): `uv sync --extra gpu` installs the CUDA 12 jaxlib. The PyAuto libraries pull in
+# CPU-only jax, so without this a sync on a GPU node silently builds a CPU venv. cuda12, not
+# cuda13: phygpu's nodes run driver 560 (A6000) / 565 (A800), i.e. CUDA <= 12.6 (HST project
+# pyproject). The HTCondor CPU cluster runs a plain `uv sync` and never installs it.
+[project.optional-dependencies]
+gpu = ["jax[cuda12]; sys_platform == 'linux'"]
+
 [tool.uv.sources]
 autoarray = { path = "pyauto/PyAutoArray", editable = true }
 autofit = { path = "pyauto/PyAutoFit", editable = true }

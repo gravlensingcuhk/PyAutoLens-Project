@@ -192,6 +192,277 @@ def data_linear_func_matrix_from(
     return np.stack(blurred_list, axis=1)  # shape (n_unmasked, n_funcs)
 
 
+# Rows of the sparse contraction of `sparse_mapping_transpose_dot_from` processed per
+# `fori_loop` step on the JAX backend. The step gathers a `(chunk, S_tot)` fp64 block of the
+# dense operand, so the chunk bounds the scratch memory per batch element (16384 rows x 1000
+# columns x 8 bytes = 130 MB) independently of nnz. The product itself is memory-bound, so
+# the chunk size changes the launch count, not the arithmetic.
+SPARSE_TRANSPOSE_DOT_CHUNK = 16384
+
+# Columns of the noise-weighted blurred mapping matrix sent through the transposed FFT blur per
+# block in `curvature_matrix_via_sparse_transpose_from`. The blur holds a complex FFT cube of
+# (fft_shape x columns) per batch element -- complex128 for the default fp64 transposed blur,
+# where blurring all 970 columns of an HST-sized inversion at once cost ~1 GB per element and
+# put a batch of 20 out of memory on a 48 GB card (2026-10-26) -- so the columns go through in
+# blocks of this size, which bounds the cube whatever the mesh size. The arithmetic is unchanged.
+SPARSE_TRANSPOSE_BLUR_COLUMNS = 128
+
+
+def sparse_mapping_transpose_dot_from(
+    rows,
+    cols,
+    vals,
+    dense,
+    n_cols: int,
+    xp=np,
+    chunk: int = SPARSE_TRANSPOSE_DOT_CHUNK,
+):
+    r"""
+    Returns ``A^T @ dense`` for a sparse matrix ``A`` given as COO triplets, without forming ``A``.
+
+    ``A`` has ``A[rows[t], cols[t]] += vals[t]`` for every triplet ``t`` (the form returned by
+    `Mapper.sparse_triplets_data`, rows on the slim image grid, repeated row/column pairs allowed),
+    so
+
+        out[c, :] = sum_{t : cols[t] == c} vals[t] * dense[rows[t], :]
+
+    a gather of the dense operand's rows followed by a scatter-add over the source pixels. The
+    arithmetic is ``nnz * dense.shape[1]`` multiply-adds, against ``N_rows * S * dense.shape[1]``
+    for the dense ``A.T @ dense``: for a bilinear pixelization stencil nnz is 4 sub-pixels per
+    image pixel, so the saving is the number of source pixels over ``4 * sub_size**2``.
+
+    Parameters
+    ----------
+    rows
+        Row (slim image pixel) index of every triplet, shape ``(nnz,)``.
+    cols
+        Column (source pixel) index of every triplet, shape ``(nnz,)``; masked-out stencil slots
+        must carry a zero value and a valid (non-negative) column, as `mapper_util.sparse_triplets_from`
+        guarantees.
+    vals
+        Value of every triplet, shape ``(nnz,)``, including any sub-pixel normalisation.
+    dense
+        The dense right operand, shape ``(N_rows, K)``; only its rows indexed by `rows` are read.
+    n_cols
+        The number of columns of ``A`` (source pixels), the number of rows of the result.
+    xp
+        `np` scatter-adds with `np.add.at`; `jax.numpy` uses `jax.ops.segment_sum` over fixed-size
+        chunks of the triplet axis inside a `lax.fori_loop`, so the `(chunk, K)` gather is bounded in
+        memory whatever nnz is and the loop is `vmap`-safe (static shapes; the padding triplets
+        contribute zero to column 0).
+    chunk
+        Triplets per loop step on the JAX backend (see `SPARSE_TRANSPOSE_DOT_CHUNK`).
+
+    Returns
+    -------
+    ndarray of shape ``(n_cols, K)``.
+    """
+    if xp is np:
+        rows = np.asarray(rows)
+        cols = np.asarray(cols)
+        vals = np.asarray(vals, dtype=np.float64)
+        dense = np.asarray(dense, dtype=np.float64)
+        out = np.zeros((n_cols, dense.shape[1]), dtype=np.float64)
+        np.add.at(out, cols, vals[:, None] * dense[rows])
+        return out
+
+    import jax
+    from jax.ops import segment_sum
+
+    nnz = rows.shape[0]
+    k = dense.shape[1]
+
+    if nnz <= chunk:
+        return segment_sum(vals[:, None] * dense[rows], cols, num_segments=n_cols)
+
+    n_chunks = -(-nnz // chunk)
+    pad = n_chunks * chunk - nnz
+
+    rows = xp.pad(rows, (0, pad))
+    cols = xp.pad(cols, (0, pad))
+    vals = xp.pad(vals, (0, pad))
+
+    def body(i, out):
+        start = i * chunk
+        rows_c = jax.lax.dynamic_slice(rows, (start,), (chunk,))
+        cols_c = jax.lax.dynamic_slice(cols, (start,), (chunk,))
+        vals_c = jax.lax.dynamic_slice(vals, (start,), (chunk,))
+        contrib = vals_c[:, None] * dense[rows_c]
+        return out + segment_sum(contrib, cols_c, num_segments=n_cols)
+
+    out = xp.zeros((n_cols, k), dtype=dense.dtype)
+
+    return jax.lax.fori_loop(0, n_chunks, body, out)
+
+
+def curvature_matrix_via_sparse_transpose_from(
+    operated_mapping_matrix,
+    noise_map,
+    psf,
+    mask,
+    mapper_triplets_list: List[Tuple],
+    mapper_param_range_list: List[List[int]],
+    settings,
+    add_to_curvature_diag: bool = False,
+    no_regularization_index_list: Optional[List] = None,
+    xp=np,
+):
+    r"""
+    Returns the curvature matrix ``F`` of an imaging inversion through its mappers' sparse
+    unblurred mapping, instead of the dense ``(B / \sigma)^T (B / \sigma)`` product of the blurred
+    mapping matrix ``B`` (`inversion_util.curvature_matrix_via_mapping_matrix_from`).
+
+    **The identity.** For a mapper block ``m`` of the linear parameters, ``B[:, m] = P A_m`` with ``P``
+    the PSF convolution restricted to the mask and ``A_m`` the mapper's unblurred mapping matrix, so
+
+        F[m, :] = B[:, m]^T \Sigma^{-1} B = A_m^T (P^T \Sigma^{-1} B)
+
+    with ``\Sigma^{-1} = diag(1 / \sigma^2)``. The bracket is one convolution of the noise-weighted
+    ``B`` with the *transposed* PSF (`Convolver.transposed`: the kernel flipped on both axes, which
+    turns the convolution into the correlation ``P^T``, with one zero row or column appended on an
+    even axis so the flipped centre stays on the transposed positions; embedding the slim matrix in
+    the mask before the FFT and slimming after is the transpose of the forward blur's restriction to
+    the mask, because ``\Sigma^{-1}`` is zero outside it), and ``A_m^T`` applied to it is the sparse
+    contraction `sparse_mapping_transpose_dot_from` over the mapper's triplets
+    (`Mapper.sparse_triplets_data`). Rows of linear-func objects are the transpose of the mapper
+    rows just computed, and their own ``[f, f]`` block is the dense product of their few columns.
+    With several mappers each mapper's rows cover every column, so the mapper-mapper cross blocks
+    come out of the same contraction.
+
+    **Memory.** The transposed blur goes through the columns in blocks of
+    `SPARSE_TRANSPOSE_BLUR_COLUMNS`, so its FFT cube (complex128 by default, twice the forward blur's
+    complex64) is bounded per batch element whatever the mesh size; all columns at once cost ~1 GB per
+    element for an HST lens at a 30 x 30 mesh and put a batch of 20 out of memory on a 48 GB card.
+
+    **Cost.** The dense product is ``N_pix * S_tot**2`` multiply-adds (for an HST lens at 24.5k image
+    pixels and a 30 x 30 mesh plus 70 linear-light columns, 0.09 s of a 0.19 s likelihood call on an
+    A6000, and it grows with the square of the mesh size). This route costs one extra FFT blur of
+    ``S_tot`` columns (``~ S_tot``, the same as the forward blur) and ``nnz(A) * S_tot`` for the
+    contraction, with nnz four entries per over-sampled sub-pixel for a bilinear stencil. It is
+    exact in exact arithmetic, so it changes the speed of a likelihood call and nothing else.
+
+    **Precision.** ``B`` arrives fp64 (the forward blur upcasts at its kernel multiply even under
+    `Settings.use_mixed_precision`); the noise weighting, the transposed blur and the contraction are
+    fp64 unless `settings.sparse_curvature_mixed_precision` asks for the fp32-cube / complex64-forward
+    FFT variant of the transposed blur. ``F`` feeds the positive-only solve and a log-determinant,
+    both of which amplify fp32 round-off into nats (an fp32 ``F`` shifted an HST-sized pixelized fit
+    by several nats), so the default keeps the whole route in double.
+
+    Parameters
+    ----------
+    operated_mapping_matrix
+        The concatenated blurred mapping matrix ``B`` of every linear object, shape ``(N_pix, S_tot)``.
+    noise_map
+        The slim noise map ``\sigma``, shape ``(N_pix,)``.
+    psf
+        The dataset's `Convolver`; its `transposed` convolver performs the transposed blur.
+    mask
+        The dataset's `Mask2D`, the grid the blur embeds the slim matrices in.
+    mapper_triplets_list
+        One ``(rows, cols, vals)`` tuple per mapper, in the order of `mapper_param_range_list`.
+    mapper_param_range_list
+        The ``[start, stop)`` column range of each mapper in ``B``
+        (`AbstractInversion.param_range_list_from(cls=Mapper)`).
+    settings
+        The inversion `Settings` (`sparse_curvature_mixed_precision`,
+        `no_regularization_add_to_curvature_diag_value`).
+    add_to_curvature_diag
+        If `True`, `settings.no_regularization_add_to_curvature_diag_value` is added to the diagonal
+        entries listed in `no_regularization_index_list`, as the dense route does.
+    no_regularization_index_list
+        The parameter indices with no regularization (linear-func objects).
+    xp
+        The array module; the NumPy branch is a reference implementation (the dense product is
+        cheaper there), the JAX branch the production one.
+
+    Returns
+    -------
+    ndarray of shape ``(S_tot, S_tot)``, the curvature matrix ``F``.
+    """
+    from autoarray.inversion.inversion import inversion_util
+
+    B = xp.asarray(operated_mapping_matrix, dtype=xp.float64)
+    noise_map = xp.asarray(noise_map, dtype=xp.float64)
+    s_tot = B.shape[1]
+
+    # P^T Sigma^-1 B : one transposed blur of every column, in column blocks so the FFT cube
+    # stays bounded (see `SPARSE_TRANSPOSE_BLUR_COLUMNS`).
+    Y = B / noise_map[:, None] ** 2
+    transposed = psf.transposed
+    Z = xp.hstack(
+        [
+            xp.asarray(
+                transposed.convolved_mapping_matrix_from(
+                    mapping_matrix=Y[:, start : start + SPARSE_TRANSPOSE_BLUR_COLUMNS],
+                    mask=mask,
+                    use_mixed_precision=settings.sparse_curvature_mixed_precision,
+                    xp=xp,
+                ),
+                dtype=xp.float64,
+            )
+            for start in range(0, s_tot, SPARSE_TRANSPOSE_BLUR_COLUMNS)
+        ]
+    )
+
+    if xp is np:
+        F = np.zeros((s_tot, s_tot), dtype=np.float64)
+    else:
+        F = xp.zeros((s_tot, s_tot), dtype=xp.float64)
+
+    mapper_indices = []
+
+    for (rows, cols, vals), (start, stop) in zip(
+        mapper_triplets_list, mapper_param_range_list
+    ):
+        block = sparse_mapping_transpose_dot_from(
+            rows=rows, cols=cols, vals=vals, dense=Z, n_cols=stop - start, xp=xp
+        )
+        # The mapper's own block is symmetric in exact arithmetic; the dense product returns
+        # it exactly symmetric, and the Cholesky-based log-determinant assumes it.
+        diag = block[:, start:stop]
+        diag = 0.5 * (diag + diag.T)
+        if xp is np:
+            block[:, start:stop] = diag
+            F[start:stop, :] = block
+        else:
+            block = block.at[:, start:stop].set(diag)
+            F = F.at[start:stop, :].set(block)
+        mapper_indices += list(range(start, stop))
+
+    func_indices = [i for i in range(s_tot) if i not in set(mapper_indices)]
+
+    if func_indices:
+        f_idx = np.asarray(func_indices)
+        m_idx = np.asarray(mapper_indices)
+
+        # Rows of the linear-func objects: the transpose of the mapper rows already computed ...
+        cross = F[xp.ix_(m_idx, f_idx)].T if xp is np else F[m_idx][:, f_idx].T
+        # ... and their own block, dense over their few columns.
+        Bf = B[:, f_idx] / noise_map[:, None]
+        own = Bf.T @ Bf
+
+        if xp is np:
+            F[np.ix_(f_idx, m_idx)] = cross
+            F[np.ix_(f_idx, f_idx)] = own
+        else:
+            F = F.at[xp.ix_(f_idx, m_idx)].set(cross)
+            F = F.at[xp.ix_(f_idx, f_idx)].set(own)
+
+    if (
+        add_to_curvature_diag
+        and no_regularization_index_list
+        and len(no_regularization_index_list) > 0
+    ):
+        F = inversion_util.curvature_matrix_with_added_to_diag_from(
+            curvature_matrix=F,
+            value=settings.no_regularization_add_to_curvature_diag_value,
+            no_regularization_index_list=no_regularization_index_list,
+            xp=xp,
+        )
+
+    return F
+
+
 def curvature_matrix_mirrored_from(
     curvature_matrix,
     *,
