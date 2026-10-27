@@ -3,7 +3,9 @@
 # One lens on one GPU, sharing the node: a quick test. Production runs use multi_run2, which
 # takes a whole node (phygpu does not fence jobs sharing a node; see the HST project's multi_run2).
 #
-#   sbatch -J j18 phygpu/run_lens COSJ100018+022138
+#   sbatch -J j18 phygpu/run_lens COSJ100018+022138[:<n_batch>]
+#
+# n_batch: cowls_n_batch_for in activate.sh, or the `:<n>` given.
 #
 # 48 hours is partition a/c's maximum. Every search resumes from its output folder, so a job
 # that hits the wall is resubmitted. 8 CPUs: the runner plus its 4-process sampler pool.
@@ -23,14 +25,17 @@
 
 source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
 
-[ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_lens <lens>"; exit 1; }
-RUNNER=$(cowls_runner_for "$1") || exit 1
+[ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_lens <lens>[:<n_batch>]"; exit 1; }
+LENS=${1%%:*}
+export PYAUTOLENS_N_BATCH=$(cowls_n_batch_for "$1")
+RUNNER=$(cowls_runner_for "$LENS") || exit 1
+echo "$LENS -> $(basename "$RUNNER"), n_batch $PYAUTOLENS_N_BATCH"
 
 nvidia-smi
 cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
 
 cd "$PROJECT_ROOT"
-python3 -u "$RUNNER" "$1"
+python3 -u "$RUNNER" "$LENS"
 RC=$?
 cowls_gpu_log_stop
 exit $RC

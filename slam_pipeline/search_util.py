@@ -12,7 +12,8 @@ __Contents__
 - **Setup Search Stopping:** The `f_live` the setup searches stop at.
 - **Likelihood-Call Caps:** Why every setup search has a hard ceiling, and how a capped search is reported.
 - **The Sampler Pool:** Training Nautilus's networks on several CPU cores so a GPU is not idle-killed.
-- **Batch Size:** `n_batch` from the environment: 16 on the CPU cluster, 20 on a GPU.
+- **Batch Size:** `n_batch` from the environment: 16 on the CPU cluster, per lens on a GPU.
+- **Out-Of-Memory Retry:** Why a runner restarts itself with a smaller batch instead of failing.
 - **Analysis Settings:** Mixed precision and sparse curvature, from the environment, GPU only.
 - **CPU Replay:** What keeps a GPU-written archive loadable by the CPU-side subhalo stages.
 
@@ -48,11 +49,29 @@ touches the GPU, and each gets an equal share of `CPUS_PER_TASK` BLAS threads.
 __Batch Size__
 
 `n_batch()` is the number of live points whose likelihoods JAX evaluates in one vmap call:
-`PYAUTOLENS_N_BATCH`, default 16 (the CPU jobs' `CPUS_PER_TASK`; CLAUDE.md "JAX and cores"). The
-phygpu activation sets 20, the HST project's GPU value. A pixelized fit's peak GPU memory scales
-with it; lower it if a job dies out of memory. It is not part of the output identifier (checked
+`PYAUTOLENS_N_BATCH`, default 16 (the CPU jobs' `CPUS_PER_TASK`; CLAUDE.md "JAX and cores"). On
+phygpu each lens gets its own value (`cowls_n_batch_for` in `phygpu/activate.sh`, overridable per
+submission as `<lens>:<n>`), because a fit's footprint depends on the lens. A pixelized fit's peak GPU memory scales
+with it times the source pixel count (the PSF blur of the mapping matrix is one FFT per pixel per
+batch point); lower it if a job dies out of memory. J18's 419 px frame ran out of the A6000's
+48 GB at 20 x 625 = 12,500 FFTs (phygpu job 57684). It is not part of the output identifier (checked
 2026-10-26: `source_pix[1]` has the same identifier at 16 and 20), so a chain may change it on
 resume, e.g. when moving between the GPU and CPU clusters.
+
+__Out-Of-Memory Retry__
+
+There is no way to know a lens's largest batch in advance, so a runner whose `main` is wrapped in
+`run_with_oom_retry` does not die when XLA cannot allocate. It catches the allocator failure,
+sets `PYAUTOLENS_N_BATCH` to `floor(0.8 n_batch)` and re-executes itself with the same arguments.
+Completed searches load instantly from their output folders, so only the stage that ran out
+reruns. A batch that is too large fails at the first vmap call of a search, so a restart costs
+one JAX compile, not hours of sampling. The lower batch holds for the rest of the chain.
+Ported from the HST project's `hpc/mass/runners/_runner_util.py` (2026-10-27). The
+factor of 0.8 rather than steps of one is that project's 2026-10-25 choice: stepping down one at
+a time cost up to 100 minutes of restarts before a fit began. The same wrapper restarts the
+process, with the same batch, when a sampler-pool worker dies (`BrokenProcessPool`, see
+"__The Sampler Pool__"), at most `MAX_POOL_RESTARTS` times; the search resumes from its
+checkpoint.
 
 __Analysis Settings__
 
@@ -82,6 +101,7 @@ git: committed from the phygpu clone, merged onto `master`, pulled on the HTCond
 import atexit
 import multiprocessing
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +119,17 @@ SETUP_N_LIKE_MAX = {
     "source_pix_1": 100_000,
     "source_pix_2": 10_000,  # at 75 live points; source_pix.run_2 scales it by n_live // 75
 }
+
+
+# See "__Out-Of-Memory Retry__". The markers are lower case; the cuFFT one is J18's job 57684
+# failure ("Failed to create cuFFT batched plan with scratch allocator").
+MAX_POOL_RESTARTS = 3
+OOM_MARKERS = (
+    "out of memory",
+    "resource_exhausted",
+    "scratch allocator",
+    "failed to allocate",
+)
 
 
 def n_batch() -> int:
@@ -229,3 +260,45 @@ class Nautilus(af.Nautilus):
                 super().__init__(*args, pool=pool, **kwargs)
 
         return PooledSampler
+
+
+# ---- Out-of-memory retry (see "__Out-Of-Memory Retry__") -------------------------------------
+
+
+def _restart() -> None:
+    """Re-execute this runner with its own arguments and the (updated) environment."""
+    if _POOL is not None:
+        _POOL._executor.shutdown(wait=False, cancel_futures=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.environ["PYTHONUNBUFFERED"] = "1"  # the batch scripts launch the runners with python -u
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def run_with_oom_retry(main) -> None:
+    """
+    Run `main()`, restarting the process with `floor(0.8 n_batch)` on an out-of-memory failure,
+    or with the same batch when a sampler-pool worker died (at most `MAX_POOL_RESTARTS` times).
+    """
+    try:
+        main()
+    except Exception as e:
+        if type(e).__name__ == "BrokenProcessPool":
+            restarts = int(os.environ.get("PYAUTOLENS_POOL_RESTARTS", "0"))
+            if restarts >= MAX_POOL_RESTARTS:
+                raise
+            os.environ["PYAUTOLENS_POOL_RESTARTS"] = str(restarts + 1)
+            print(f"SAMPLER POOL WORKER DIED ({e}): restart {restarts + 1}/{MAX_POOL_RESTARTS}", flush=True)
+            _restart()
+
+        message = str(e).lower()
+        if not any(marker in message for marker in OOM_MARKERS):
+            raise
+
+        old = n_batch()
+        new = int(old * 0.8)
+        if new < 1:
+            sys.exit(f"Failed: out of memory at n_batch={old}, cannot lower it further.")
+        print(f"OUT OF MEMORY at n_batch={old}: restarting with n_batch={new}", flush=True)
+        os.environ["PYAUTOLENS_N_BATCH"] = str(new)
+        _restart()

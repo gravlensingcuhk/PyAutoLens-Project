@@ -36,8 +36,9 @@ export VECLIB_MAXIMUM_THREADS=$CPUS_PER_TASK
 export NUMEXPR_NUM_THREADS=$CPUS_PER_TASK
 
 # GPU-side settings read by slam_pipeline/search_util.py (all off / CPU values when unset, which
-# is what the HTCondor CPU jobs get). None of them enters the search identifier.
-export PYAUTOLENS_N_BATCH=${PYAUTOLENS_N_BATCH:-20}          # HST project's GPU batch size
+# is what the HTCondor CPU jobs get). None of them enters the search identifier. The batch size
+# (PYAUTOLENS_N_BATCH) is per lens: the batch scripts set it for each runner from
+# cowls_n_batch_for below.
 export PYAUTOLENS_MIXED_PRECISION=${PYAUTOLENS_MIXED_PRECISION:-1}
 export PYAUTOLENS_SAMPLER_PROCESSES=${PYAUTOLENS_SAMPLER_PROCESSES:-4}   # Nautilus CPU pool, keeps the GPU from idling
 # export PYAUTOLENS_SPARSE_CURVATURE=1                       # not benchmarked on COWLS data; leave off
@@ -73,6 +74,23 @@ cowls_gpu_log_start() {   # $1: the directory to write the log to
 cowls_gpu_log_stop() {
     [ -n "$COWLS_GPU_LOG_PID" ] && kill "$COWLS_GPU_LOG_PID" 2>/dev/null
     COWLS_GPU_LOG_PID=
+}
+
+# The Nautilus / JAX vmap batch for a lens argument `<lens>[:<n>]`: the explicit `:<n>`, else an
+# exported PYAUTOLENS_N_BATCH, else the lens's default here. A source_pix search's GPU memory goes
+# as n_batch x source pixels x the FFT frame (search_util "__Batch Size__"): J18 (419 px frame) ran
+# out of the A6000's 48 GB at 20 x 625 = 12,500 FFTs (job 57684). With the 40 x 40 mesh (1600 pixels)
+# J18 starts at 6 (9,600 FFTs); J24's 209 px frame makes each FFT ~4x smaller, so 12. A guess
+# that is too high costs one restart: the runners lower it on an out-of-memory failure
+# (search_util "__Out-Of-Memory Retry__").
+cowls_n_batch_for() {
+    case "$1" in *:*) echo "${1#*:}"; return ;; esac
+    if [ -n "$PYAUTOLENS_N_BATCH" ]; then echo "$PYAUTOLENS_N_BATCH"; return; fi
+    case "$1" in
+        COSJ100018+022138) echo 6 ;;
+        COSJ100024+021749) echo 12 ;;
+        *) echo 20 ;;   # the HST project's GPU batch size
+    esac
 }
 
 # The runner for a lens: the two runners differ only in filter and pixel scale.

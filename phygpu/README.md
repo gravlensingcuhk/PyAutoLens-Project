@@ -24,8 +24,16 @@ The data (`data/cowls/`) is tracked in the repository, so the clone has it. Upda
 
 ```bash
 sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749   # both lenses, one node
+sbatch -J cowls phygpu/multi_run2 COSJ100018+022138:4 COSJ100024+021749 # J18 at n_batch 4
 sbatch -J j18   phygpu/run_lens   COSJ100018+022138                     # one lens, shared node: tests only
 ```
+
+Each lens runs at its own Nautilus batch size: `cowls_n_batch_for` in `activate.sh` (J18 6, J24 12
+with the 40 x 40 mesh), an exported `PYAUTOLENS_N_BATCH` for every lens of a job, or `<lens>:<n>`
+for one lens. A runner that runs out of GPU memory restarts itself at `floor(0.8 n_batch)`. Its
+log shows `OUT OF MEMORY at n_batch=...: restarting with n_batch=...`, and completed searches
+are not refitted (`slam_pipeline/search_util.py` "__Out-Of-Memory Retry__"). Put a lens's
+working value back into `cowls_n_batch_for` so the next job does not pay for the restarts.
 
 Logs: `phygpu/outputs/m2_<tag>.<job>.out` (SLURM), `phygpu/outputs/<lens>.<job>.log` (each
 runner), `phygpu/outputs/gpu_<tag>.<job>.out` (GPU use every 30 s; summarise with the HST
@@ -38,7 +46,7 @@ Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
 
 | Variable | phygpu | Effect |
 | --- | --- | --- |
-| `PYAUTOLENS_N_BATCH` | 20 | Nautilus / JAX vmap batch (16 on CPU). Not in the search identifier. Lower it if a job dies out of GPU memory. |
+| `PYAUTOLENS_N_BATCH` | per lens | Nautilus / JAX vmap batch (16 on CPU), set for each runner by the batch scripts (see Submitting). Not in the search identifier. Lowered automatically on an out-of-memory failure. |
 | `PYAUTOLENS_MIXED_PRECISION` | 1 | PyAutoArray mixed precision (mapping cube and PSF FFT in fp32, solve in fp64). Not in the identifier. |
 | `PYAUTOLENS_SAMPLER_PROCESSES` | 4 | CPU pool for Nautilus's network training, so the GPU is not idle-killed. |
 | `PYAUTOLENS_SPARSE_CURVATURE` | unset | Sparse curvature matrix (autoarray 2026-10-26). Off until benchmarked on COWLS data. |

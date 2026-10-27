@@ -56,9 +56,10 @@ from . import search_util
 
 SOURCE_KEY = "('galaxies', 'source')"
 
-# The source mesh, see "__The Source Mesh__". 25 x 25 (HST project: 30 x 30 on 3.5" masks; the
-# COWLS masks are 1.5" at 0.03-0.06"/px).
-RECT_SHAPE = (25, 25)
+# The source mesh, see "__The Source Mesh__". 40 x 40 since 2026-10-27, for a finer source
+# reconstruction (25 x 25 before; HST project: 30 x 30 on 3.5" masks). A source_pix search's
+# GPU memory scales with n_batch x the pixel count (search_util "__Batch Size__").
+RECT_SHAPE = (40, 40)
 
 # See "__The Adapt Image__".
 ADAPT_SNR_CAP = 3.0
@@ -173,7 +174,7 @@ def run_1(
         PIPELINE provides a good mass model.
     n_live, n_batch, f_live, n_like_max
         Nautilus settings; the defaults are the HST project's stability choices (n_batch from
-        `search_util.n_batch()`: 16 on the CPU jobs, 20 on phygpu).
+        `search_util.n_batch()`: 16 on the CPU jobs, per lens on phygpu).
     """
 
     """

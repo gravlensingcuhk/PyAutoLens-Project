@@ -149,7 +149,7 @@ def main():
     """
     __SOURCE PIX PIPELINE__
 
-    Rectangular RTU mesh (25 x 25) + AdaptPower regularization, the HST project's stability setup;
+    Rectangular RTU mesh (40 x 40) + AdaptPower regularization, the HST project's stability setup;
     see slam_pipeline/source_pix.py "__The Source Mesh__" for why the Hilbert/Delaunay/AdaptSplit
     scheme was dropped. The adapt image is the SOURCE LP source capped at S/N 3 on a copy, while the
     uncapped image drives the pixelization over-sampling map (4 on the arcs, 2 elsewhere).
@@ -291,4 +291,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Restarts with a smaller n_batch on a GPU out-of-memory failure (search_util "__Out-Of-Memory Retry__").
+    slam_pipeline.search_util.run_with_oom_retry(main)

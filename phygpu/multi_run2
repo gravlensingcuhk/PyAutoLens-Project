@@ -3,6 +3,9 @@
 # Up to 2 lenses in parallel, one per GPU, on a whole 2-GPU node (a1-a6, c1) of its own.
 #
 #   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
+#   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138:4 COSJ100024+021749   # J18 at n_batch 4
+#
+# Each lens runs at its own n_batch (cowls_n_batch_for in activate.sh; `<lens>:<n>` overrides it).
 #
 # Why a whole node, why one runner per GPU pinned with CUDA_VISIBLE_DEVICES, why --exclusive
 # with --exclude=a8,a9: the HST project's hpc/mass/batch/multi_run2 (__Why A Whole Node__).
@@ -28,7 +31,7 @@
 N_SLOTS=2
 
 if [ $# -lt 1 ] || [ $# -gt $N_SLOTS ]; then
-    echo "Usage: sbatch -J <tag> phygpu/multi_run$N_SLOTS <lens_1> [<lens_2>]"
+    echo "Usage: sbatch -J <tag> phygpu/multi_run$N_SLOTS <lens_1>[:<n_batch>] [<lens_2>[:<n_batch>]]"
     exit 1
 fi
 
@@ -44,12 +47,14 @@ cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
 echo "node $SLURMD_NODENAME: ${#GPUS[@]} GPUs, ${SLURM_CPUS_ON_NODE} CPUs, $COWLS_THREADS threads per runner"
 
 cd "$PROJECT_ROOT"
-LENSES=("$@")
-for i in "${!LENSES[@]}"; do
-    RUNNER=$(cowls_runner_for "${LENSES[$i]}") || exit 1
-    echo "GPU ${GPUS[$i]}: ${LENSES[$i]} -> $(basename "$RUNNER")"
-    CUDA_VISIBLE_DEVICES="${GPUS[$i]}" python3 -u "$RUNNER" "${LENSES[$i]}" \
-        > "$PROJECT_ROOT/phygpu/outputs/${LENSES[$i]}.${SLURM_JOB_ID}.log" 2>&1 &
+ARGS=("$@")
+for i in "${!ARGS[@]}"; do
+    LENS=${ARGS[$i]%%:*}
+    N_BATCH=$(cowls_n_batch_for "${ARGS[$i]}")
+    RUNNER=$(cowls_runner_for "$LENS") || exit 1
+    echo "GPU ${GPUS[$i]}: $LENS -> $(basename "$RUNNER"), n_batch $N_BATCH"
+    CUDA_VISIBLE_DEVICES="${GPUS[$i]}" PYAUTOLENS_N_BATCH=$N_BATCH python3 -u "$RUNNER" "$LENS" \
+        > "$PROJECT_ROOT/phygpu/outputs/$LENS.${SLURM_JOB_ID}.log" 2>&1 &
     PIDS+=($!)
 done
 
