@@ -1,0 +1,62 @@
+{
+    "type": "instance",
+    "class_path": "slam_pipeline.search_util.Nautilus",
+    "arguments": {
+        "name": "source_pix[1]",
+        "n_update": null,
+        "seed": null,
+        "live_visual_update": false,
+        "inplace": false,
+        "path_prefix": {
+            "type": "path",
+            "path": "model_setup_free_source"
+        },
+        "enlarge_per_dim": 1.1,
+        "n_shell": 1,
+        "checkpoint": true,
+        "n_like_max": 100000,
+        "split_threshold": 100,
+        "silence": true,
+        "n_eff": 500,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "n_networks": 4,
+        "n_live": 200,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "n_batch": 20,
+        "f_live": 0.05,
+        "iterations_per_full_update": 10000.0,
+        "number_of_cores": 16,
+        "vectorized": false,
+        "iterations_per_quick_update": 1e+99,
+        "unique_tag": "COSJ100018+022138",
+        "verbose": true,
+        "force_x1_cpu": false,
+        "use_jax_vmap": null,
+        "n_points_min": null,
+        "discard_exploration": false,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "name": "source_pix[1]",
+                "identifier": "47f5040fdfe27c23b48a174f70133362",
+                "is_identifier_in_paths": true,
+                "path_prefix": {
+                    "type": "path",
+                    "path": "model_setup_free_source"
+                },
+                "unique_tag": "COSJ100018+022138",
+                "image_path_suffix": "",
+                "parent": null
+            }
+        },
+        "n_like_new_bound": null
+    }
+}

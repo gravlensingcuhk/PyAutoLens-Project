@@ -1,0 +1,27 @@
+{
+    "type": "instance",
+    "class_path": "autoarray.settings.Settings",
+    "arguments": {
+        "use_border_relocator": true,
+        "nnls_preconditioning_no_mapper": "raw",
+        "use_mixed_precision": true,
+        "nnls_max_iter": null,
+        "certified_tau_rel": 1e-09,
+        "interferometer_route": null,
+        "use_edge_zeroed_pixels": true,
+        "nnls_solver_tol": null,
+        "use_positive_only_solver": true,
+        "regularization_term_method": "matmul",
+        "log_det_method": "cholesky",
+        "certified_pass_budget": 16,
+        "nnls_warm_start_error_tolerance": 1.5,
+        "sparse_curvature_mixed_precision": false,
+        "positive_only_solver": "pdip",
+        "no_regularization_add_to_curvature_diag_value": 0.001,
+        "interferometer_numba_nnz_per_source_max": null,
+        "nnls_warm_start_memo": true,
+        "certified_fallback": "pdip",
+        "interferometer_direct_conv_symmetric_max_work_fraction": 0.7,
+        "use_sparse_curvature": false
+    }
+}
