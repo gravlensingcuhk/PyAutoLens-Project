@@ -19,7 +19,7 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'updated_output')  # output_v3/ holds the pre-2026-10-26 (Hilbert/Delaunay) fits
+    output_path = path.join(cosma_path, 'updated_output_v2')  # adapt S/N cap 10; updated_output/ holds the cap-3 RTU fits (2026-10-26/28), output_v3/ the Hilbert/Delaunay fits
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls')
@@ -173,9 +173,10 @@ def main():
         dataset=dataset,
         settings=analysis_settings,
         adapt_images=adapt_images,
-        positions_likelihood_list=[
-            source_lp_result.positions_likelihood_from(factor=3.0, minimum_threshold=0.075)
-        ],
+        # The marked positions, threshold from the previous result (slam_pipeline.positions_util).
+        positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+            result=source_lp_result, positions=positions
+        ),
         use_jax=use_jax,
     )
 
@@ -247,9 +248,9 @@ def main():
         dataset=dataset,
         settings=analysis_settings,
         adapt_images=adapt_images,
-        positions_likelihood_list=[
-            source_pix_result_2.positions_likelihood_from(factor=3.0, minimum_threshold=0.075)
-        ],
+        positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+            result=source_pix_result_2, positions=positions
+        ),
     )
 
     mass_result = slam_pipeline.mass_total.run(

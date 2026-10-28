@@ -41,7 +41,11 @@ __The Adapt Image__
 
 Both searches cap the source adapt image at S/N `ADAPT_SNR_CAP` on a copy: the adapt mesh and
 AdaptPower are max-normalised ((adapt/max)**power), so without the cap the single brightest
-source pixel dominates and starves the extended arc. The *uncapped* image drives the
+source pixel dominates and starves the extended arc. The `updated_output/` runs used a cap of 3,
+which turns the whole arc into a flat plateau, so the run-2 mesh `weight_power` could only
+trade arc against background (J24: it fitted to ~0.03, i.e. no adaption, with the lattice
+identical to run 1). `updated_output_v2/` raises the cap to 10 so the weighting can follow the
+structure inside the arc. The *uncapped* image drives the
 pixelization over-sampling map (sub-size 4 where the source S/N > 3, else 2), which must see the
 true S/N. Keep that ordering.
 """
@@ -62,7 +66,7 @@ SOURCE_KEY = "('galaxies', 'source')"
 RECT_SHAPE = (40, 40)
 
 # See "__The Adapt Image__".
-ADAPT_SNR_CAP = 3.0
+ADAPT_SNR_CAP = 10.0  # 3.0 in updated_output/ (2026-10-26 to 10-28); 10.0 from updated_output_v2/
 PIX_OVER_SAMPLE_THRESHOLD = 3.0
 PIX_OVER_SAMPLE_SIZES = (4, 2)  # (where source S/N > threshold, elsewhere)
 

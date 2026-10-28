@@ -58,7 +58,7 @@ Results travel through git. On phygpu, once a stage (or the whole chain) has fin
 
 ```bash
 cd /home/user/lange/phygpu/PyAutoLens-Project
-git add updated_output/model_setup_free_source updated_output/mass_models
+git add updated_output_v2/model_setup_free_source updated_output_v2/mass_models
 git commit -m "J18/J24 outputs from phygpu"
 git push origin sam            # then merge sam onto master
 ```

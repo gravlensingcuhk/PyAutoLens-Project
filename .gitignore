@@ -13,3 +13,6 @@ __pycache__/
 updated_output/**/*.hdf5
 updated_output/**/*.running/
 updated_output/**/*.replay-*/
+updated_output_v2/**/*.hdf5
+updated_output_v2/**/*.running/
+updated_output_v2/**/*.replay-*/
