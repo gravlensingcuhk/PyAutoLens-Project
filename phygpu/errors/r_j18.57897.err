@@ -1,0 +1,2 @@
+/home/user/lange/phygpu/PyAutoLens-Project/pyauto/PyAutoFit/autofit/non_linear/search/runtime.py:111: SearchWarning: 
+  warnings.warn(exc.SearchWarning(""))
