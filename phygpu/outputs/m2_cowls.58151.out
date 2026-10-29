@@ -1,0 +1,33 @@
+ 
+Disk quotas for user lange (uid 5996): 
+     Filesystem   space   quota   limit   grace   files   quota   limit   grace
+      /dev/sda1  53291M    100G    110G            168k       0       0        
+ 
+Wed Oct 28 12:53:46 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.05              Driver Version: 560.35.05      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:21:00.0 Off |                  Off |
+| 40%   58C    P8             28W /  300W |       2MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA RTX A6000               Off |   00000000:41:00.0 Off |                  Off |
+| 32%   52C    P8             25W /  300W |       2MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+GPU use logged every 30 s to /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/gpu_cowls.58151.out
+node a1: 2 GPUs, 64 CPUs, 32 threads per runner
+GPU 0: COSJ100018+022138 -> main_runner_J18.py, n_batch 6
+GPU 1: COSJ100024+021749 -> main_runner_J24.py, n_batch 12
