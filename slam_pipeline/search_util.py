@@ -82,8 +82,9 @@ curvature matrix, positive-only solve and log-determinants stay double. The HST 
 0.167 against 0.183 s per call and at most 0.005 nats shift. `PYAUTOLENS_SPARSE_CURVATURE=1`
 turns on `use_sparse_curvature` (PyAutoArray `production/hst` 2026-10-26: the curvature matrix's
 mapper rows from a transposed PSF blur and a sparse contraction instead of the dense B^T B
-product; exact in exact arithmetic, JAX backend only). It is off by default and not yet
-benchmarked on COWLS-sized data. Neither is part of the output identifier.
+product; exact in exact arithmetic, JAX backend only). It is off by default and on in
+`phygpu/activate.sh` since 2026-10-30 on the HST project's measurement (1.8x per call at mesh
+50, exact on Delaunay mappers). Neither is part of the output identifier.
 
 __CPU Replay__
 

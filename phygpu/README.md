@@ -49,7 +49,9 @@ Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
 | `PYAUTOLENS_N_BATCH` | per lens | Nautilus / JAX vmap batch (16 on CPU), set for each runner by the batch scripts (see Submitting). Not in the search identifier. Lowered automatically on an out-of-memory failure. |
 | `PYAUTOLENS_MIXED_PRECISION` | 1 | PyAutoArray mixed precision (mapping cube and PSF FFT in fp32, solve in fp64). Not in the identifier. |
 | `PYAUTOLENS_SAMPLER_PROCESSES` | 4 | CPU pool for Nautilus's network training, so the GPU is not idle-killed. |
-| `PYAUTOLENS_SPARSE_CURVATURE` | unset | Sparse curvature matrix (autoarray 2026-10-26). Off until benchmarked on COWLS data. |
+| `PYAUTOLENS_SPARSE_CURVATURE` | 1 | Sparse curvature matrix (autoarray 2026-10-26), on since 2026-10-30 (`PYAUTOLENS_SPARSE_CURVATURE=0` turns it off). The HST project measured 1.8x per call on an A6000 at mesh 50 and an exact result on Delaunay mappers; it is not in the identifier. |
+| `PYAUTOLENS_MESH` | unset (`rtu`) | `hilbert` runs the Delaunay-on-Hilbert-points source mesh from `source_pix[1]` on (`slam_pipeline/source_pix.py` "__The Hilbert Mesh__"). Changes the identifier from `source_pix[1]`; shares `source_lp[1]`, so submit it after the RTU chain's `source_lp[1]` has finished: `PYAUTOLENS_MESH=hilbert sbatch -J hilb phygpu/multi_run2 ...` (sbatch exports the environment). |
+| `PYAUTOLENS_REGULARIZATION` | unset (`adapt_split`) | Hilbert mesh only: `constant_split` for the HST control. |
 | `PYAUTOLENS_PROJECT_ROOT` | the clone | Where the runners find `config/`, `data/` and write `updated_output/`. |
 
 ## Getting results to the HTCondor cluster

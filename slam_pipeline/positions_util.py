@@ -32,9 +32,17 @@ falls back to the solved ones, as upstream.
 
 __The Threshold__
 
-Unchanged from SLaM: `factor` times the previous result's maximum source-plane separation of
-these positions, floored at `minimum_threshold`. The result still sets the threshold; it no
-longer chooses the positions.
+`factor` times the previous result's maximum source-plane separation of these positions,
+floored at `minimum_threshold` and **capped at `maximum_threshold`**. The result still sets the
+threshold; it no longer chooses the positions.
+
+The cap exists because the SLaM factor-of-3 chaining compounds: in `updated_output_v2/`
+(2026-10-28) J18's four marks scattered by 0.077" under SOURCE LP (one mark 0.1" off its knot),
+so `source_pix[1]` ran at 0.23", drifted to a 0.19" scatter, and the mass stages ran at 0.57" on
+a 0.37" Einstein radius, i.e. unconstrained; they went to theta_E 0.18" with the source
+reconstructing the ring. J24 went the same way (0.18" then 0.46"). The runners pass a cap of a
+few pixels (J18 0.1", J24 0.15"), which excludes the undermagnified solutions (the marks are
+0.3" apart under them) while leaving room for marking error.
 
 A lens whose penalty cannot be built (fewer than two finite positions, `PositionsException`)
 runs without the penalty, with a warning, rather than aborting the stage.
@@ -51,23 +59,29 @@ logger = logging.getLogger(__name__)
 # The runners' chaining threshold floor (arcsec), shared by source_pix and the mass stages.
 MINIMUM_THRESHOLD = 0.075
 
+# The default threshold cap (arcsec); the runners pass a per-lens value, see "__The Threshold__".
+MAXIMUM_THRESHOLD = 0.15
+
 
 def positions_likelihood_list_from(
     result: af.Result,
     positions: Optional[al.Grid2DIrregular] = None,
     factor: float = 3.0,
     minimum_threshold: float = MINIMUM_THRESHOLD,
+    maximum_threshold: Optional[float] = MAXIMUM_THRESHOLD,
 ) -> List[al.PositionsLH]:
     """
     The `positions_likelihood_list` for a stage chained from `result`: one penalty on the
     hand-marked `positions` (or, when there are none, on the images solved from `result`), with
-    the threshold set from `result`; empty when there are fewer than two finite positions to
-    compare. See the module docstring.
+    the threshold set from `result`, floored at `minimum_threshold` and capped at
+    `maximum_threshold` (`None` for no cap); empty when there are fewer than two finite positions
+    to compare. See the module docstring.
     """
     try:
         positions_lh = result.positions_likelihood_from(
             factor=factor,
             minimum_threshold=minimum_threshold,
+            maximum_threshold=maximum_threshold,
             positions=positions,
         )
     except al.exc.PositionsException as e:

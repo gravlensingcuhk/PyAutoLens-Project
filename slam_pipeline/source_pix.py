@@ -41,14 +41,43 @@ __The Adapt Image__
 
 Both searches cap the source adapt image at S/N `ADAPT_SNR_CAP` on a copy: the adapt mesh and
 AdaptPower are max-normalised ((adapt/max)**power), so without the cap the single brightest
-source pixel dominates and starves the extended arc. The `updated_output/` runs used a cap of 3,
-which turns the whole arc into a flat plateau, so the run-2 mesh `weight_power` could only
-trade arc against background (J24: it fitted to ~0.03, i.e. no adaption, with the lattice
-identical to run 1). `updated_output_v2/` raises the cap to 10 so the weighting can follow the
-structure inside the arc. The *uncapped* image drives the
+source pixel dominates and starves the extended arc. A cap of 3 turns the whole arc into a flat
+plateau, so the run-2 mesh `weight_power` can only trade arc against background (J24: it fitted
+to ~0.01, i.e. no adaption, with the lattice identical to run 1). `updated_output_v2/`
+(2026-10-28) tried a cap of 10 so the weighting could follow the structure inside the arc: J24's
+`weight_power` stayed at 0.01, and every pixelized stage lost 12-17 in log evidence (the
+regularization coefficients fell by 2-3x and the source went rough), so the cap is back at 3.
+The *uncapped* image drives the
 pixelization over-sampling map (sub-size 4 where the source S/N > 3, else 2), which must see the
 true S/N. Keep that ordering.
+
+__The Hilbert Mesh (re-trial, 2026-10-29)__
+
+`PYAUTOLENS_MESH=hilbert` switches both searches to the thesis scheme, ported from the HST
+project's `--mesh hilbert` (its `source_pix.py` "__The Hilbert Mesh__" and "__Edge Points__",
+and `docs/current_debugging_and_speedup.md` §0a, 2026-10-29): `al.image_mesh.Hilbert` places
+`hilbert_pixels_from_pixel_scale` points (1500 at 0.03"/px, 1250 at 0.06"/px) along a Hilbert
+curve weighted by the adapt image (max-normalised, `HILBERT_WEIGHT_POWER` 4, floored at
+`HILBERT_WEIGHT_FLOOR` 0.01), `append_with_circle_edge_points` adds `EDGE_PIXELS_TOTAL` points
+half a pixel outside the (circular) mask and `al.mesh.Delaunay(zeroed_pixels=...)` regularizes
+those to zero, and the regularization is `AdaptSplit` (or `ConstantSplit`, the HST control, via
+`PYAUTOLENS_REGULARIZATION=constant_split`). The adapt image is capped per lens at the S/N of
+its `HILBERT_ADAPT_SNR_SATURATE`-th (50th) brightest pixel, never below `ADAPT_SNR_CAP` (the
+HST production rule), rather than at the fixed cap the RTU mesh uses.
+
+Why re-try what the RTU switch replaced: the 2026-10 ruggedness was traced to the per-step
+recomputation of the pixel signals, and the `weights` normalisation in `config/general.yaml`
+that smoothed RTU applies to every adaptive regularization but was never run on the Delaunay
+mesh here; and the vendored autoarray's sparse curvature is exact on a Delaunay mapper, so
+1250-1500 adaptive points cost about an RTU-30 call on a GPU (HST §0a). The expected gain is
+mesh-50 resolution on the arc at mesh-30 cost. Both meshes use the same adapt-image, positions
+and over-sampling code; the mesh class changes the search identifier from `source_pix[1]` on,
+so a Hilbert chain shares `source_lp[1]` with the RTU chain in the same output directory and
+is told apart by `model.info` (mesh class). Run it after that `source_lp[1]` has finished, or
+the running-search lock refuses the second process.
 """
+import os
+
 import autofit as af
 import autolens as al
 
@@ -66,9 +95,42 @@ SOURCE_KEY = "('galaxies', 'source')"
 RECT_SHAPE = (40, 40)
 
 # See "__The Adapt Image__".
-ADAPT_SNR_CAP = 10.0  # 3.0 in updated_output/ (2026-10-26 to 10-28); 10.0 from updated_output_v2/
+ADAPT_SNR_CAP = 3.0  # 10.0 in updated_output_v2/ (2026-10-28) only, see "__The Adapt Image__"
 PIX_OVER_SAMPLE_THRESHOLD = 3.0
 PIX_OVER_SAMPLE_SIZES = (4, 2)  # (where source S/N > threshold, elsewhere)
+
+# See "__The Hilbert Mesh__". The HST project's production values.
+MESHES = ("rtu", "hilbert")
+HILBERT_WEIGHT_POWER = 4.0
+HILBERT_WEIGHT_FLOOR = 0.01
+HILBERT_ADAPT_SNR_SATURATE = 50  # cap the adapt image at the S/N of its 50th brightest pixel
+EDGE_PIXELS_TOTAL = 30
+HILBERT_REGULARIZATIONS = {"adapt_split": al.reg.AdaptSplit, "constant_split": al.reg.ConstantSplit}
+
+
+def mesh_from_env() -> str:
+    """`PYAUTOLENS_MESH`: `rtu` (default) or `hilbert`; see "__The Hilbert Mesh__"."""
+    mesh = os.environ.get("PYAUTOLENS_MESH", "rtu").lower()
+    if mesh not in MESHES:
+        raise ValueError(f"PYAUTOLENS_MESH must be one of {MESHES}, not {mesh!r}")
+    return mesh
+
+
+def hilbert_regularization_from_env():
+    """`PYAUTOLENS_REGULARIZATION` for the Hilbert mesh: `adapt_split` (default) or `constant_split`."""
+    name = os.environ.get("PYAUTOLENS_REGULARIZATION", "adapt_split").lower()
+    if name not in HILBERT_REGULARIZATIONS:
+        raise ValueError(
+            f"PYAUTOLENS_REGULARIZATION must be one of {tuple(HILBERT_REGULARIZATIONS)}, not {name!r}"
+        )
+    return HILBERT_REGULARIZATIONS[name]
+
+
+def hilbert_snr_cap_for(snr_map, saturate: int = HILBERT_ADAPT_SNR_SATURATE) -> float:
+    """The per-lens cap: the S/N of the `saturate`-th brightest pixel, never below `ADAPT_SNR_CAP`."""
+    values = np.sort(np.asarray(snr_map, dtype=float).ravel())[::-1]
+    nth = values[min(saturate, values.size) - 1]
+    return max(ADAPT_SNR_CAP, float(nth))
 
 # Nautilus stopping and caps live in search_util (shared with the other stages); re-exported
 # here because the runners and docs refer to them as source_pix's.
@@ -77,22 +139,63 @@ SETUP_N_LIKE_MAX = search_util.SETUP_N_LIKE_MAX
 report_if_capped = search_util.report_if_capped
 
 
-def adapt_images_from(result: af.Result, adapt_snr_cap: float = ADAPT_SNR_CAP):
+def adapt_images_from(
+    result: af.Result,
+    adapt_snr_cap: float = ADAPT_SNR_CAP,
+    mask: Optional[al.Mask2D] = None,
+    mesh: Optional[str] = None,
+):
     """
-    The adapt images for a rectangular adaptive mesh, built from `result`'s source image.
+    The adapt images for the source mesh, built from `result`'s source image.
 
     Returns `(adapt_images, source_image_raw)`: the adapt images carry the S/N-capped copy of
     the source image, `source_image_raw` is the uncapped one for the over-sampling map (see
-    "__The Adapt Image__").
+    "__The Adapt Image__"). For the Hilbert mesh (`mesh="hilbert"`, default from
+    `PYAUTOLENS_MESH`) the cap is the per-lens one and the adapt images also carry the
+    image-plane mesh grid with its ring of edge points (see "__The Hilbert Mesh__"); `mask`
+    is then required.
     """
+    mesh = mesh_from_env() if mesh is None else mesh
     galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(result=result)
     source_image_raw = galaxy_image_name_dict[SOURCE_KEY]
+
+    if mesh == "hilbert":
+        adapt_snr_cap = hilbert_snr_cap_for(source_image_raw)
 
     source_adapt_image = source_image_raw.copy()
     source_adapt_image[source_adapt_image > adapt_snr_cap] = adapt_snr_cap
     galaxy_image_name_dict[SOURCE_KEY] = source_adapt_image
 
-    return al.AdaptImages(galaxy_name_image_dict=galaxy_image_name_dict), source_image_raw
+    if mesh != "hilbert":
+        return al.AdaptImages(galaxy_name_image_dict=galaxy_image_name_dict), source_image_raw
+
+    if mask is None:
+        raise ValueError("adapt_images_from needs the mask for the Hilbert mesh")
+    pixels = al.model_util.hilbert_pixels_from_pixel_scale(mask.pixel_scales[0])
+    print(
+        f"HILBERT pixels={pixels} (+{EDGE_PIXELS_TOTAL} edge)  weight_power={HILBERT_WEIGHT_POWER}  "
+        f"weight_floor={HILBERT_WEIGHT_FLOOR}  regularization={hilbert_regularization_from_env().__name__}  "
+        f"adapt_snr_cap={adapt_snr_cap:.2f} (brightest {HILBERT_ADAPT_SNR_SATURATE} px)  "
+        f"mask_radius={mask.circular_radius:.2f}\"",
+        flush=True,
+    )
+    image_mesh = al.image_mesh.Hilbert(
+        pixels=pixels, weight_power=HILBERT_WEIGHT_POWER, weight_floor=HILBERT_WEIGHT_FLOOR
+    )
+    image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
+        mask=mask, adapt_data=source_adapt_image
+    )
+    image_plane_mesh_grid = al.image_mesh.append_with_circle_edge_points(
+        image_plane_mesh_grid=image_plane_mesh_grid,
+        centre=mask.mask_centre,
+        radius=mask.circular_radius + mask.pixel_scale / 2.0,
+        n_points=EDGE_PIXELS_TOTAL,
+    )
+    adapt_images = al.AdaptImages(
+        galaxy_name_image_dict=galaxy_image_name_dict,
+        galaxy_name_image_plane_mesh_grid_dict={SOURCE_KEY: image_plane_mesh_grid},
+    )
+    return adapt_images, source_image_raw
 
 
 def apply_pixelization_over_sampling(
@@ -114,11 +217,29 @@ def apply_pixelization_over_sampling(
     )
 
 
-def pixelization_from(search: int, shape: Tuple[int, int] = RECT_SHAPE) -> af.Model:
+def pixelization_from(
+    search: int,
+    shape: Tuple[int, int] = RECT_SHAPE,
+    mesh: Optional[str] = None,
+    adapt_images: Optional[al.AdaptImages] = None,
+) -> af.Model:
     """
     The `af.Model(al.Pixelization)` of search 1 (density-adapted RTU mesh) or search 2
-    (adapt-image RTU mesh with free `weight_power` / `weight_floor`), both with `AdaptPower`.
+    (adapt-image RTU mesh with free `weight_power` / `weight_floor`), both with `AdaptPower`;
+    or, for the Hilbert mesh, a `Delaunay` of the image-plane mesh grid carried by
+    `adapt_images` with its edge points zeroed, and the split regularization from the
+    environment (see "__The Hilbert Mesh__").
     """
+    mesh = mesh_from_env() if mesh is None else mesh
+    if mesh == "hilbert":
+        if adapt_images is None:
+            raise ValueError("pixelization_from needs the adapt images for the Hilbert mesh")
+        grid = adapt_images.galaxy_name_image_plane_mesh_grid_dict[SOURCE_KEY]
+        return af.Model(
+            al.Pixelization,
+            mesh=al.mesh.Delaunay(pixels=grid.shape[0], zeroed_pixels=EDGE_PIXELS_TOTAL),
+            regularization=af.Model(hilbert_regularization_from_env()),
+        )
     mesh_cls = al.mesh.RectangularRTUAdaptDensity if search == 1 else al.mesh.RectangularRTUAdaptImage
     return af.Model(
         al.Pixelization,
@@ -190,7 +311,8 @@ def run_1(
      - The lens galaxy mass is modeled using a total mass distribution [model initialized from the results of the 
      SOURCE LP PIPELINE].
      - The source galaxy's light is a density-adapted rectangular RTU mesh with AdaptPower regularization
-     [regularization parameters free to vary].
+     [regularization parameters free to vary] (or, under PYAUTOLENS_MESH=hilbert, a Delaunay mesh on
+     Hilbert points with a split regularization; see "__The Hilbert Mesh__").
 
     This search improves the lens mass model by modeling the source using a pixelization and computes the adapt
     images that are used in search 2.
@@ -206,7 +328,7 @@ def run_1(
         mass = source_lp_result.instance.galaxies.lens.mass
         shear = source_lp_result.instance.galaxies.lens.shear
 
-    pixelization = pixelization_from(search=1)
+    pixelization = pixelization_from(search=1, adapt_images=analysis.adapt_images)
     if mesh_init is not None:
         pixelization.mesh = mesh_init
     if regularization_init is not None:
@@ -306,14 +428,14 @@ def run_2(
     - The lens galaxy light is modeled using a light profiles [parameters fixed to result of SOURCE LP PIPELINE].
     - The lens galaxy mass is modeled using a total mass distribution [parameters fixed to result of search 1].
     - The source galaxy's light is an adapt-image RTU mesh (free weight_power / weight_floor) with AdaptPower
-    regularization.
+    regularization (or, under PYAUTOLENS_MESH=hilbert, a Delaunay mesh rebuilt from search 1's source).
 
     This search initializes the pixelization's mesh and regularization.
     """
     if n_like_max is None:
         n_like_max = SETUP_N_LIKE_MAX["source_pix_2"] * max(1, n_live // 75)
 
-    pixelization = pixelization_from(search=2)
+    pixelization = pixelization_from(search=2, adapt_images=analysis.adapt_images)
     if mesh is not None:
         pixelization.mesh = mesh
     if regularization is not None:

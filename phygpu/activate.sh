@@ -41,7 +41,7 @@ export NUMEXPR_NUM_THREADS=$CPUS_PER_TASK
 # cowls_n_batch_for below.
 export PYAUTOLENS_MIXED_PRECISION=${PYAUTOLENS_MIXED_PRECISION:-1}
 export PYAUTOLENS_SAMPLER_PROCESSES=${PYAUTOLENS_SAMPLER_PROCESSES:-4}   # Nautilus CPU pool, keeps the GPU from idling
-# export PYAUTOLENS_SPARSE_CURVATURE=1                       # not benchmarked on COWLS data; leave off
+export PYAUTOLENS_SPARSE_CURVATURE=${PYAUTOLENS_SPARSE_CURVATURE:-1}  # exact; HST measured 1.8x per call at large meshes (on since 2026-10-30)
 
 export PYAUTO_SKIP_WORKSPACE_VERSION_CHECK=1
 

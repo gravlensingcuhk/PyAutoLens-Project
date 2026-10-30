@@ -19,7 +19,7 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'updated_output_v2')  # adapt S/N cap 10; updated_output/ holds the cap-3 RTU fits (2026-10-26/28), output_v3/ the Hilbert/Delaunay fits
+    output_path = path.join(cosma_path, 'updated_output_v3')  # capped positions threshold, adapt S/N cap 3; updated_output_v2/ = cap 10 / uncapped threshold (2026-10-28), updated_output/ = cap 3 / solved positions, output_v3/ = Hilbert/Delaunay
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls')
@@ -38,12 +38,14 @@ def main():
     dataset_name = str(sys.argv[1])
     filt = "F150W"
     ps = 0.03
+    # Cap on the chained positions threshold (arcsec, 3.3 px at 0.03"/px); see slam_pipeline.positions_util "__The Threshold__".
+    positions_threshold_max = 0.10
     dataset_path = path.join(data_path, dataset_name, filt)
 
     dataset = al.Imaging.from_fits(
         data_path=path.join(dataset_path, "data.fits"),
         noise_map_path=path.join(dataset_path, "noise_map.fits"),
-        psf_path=path.join(dataset_path, "psf95pc.fits"),
+        psf_path=path.join(dataset_path, "psf.fits"),  # 31 x 31, 95% of the 71 x 71 flux in both lenses (psf95pc: 91%); normalized on load
         pixel_scales=ps,
         check_noise_map=False
     )
@@ -151,7 +153,7 @@ def main():
 
     Rectangular RTU mesh (40 x 40) + AdaptPower regularization, the HST project's stability setup;
     see slam_pipeline/source_pix.py "__The Source Mesh__" for why the Hilbert/Delaunay/AdaptSplit
-    scheme was dropped. The adapt image is the SOURCE LP source capped at S/N 3 on a copy, while the
+    scheme was dropped, and "__The Hilbert Mesh__" for its re-trial under PYAUTOLENS_MESH=hilbert. The adapt image is the SOURCE LP source capped at S/N 3 on a copy, while the
     uncapped image drives the pixelization over-sampling map (4 on the arcs, 2 elsewhere).
     """
 
@@ -163,7 +165,7 @@ def main():
         number_of_cores = 16,
     )
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result)
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
         dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
@@ -175,7 +177,7 @@ def main():
         adapt_images=adapt_images,
         # The marked positions, threshold from the previous result (slam_pipeline.positions_util).
         positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
-            result=source_lp_result, positions=positions
+            result=source_lp_result, positions=positions, maximum_threshold=positions_threshold_max
         ),
         use_jax=use_jax,
     )
@@ -193,7 +195,7 @@ def main():
     weight_power / weight_floor are fitted.
     """
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1)
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1, mask=mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
         dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
@@ -249,7 +251,7 @@ def main():
         settings=analysis_settings,
         adapt_images=adapt_images,
         positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
-            result=source_pix_result_2, positions=positions
+            result=source_pix_result_2, positions=positions, maximum_threshold=positions_threshold_max
         ),
     )
 
