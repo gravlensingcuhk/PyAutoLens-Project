@@ -1,6 +1,7 @@
 import json
 from autonerves import jax_wrapper  # Sets JAX environment before other imports 
 import sys
+import os
 from os import path
 import autofit as af
 import autolens as al
@@ -70,6 +71,7 @@ def main():
     )
 
     print(f'RUNNING Dataset: {dataset_name}, Mask: {mask_radius}')
+    print(f'MESH: {slam_pipeline.source_pix.mesh_from_env()}  (PYAUTOLENS_MESH={os.environ.get("PYAUTOLENS_MESH", "<unset>")}, PYAUTOLENS_REGULARIZATION={os.environ.get("PYAUTOLENS_REGULARIZATION", "<unset>")})', flush=True)
 
     dataset = dataset.apply_mask(mask=mask)  # trims the frame to the mask + PSF (config [dataset] trim_to_mask); from here on use dataset.mask, not mask
 
