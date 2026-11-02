@@ -82,7 +82,10 @@ cowls_gpu_log_stop() {
 # out of the A6000's 48 GB at 20 x 625 = 12,500 FFTs (job 57684). With the 40 x 40 mesh (1600 pixels)
 # J18 starts at 6 (9,600 FFTs); J24's 209 px frame makes each FFT ~4x smaller, so 12. A guess
 # that is too high costs one restart: the runners lower it on an out-of-memory failure
-# (search_util "__Out-Of-Memory Retry__").
+# (search_util "__Out-Of-Memory Retry__"). The same values serve the Hilbert/Delaunay chains
+# (PYAUTOLENS_MESH=hilbert): 1500 + 30 edge points on J18 and 1250 + 30 on J24, fewer than the
+# 1600 RTU pixels they were set for (checked 2026-11-02; the HST project saw 21 GB at n_batch 8
+# with 1530 points on a 24 GB card, the a/c nodes here have 48 GB).
 cowls_n_batch_for() {
     case "$1" in *:*) echo "${1#*:}"; return ;; esac
     if [ -n "$PYAUTOLENS_N_BATCH" ]; then echo "$PYAUTOLENS_N_BATCH"; return; fi

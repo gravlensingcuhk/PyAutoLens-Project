@@ -73,8 +73,9 @@ mesh here; and the vendored autoarray's sparse curvature is exact on a Delaunay 
 mesh-50 resolution on the arc at mesh-30 cost. Both meshes use the same adapt-image, positions
 and over-sampling code; the mesh class changes the search identifier from `source_pix[1]` on,
 so a Hilbert chain shares `source_lp[1]` with the RTU chain in the same output directory and
-is told apart by `model.info` (mesh class). Run it after that `source_lp[1]` has finished, or
-the running-search lock refuses the second process.
+is told apart by `model.info` (mesh class). If that `source_lp[1]` is still being fitted, the
+Hilbert runner waits for it instead of dying on the running-search lock (`search_util`
+"__Waiting For A Shared Search__", 2026-11-02).
 """
 import os
 

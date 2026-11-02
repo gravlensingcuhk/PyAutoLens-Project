@@ -12,6 +12,7 @@ __Contents__
 - **Setup Search Stopping:** The `f_live` the setup searches stop at.
 - **Likelihood-Call Caps:** Why every setup search has a hard ceiling, and how a capped search is reported.
 - **The Sampler Pool:** Training Nautilus's networks on several CPU cores so a GPU is not idle-killed.
+- **Waiting For A Shared Search:** A second process reaching a search another one is fitting waits for it.
 - **Batch Size:** `n_batch` from the environment: 16 on the CPU cluster, per lens on a GPU.
 - **Out-Of-Memory Retry:** Why a runner restarts itself with a smaller batch instead of failing.
 - **Analysis Settings:** Mixed precision and sparse curvature, from the environment, GPU only.
@@ -45,6 +46,21 @@ idle. phygpu auto-kills a job whose GPU sits below 5% utilisation for long. `Nau
 `PYAUTOLENS_SAMPLER_PROCESSES` (default 1 = no pool; the phygpu activation script sets 4). The
 pool's workers are spawned with JAX forced to the CPU and CUDA hidden, so none of them ever
 touches the GPU, and each gets an equal share of `CPUS_PER_TASK` BLAS threads.
+
+__Waiting For A Shared Search__
+
+Several SLaM chains can share a stage: the Hilbert/Delaunay chains (`PYAUTOLENS_MESH=hilbert`,
+`source_pix.py` "__The Hilbert Mesh__") share `source_lp[1]` with the RTU chain of the same lens
+and output directory, and the AdaptSplit and ConstantSplit Hilbert chains share it with each
+other. A finished stage replays read-only, any number of times at once. An *unfinished* one is
+guarded by PyAutoFit's running-search lock, and a second process reaching it gets
+`SearchInProgressError`. `Nautilus.fit` catches that error and polls once a minute until the
+other process has archived the search, then fits again, which replays the archive. The job log
+says what it is waiting for. The wait is capped at `SHARED_SEARCH_WAIT_MAX` so a holder that
+stalls does not hold a GPU for a week; the error is then re-raised and the runner ends. Ported
+from the HST project's `search_util.py` (commit c9853a7, 2026-11-01), where two slots of one job
+started the same SOURCE LP and corrupted its checkpoint. So a Hilbert job may be submitted
+before the RTU chain's `source_lp[1]` has finished.
 
 __Batch Size__
 
@@ -103,6 +119,7 @@ import atexit
 import multiprocessing
 import os
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -239,12 +256,33 @@ def _sampler_pool(processes: int):
     return _POOL
 
 
+# See "__Waiting For A Shared Search__".
+SHARED_SEARCH_POLL_SECONDS = 60
+SHARED_SEARCH_WAIT_MAX = 24 * 3600  # a source_lp[1] takes hours; a stalled holder should not hold a GPU for a week
+
+
 class Nautilus(af.Nautilus):
     """
     `af.Nautilus` with a CPU pool for the sampler's own calculations on the vectorised (JAX)
-    path. See "__The Sampler Pool__". With `PYAUTOLENS_SAMPLER_PROCESSES` unset it is plain
-    `af.Nautilus`.
+    path, which waits for a search another process is fitting. See "__The Sampler Pool__" and
+    "__Waiting For A Shared Search__". With `PYAUTOLENS_SAMPLER_PROCESSES` unset the sampler is
+    plain `af.Nautilus`'s.
     """
+
+    def fit(self, model, analysis, **kwargs):
+        from autofit.non_linear.paths.abstract import SearchInProgressError
+
+        waited = 0.0
+        while True:
+            try:
+                return super().fit(model=model, analysis=analysis, **kwargs)
+            except SearchInProgressError as e:
+                if waited == 0.0:
+                    print(f"WAITING for another process's search: {e}", flush=True)
+                if waited >= SHARED_SEARCH_WAIT_MAX:
+                    raise
+                time.sleep(SHARED_SEARCH_POLL_SECONDS)
+                waited += SHARED_SEARCH_POLL_SECONDS
 
     @property
     def sampler_cls(self):
