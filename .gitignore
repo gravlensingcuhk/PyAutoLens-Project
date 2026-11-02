@@ -5,6 +5,7 @@ CLAUDE.md
 __pycache__/
 *.pyc
 *.egg-info/
+.idea/
 #phygpu/outputs/*
 #phygpu/errors/*
 #!phygpu/outputs/.gitkeep
