@@ -1,3 +1,5 @@
+dataset:
+  trim_to_mask: true                # Imaging.apply_mask cuts the native arrays to the circular mask plus a PSF half-width (vendored PyAutoArray production/hst, 2026-11-02): J18's 400 px stamp fits on a 136 px frame, J24's 200 px on a 114 px one, so the FFT frame (and the GPU memory per batch element) shrinks ~5x / ~1.5x. The fit is unchanged; the native shape of every array and model image is the trimmed one, so project code must build arrays on `dataset.mask`, not on the mask it was cut with.
 analysis:
   n_cores: 1                        # The number of cores a parallelized sum of Analysis classes uses by default.
   preload_attempts: 250

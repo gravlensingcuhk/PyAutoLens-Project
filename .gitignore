@@ -10,10 +10,11 @@ __pycache__/
 #phygpu/errors/*
 #!phygpu/outputs/.gitkeep
 #!phygpu/errors/.gitkeep
+# The RTU-era archives fitted on data/cowls/ (2026-10-26 to 11-02) are no longer tracked (2026-11-02)
+updated_output/
+updated_output_v2/
+updated_output_v3/
 # Never commit a running search's state, only finished archives (phygpu/README.md)
-updated_output/**/*.hdf5
-updated_output/**/*.running/
-updated_output/**/*.replay-*/
-updated_output_v2/**/*.hdf5
-updated_output_v2/**/*.running/
-updated_output_v2/**/*.replay-*/
+output_sam/**/*.hdf5
+output_sam/**/*.running/
+output_sam/**/*.replay-*/

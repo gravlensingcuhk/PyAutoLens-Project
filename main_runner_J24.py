@@ -19,10 +19,10 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'updated_output_v3')  # capped positions threshold, adapt S/N cap 3; updated_output_v2/ = cap 10 / uncapped threshold (2026-10-28), updated_output/ = cap 3 / solved positions, output_v3/ = Hilbert/Delaunay
+    output_path = path.join(cosma_path, 'output_sam')  # fits on data/cowls_sam/ (Sam's reduction, from 2026-11-02); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
-    data_path = path.join(workspace_path, 'data', 'cowls')
+    data_path = path.join(workspace_path, 'data', 'cowls_sam')
 
 
     use_jax = True
@@ -45,7 +45,7 @@ def main():
     dataset = al.Imaging.from_fits(
         data_path=path.join(dataset_path, "data.fits"),
         noise_map_path=path.join(dataset_path, "noise_map.fits"),
-        psf_path=path.join(dataset_path, "psf.fits"),  # 31 x 31, 95% of the 71 x 71 flux in both lenses (psf95pc: 91%); normalized on load
+        psf_path=path.join(dataset_path, "psf.fits"),  # the reduction's STPSF kernel, 37 x 37 (SW) / 41 x 41 (LW), sums to 1 (data/cowls_sam/README.md)
         pixel_scales=ps,
         check_noise_map=False
     )
@@ -71,7 +71,7 @@ def main():
 
     print(f'RUNNING Dataset: {dataset_name}, Mask: {mask_radius}')
 
-    dataset = dataset.apply_mask(mask=mask)
+    dataset = dataset.apply_mask(mask=mask)  # trims the frame to the mask + PSF (config [dataset] trim_to_mask); from here on use dataset.mask, not mask
 
     over_sample_size = al.util.over_sample.over_sample_size_via_radial_bins_from(
         grid=dataset.grid,
@@ -165,10 +165,10 @@ def main():
         number_of_cores = 16,
     )
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=mask)
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=dataset.mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
-        dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
+        dataset=dataset, mask=dataset.mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
     )
 
     analysis = al.AnalysisImaging(
@@ -195,10 +195,10 @@ def main():
     weight_power / weight_floor are fitted.
     """
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1, mask=mask)
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1, mask=dataset.mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
-        dataset=dataset, mask=mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
+        dataset=dataset, mask=dataset.mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
     )
 
     analysis = al.AnalysisImaging(

@@ -11,7 +11,7 @@ This script:
 
   1. loads the masked dataset exactly as the main runners do;
   2. loads the already-completed ``source_pix[1]`` and ``mass_multipole`` results
-     from ``updated_output/`` via the Aggregator (the chain is NOT re-run);
+     from ``output_sam/`` via the Aggregator (the chain is NOT re-run);
   3. runs ONE ``af.Nautilus`` fit of the mass model *without* a subhalo,
      writing it to a tile-independent ``unique_tag`` so every tile job loads
      the same baseline.
@@ -53,10 +53,10 @@ from slam_pipeline.subhalo.loaders import load_search_output, log_evidence_of
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "updated_output")
+output_path = path.join(cosma_path, "output_sam")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
-data_path = path.join(workspace_path, "data", "cowls")
+data_path = path.join(workspace_path, "data", "cowls_sam")
 
 use_jax = True
 
@@ -79,7 +79,7 @@ FILTER_PIXEL_SCALES = {
     "F150W": 0.03,
     "F115W": 0.03,
 }
-PSF_FILENAME = "psf95pc.fits"
+PSF_FILENAME = "psf.fits"  # the reduction's STPSF kernel (data/cowls_sam/README.md); psf95pc.fits existed only in data/cowls/
 
 ps = FILTER_PIXEL_SCALES[filt]
 

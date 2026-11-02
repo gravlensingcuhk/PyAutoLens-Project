@@ -58,7 +58,7 @@ def lens_model_image_from(result, pixel_scale):
 
 def main(lens, filt, pixel_scale, positions_path, out, title=None, source_lp_result=None):
     data = al.Array2D.from_fits(
-        f"data/cowls/{lens}/{filt}/data.fits", pixel_scales=float(pixel_scale)
+        f"data/cowls_sam/{lens}/{filt}/data.fits", pixel_scales=float(pixel_scale)
     )
     base = np.asarray(data.native)
     positions = np.asarray(al.from_json(positions_path))

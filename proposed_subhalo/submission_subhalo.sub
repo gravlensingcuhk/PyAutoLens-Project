@@ -12,7 +12,7 @@
 # the SLaM chain.
 #
 # EDIT the arguments below to match the target:
-#   $1 dataset        -> dataset name under data/cowls/
+#   $1 dataset        -> dataset name under data/cowls_sam/
 #   $2 tile index     -> $(Process)
 #   $3 filter         -> F444W / F277W / F150W / F115W
 #   $4 source prefix  -> path_prefix of the finished source_pix[1] result

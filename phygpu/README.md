@@ -17,7 +17,7 @@ uv sync --extra gpu          # CUDA 12 jaxlib; the vendored pyauto/ packages ins
 source phygpu/activate.sh && python -c "import jax; print(jax.devices())"   # expect cuda devices
 ```
 
-The data (`data/cowls/`) is tracked in the repository, so the clone has it. Update the cluster by
+The data (`data/cowls_sam/`) is tracked in the repository, so the clone has it. Update the cluster by
 `git pull` and `uv sync --extra gpu` again. Nothing on phygpu is edited in place.
 
 ## Submitting
@@ -37,9 +37,9 @@ working value back into `cowls_n_batch_for` so the next job does not pay for the
 
 Logs: `phygpu/outputs/m2_<tag>.<job>.out` (SLURM), `phygpu/outputs/<lens>.<job>.log` (each
 runner), `phygpu/outputs/gpu_<tag>.<job>.out` (GPU use every 30 s; summarise with the HST
-project's `hpc/gpu_usage.py`). Results: `updated_output/<prefix>/<lens>/<search>/<id>.zip`, the layout
+project's `hpc/gpu_usage.py`). Results: `output_sam/<prefix>/<lens>/<search>/<id>.zip`, the layout
 the HTCondor side reads, tracked in git. A job that hits the 48 h wall is resubmitted with the same command; every
-search resumes from its folder. `updated_output/capped_searches.txt` lists setup searches that stopped at
+search resumes from its folder. `output_sam/capped_searches.txt` lists setup searches that stopped at
 their likelihood-call cap; look at those before trusting what they seeded.
 
 Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
@@ -52,7 +52,7 @@ Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
 | `PYAUTOLENS_SPARSE_CURVATURE` | 1 | Sparse curvature matrix (autoarray 2026-10-26), on since 2026-10-30 (`PYAUTOLENS_SPARSE_CURVATURE=0` turns it off). The HST project measured 1.8x per call on an A6000 at mesh 50 and an exact result on Delaunay mappers; it is not in the identifier. |
 | `PYAUTOLENS_MESH` | unset (`rtu`) | `hilbert` runs the Delaunay-on-Hilbert-points source mesh from `source_pix[1]` on (`slam_pipeline/source_pix.py` "__The Hilbert Mesh__"). Changes the identifier from `source_pix[1]`; shares `source_lp[1]` with the RTU chain: `PYAUTOLENS_MESH=hilbert sbatch -J hilb phygpu/multi_run2 ...` (sbatch exports the environment); `PYAUTOLENS_REGULARIZATION=constant_split` gives the smooth control chain, which changes the identifier again. Since 2026-11-02 a runner that reaches a `source_lp[1]` another process is still fitting waits for it (`search_util` "__Waiting For A Shared Search__"), so the Hilbert jobs can be submitted at any time. The per-lens batch sizes (6 / 12) cover the Hilbert meshes too (`cowls_n_batch_for`). |
 | `PYAUTOLENS_REGULARIZATION` | unset (`adapt_split`) | Hilbert mesh only: `constant_split` for the HST control. |
-| `PYAUTOLENS_PROJECT_ROOT` | the clone | Where the runners find `config/`, `data/` and write `updated_output/`. |
+| `PYAUTOLENS_PROJECT_ROOT` | the clone | Where the runners find `config/`, `data/` and write `output_sam/`. |
 
 ## Getting results to the HTCondor cluster
 
@@ -60,7 +60,7 @@ Results travel through git. On phygpu, once a stage (or the whole chain) has fin
 
 ```bash
 cd /home/user/lange/phygpu/PyAutoLens-Project
-git add updated_output_v2/model_setup_free_source updated_output_v2/mass_models
+git add output_sam/model_setup_free_source output_sam/mass_models
 git commit -m "J18/J24 outputs from phygpu"
 git push origin sam            # then merge sam onto master
 ```

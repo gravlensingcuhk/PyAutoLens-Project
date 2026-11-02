@@ -13,8 +13,8 @@
 #   uv sync --extra gpu
 #   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
 #
-# Results land in $PROJECT_ROOT/updated_output with the same layout the HTCondor subhalo stages read
-# (updated_output/<prefix>/<lens>/<search>/<id>.zip) and travel through git (README.md here).
+# Results land in $PROJECT_ROOT/output_sam with the same layout the HTCondor subhalo stages read
+# (output_sam/<prefix>/<lens>/<search>/<id>.zip) and travel through git (README.md here).
 
 export PROJECT_ROOT=${PROJECT_ROOT:-/home/user/lange/phygpu/PyAutoLens-Project}
 export PYAUTOLENS_PROJECT_ROOT=$PROJECT_ROOT   # read by main_runner_J18.py / J24.py
@@ -86,6 +86,10 @@ cowls_gpu_log_stop() {
 # (PYAUTOLENS_MESH=hilbert): 1500 + 30 edge points on J18 and 1250 + 30 on J24, fewer than the
 # 1600 RTU pixels they were set for (checked 2026-11-02; the HST project saw 21 GB at n_batch 8
 # with 1530 points on a 24 GB card, the a/c nodes here have 48 GB).
+# Since 2026-11-02 the datasets are trimmed to the mask plus a PSF half-width (config [dataset]
+# trim_to_mask, data/cowls_sam/): the FFT frame is 180 px on J18 (was 400 on the new stamps, 450 on
+# the old) and 160 px on J24 (was 200 / 240), so these batch sizes now have 3-5x headroom. Raise
+# them once a first job's gpu_*.out shows the memory in use.
 cowls_n_batch_for() {
     case "$1" in *:*) echo "${1#*:}"; return ;; esac
     if [ -n "$PYAUTOLENS_N_BATCH" ]; then echo "$PYAUTOLENS_N_BATCH"; return; fi
