@@ -1,0 +1,1 @@
+2026-11-03 15:55  source_pix_1  100002/100000  /home/user/lange/phygpu/PyAutoLens-Project/output_sam/model_setup_free_source/COSJ100018+022138/source_pix[1]/fced763c87d87630e63c1dd0ec8c13fd
