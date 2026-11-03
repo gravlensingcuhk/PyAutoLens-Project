@@ -11,7 +11,8 @@ def mge_model_from(
     centre: Tuple[float, float] = (0.0, 0.0),
     centre_fixed: Optional[Tuple[float, float]] = None,
     use_spherical: bool = False,
-    log10_sigma_list = np.linspace(-2, np.log10(3.0), 30)
+    log10_sigma_list = np.linspace(-2, np.log10(3.0), 30),
+    centre_priors: Optional[Tuple[af.Prior, af.Prior]] = None,
 ) -> af.Collection:
     """
     Construct a Multi-Gaussian Expansion (MGE) for the lens or source galaxy light
@@ -54,7 +55,13 @@ def mge_model_from(
       and the mask radius.
     - Source light Gaussians have widths logarithmically spaced between 0.01" and 1.0".
     - Gaussian centres are free parameters but tied across all components in each
-      basis to reduce dimensionality.
+      basis to reduce dimensionality. `centre_priors` ties this basis to another one's
+      centre priors (the runners tie the lens point component to the lens bulge, 2026-11-03):
+      one lens light centre, so the components cannot drift apart to pick up source light.
+    - `gaussian_per_basis=2` gives two groups of Gaussians with one shared centre and a free
+      ellipticity per group: the workspace template's bulge + disk, in one basis, in place of
+      the separate `lens_disk` basis the runners used until 2026-11-03 (its own centre and
+      ellipticity made it a second copy of the bulge that absorbed the arc light).
     - This function is a convenience utility: it hides the technical setup of MGE
       composition and provides a ready-to-use lens model for quick experimentation.
     """
@@ -67,7 +74,9 @@ def mge_model_from(
 
     # By defining the centre here, it creates two free parameters that are assigned below to all Gaussians.
 
-    if centre_fixed is not None:
+    if centre_priors is not None:
+        centre_0, centre_1 = centre_priors
+    elif centre_fixed is not None:
         centre_0 = centre[0]
         centre_1 = centre[1]
     elif centre_prior_is_uniform:

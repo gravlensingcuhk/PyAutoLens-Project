@@ -15,6 +15,10 @@ updated_output/
 updated_output_v2/
 updated_output_v3/
 # Never commit a running search's state, only finished archives (phygpu/README.md)
-output_sam/**/*.hdf5
-output_sam/**/*.running/
-output_sam/**/*.replay-*/
+output_sam*/**/*.hdf5
+output_sam*/**/*.running/
+output_sam*/**/*.replay-*/
+# The first data/cowls_sam fits (2026-11-02/03, separate disk basis, one-group J18 positions); kept locally only
+output_sam/
+# autofit's root logger file
+root.log

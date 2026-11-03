@@ -46,10 +46,22 @@ few pixels (J18 0.1", J24 0.15"), which excludes the undermagnified solutions (t
 
 A lens whose penalty cannot be built (fewer than two finite positions, `PositionsException`)
 runs without the penalty, with a warning, rather than aborting the stage.
+
+__Position Sets__
+
+`positions.json` holds one or more *sets* of positions, in the reduction's format
+(`JWST_lenses_data_reduction/scripts/positions_io.py`): one set is a bare `Grid2DIrregular`
+(every pre-2026-11-03 file), several are autoconf's list type, which `al.from_json` returns as
+a Python list. A set is the multiple images of ONE source feature, which a mass model must map
+back to one source-plane point. J18's four marks are two features (the E+W pair and the N+S
+pair sit on different source clumps), so they are two sets: a single `PositionsLH` over all
+four asked the mass model to map two different source points onto one, which pushed the chain
+to shallow slopes and a fragmented source (`output_sam/`, 2026-11-03). `positions_sets_from`
+reads the file; every stage gets one `PositionsLH` per set (the penalties add).
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Sequence, Union
 
 import autofit as af
 import autolens as al
@@ -63,28 +75,51 @@ MINIMUM_THRESHOLD = 0.075
 MAXIMUM_THRESHOLD = 0.15
 
 
+def positions_sets_from(file_path: str) -> List[al.Grid2DIrregular]:
+    """
+    The position sets of a `positions.json`: one `Grid2DIrregular` per source feature, in file
+    order (one for a plain single-grid file). See "__Position Sets__".
+    """
+    obj = al.from_json(file_path=file_path)
+    grids = obj if isinstance(obj, list) else [obj]
+    return [al.Grid2DIrregular(values=grid) for grid in grids]
+
+
+def _as_sets(positions) -> List[Optional[al.Grid2DIrregular]]:
+    """`positions` as a list of sets: a list is taken as is, a single grid (or None) is one set."""
+    if positions is None:
+        return [None]
+    if isinstance(positions, (list, tuple)):
+        return list(positions)
+    return [positions]
+
+
 def positions_likelihood_list_from(
     result: af.Result,
-    positions: Optional[al.Grid2DIrregular] = None,
+    positions: Union[al.Grid2DIrregular, Sequence[al.Grid2DIrregular], None] = None,
     factor: float = 3.0,
     minimum_threshold: float = MINIMUM_THRESHOLD,
     maximum_threshold: Optional[float] = MAXIMUM_THRESHOLD,
 ) -> List[al.PositionsLH]:
     """
-    The `positions_likelihood_list` for a stage chained from `result`: one penalty on the
-    hand-marked `positions` (or, when there are none, on the images solved from `result`), with
-    the threshold set from `result`, floored at `minimum_threshold` and capped at
-    `maximum_threshold` (`None` for no cap); empty when there are fewer than two finite positions
-    to compare. See the module docstring.
+    The `positions_likelihood_list` for a stage chained from `result`: one penalty per set of
+    hand-marked `positions` (a grid or a list of grids; when there are none, one penalty on the
+    images solved from `result`), each with its threshold set from `result` on that set, floored
+    at `minimum_threshold` and capped at `maximum_threshold` (`None` for no cap). A set with fewer
+    than two finite positions is dropped with a warning. See the module docstring.
     """
-    try:
-        positions_lh = result.positions_likelihood_from(
-            factor=factor,
-            minimum_threshold=minimum_threshold,
-            maximum_threshold=maximum_threshold,
-            positions=positions,
-        )
-    except al.exc.PositionsException as e:
-        logger.warning(f"Position penalty dropped: {e}")
-        return []
-    return [] if positions_lh is None else [positions_lh]
+    positions_lh_list = []
+    for positions_set in _as_sets(positions):
+        try:
+            positions_lh = result.positions_likelihood_from(
+                factor=factor,
+                minimum_threshold=minimum_threshold,
+                maximum_threshold=maximum_threshold,
+                positions=positions_set,
+            )
+        except al.exc.PositionsException as e:
+            logger.warning(f"Position penalty dropped: {e}")
+            continue
+        if positions_lh is not None:
+            positions_lh_list.append(positions_lh)
+    return positions_lh_list

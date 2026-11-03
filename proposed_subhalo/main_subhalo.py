@@ -5,7 +5,7 @@ Subhalo Detection Runner (one job per image-plane tile)
 This is the efficient "load-from-output" mode. It does **not** re-run the
 source -> light -> mass SLaM chain. Your submitted ``main_runner_*.py`` jobs
 (and ``prepare_subhalo_baseline.py``) already wrote those results to
-``output_sam/``; this script loads them back via the Aggregator and runs only the
+``output_sam_v2/``; this script loads them back via the Aggregator and runs only the
 single subhalo tile it is responsible for.
 
 Launch 16 independent jobs, one per tile, e.g.:
@@ -22,7 +22,7 @@ argv[2]  tile index     0 .. (NUMBER_OF_TILES**2 - 1)
 argv[3]  filter         (optional, default "F444W")
 
 Each job writes its own result under a tile-specific ``unique_tag`` and a small
-summary JSON under ``output_sam/subhalo_tiles/<dataset>/tile_###.json``. After all
+summary JSON under ``output_sam_v2/subhalo_tiles/<dataset>/tile_###.json``. After all
 16 finish, run ``combine_tiles.py <dataset>`` to assemble the delta-log-evidence
 map.
 """
@@ -53,7 +53,7 @@ from slam_pipeline.subhalo.loaders import (
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "output_sam")
+output_path = path.join(cosma_path, "output_sam_v2")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, "data", "cowls_sam")
@@ -138,9 +138,13 @@ dataset = al.Imaging.from_fits(
 with open(path.join(data_path, dataset_name, "info.json"), "r") as file:
     info_file = json.load(file)
 
-positions = al.Grid2DIrregular(
-    al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
-)
+# One grid per source feature: a single grid or, since 2026-11-03, a list of them (the top-level
+# slam_pipeline.positions_util "__Position Sets__"; J18's E+W and N+S pairs are two sets).
+_positions_obj = al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
+positions = [
+    al.Grid2DIrregular(values=g)
+    for g in (_positions_obj if isinstance(_positions_obj, list) else [_positions_obj])
+]
 mask_extra_galaxies = al.Mask2D.from_fits(
     file_path=path.join(dataset_path, "mask_extra_galaxies.fits"),
     pixel_scales=dataset.pixel_scales,
@@ -166,13 +170,13 @@ dataset = dataset.apply_sparse_operator_cpu()
 
 
 # ---------------------------------------------------------------------------
-# Load the COMPLETED chain results from output_sam/ (the chain is NOT re-run).
+# Load the COMPLETED chain results from output_sam_v2/ (the chain is NOT re-run).
 # ---------------------------------------------------------------------------
 # source_pix[1] -- full Result (needed for positions_likelihood_from + adapt images)
 source_analysis = al.AnalysisImaging(
     dataset=dataset,
     use_jax=use_jax,
-    positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=positions)],
+    positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=p) for p in positions],
 )
 source_pix_result_1 = load_result(
     output_path=output_path,
@@ -197,7 +201,7 @@ mass_result = load_result(
     name=MASS_NAME,
     analysis=mass_analysis,
 )
-print(f"Loaded source_pix[1] and {MASS_NAME} results from output_sam/.")
+print(f"Loaded source_pix[1] and {MASS_NAME} results from output_sam_v2/.")
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'output_sam')  # fits on data/cowls_sam/ (Sam's reduction, from 2026-11-02); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
+    output_path = path.join(cosma_path, 'output_sam_v2')  # fits on data/cowls_sam/ (Sam's reduction, from 2026-11-02); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls_sam')
@@ -54,8 +54,10 @@ def main():
     with open(path.join(data_path, dataset_name, 'info.json'), 'r') as file:
         info_file = json.load(file)
 
-    positions = al.Grid2DIrregular(
-        al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
+    # One grid per source feature (slam_pipeline.positions_util "__Position Sets__"); every stage
+    # gets one PositionsLH per set. J18's E+W and N+S pairs are two sets (2026-11-03).
+    positions = slam_pipeline.positions_util.positions_sets_from(
+        file_path=path.join(data_path, dataset_name, "positions.json")
     )
     mask_extra_galaxies = al.Mask2D.from_fits(
         file_path=path.join(dataset_path, "mask_extra_galaxies.fits"),
@@ -113,24 +115,29 @@ def main():
     __SOURCE LP PIPELINE__
     """
     analysis = al.AnalysisImaging(dataset=dataset, use_jax=use_jax, settings=analysis_settings,
-                                  positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=positions)],)
+                                  positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=p) for p in positions],)
 
     source_bulge = slam_pipeline.mge_model_from(
         total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
         centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
     )
 
+    # The lens light (2026-11-03): one basis of two Gaussian groups (a free ellipticity each, one
+    # shared centre, sigmas 0.01" to the mask edge) and a spherical point component on the same
+    # centre. Until 2026-11-03 the "disk" was a second 30-Gaussian basis with its own centre and
+    # ellipticity, which only ever absorbed the arc light (axis ratio 0.76 on J18, three component
+    # centres 0.1" apart), and the point component had a free ellipticity (0.92 on J18); see
+    # slam_pipeline.model_util.mge_model_from.
     lens_bulge = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
+        total_gaussians=30, gaussian_per_basis=2, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
     )
 
-    lens_disk = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
-    )
+    lens_disk = None
 
     lens_point = slam_pipeline.mge_model_from(
         total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, np.log10(0.025), 10),
-        centre=(0.0, 0.0)
+        use_spherical=True,
+        centre_priors=(lens_bulge.profile_list[0].centre.centre_0, lens_bulge.profile_list[0].centre.centre_1),
     )
 
     mass = af.Model(al.mp.Isothermal)
@@ -265,6 +272,7 @@ def main():
         light_result=light_result,
         mass=af.Model(al.mp.PowerLaw),
         reset_shear_prior=True,
+        ell_comps_from_light=True,  # ell_comps prior centred on the lens light (mass_total "__The Mass Ellipticity Prior__")
         name='mass_EPL'
     )
 
@@ -290,6 +298,7 @@ def main():
         multipole_3=af.Model(al.mp.PowerLawEllipticalMultipole),
         multipole_4=af.Model(al.mp.PowerLawEllipticalMultipole),
         reset_shear_prior=True,
+        ell_comps_from_light=True,
         name='mass_multipole'
     )
 

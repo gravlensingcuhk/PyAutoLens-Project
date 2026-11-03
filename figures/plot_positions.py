@@ -61,7 +61,11 @@ def main(lens, filt, pixel_scale, positions_path, out, title=None, source_lp_res
         f"data/cowls_sam/{lens}/{filt}/data.fits", pixel_scales=float(pixel_scale)
     )
     base = np.asarray(data.native)
-    positions = np.asarray(al.from_json(positions_path))
+    # A single grid, or a list of grids (one per source feature) since 2026-11-03: drawn as one set here.
+    positions_obj = al.from_json(positions_path)
+    positions = np.concatenate(
+        [np.asarray(g).reshape(-1, 2) for g in (positions_obj if isinstance(positions_obj, list) else [positions_obj])]
+    )
 
     n_y, n_x = base.shape
     hw = int(n_x / 2) * float(pixel_scale)

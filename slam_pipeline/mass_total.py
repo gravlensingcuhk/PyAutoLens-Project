@@ -1,9 +1,68 @@
+import logging
+
 import autofit as af
 import autolens as al
+import numpy as np
 
 from . import search_util
 
 from typing import Union, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# See "__The Mass Ellipticity Prior__": sigma of the Gaussian prior on each of the power law's
+# `ell_comps`, centred on the lens light's. 0.2 in ell_comps is about 0.2 in ellipticity, or
+# some 30 degrees of position angle at an ellipticity of 0.2 (Sam, 2026-11-03).
+ELL_COMPS_FROM_LIGHT_SIGMA = 0.2
+
+
+def light_ell_comps_from(light_result: af.Result) -> Tuple[float, float]:
+    """
+    The `ell_comps` of the lens light's brightest Gaussian group in `light_result`.
+
+    __The Mass Ellipticity Prior__
+
+    The mass stages chain the power law's `ell_comps` from `source_pix[1]`'s isothermal posterior,
+    and the shear from a fresh prior (`reset_shear_prior`). With one arc and a counter-image the
+    mass position angle and the shear are degenerate: on J24 (`output_sam/`, 2026-11-03) the RTU
+    chain settled with the mass perpendicular to the lens light and the shear rotated by 50
+    degrees to compensate, the Hilbert chains with the mass aligned to the light and a higher
+    evidence. Centring a Gaussian prior on the light's `ell_comps` (sigma
+    `ELL_COMPS_FROM_LIGHT_SIGMA`) starts the power law in the physical mode: the lens light and
+    total mass of an early-type lens are aligned and similarly flattened (the HST project's
+    mass-versus-light premise), while the prior is wide enough for the data to move it.
+
+    The light basis has two Gaussian groups (`model_util.mge_model_from(gaussian_per_basis=2)`),
+    each with its own `ell_comps`; the group carrying more flux (the sum over its Gaussians of
+    intensity x sigma^2 x axis ratio, with the intensities the maximum-likelihood fit solved) is
+    the "bulge" whose shape is used. The groups are exchangeable in the model, so this is read
+    from the fit rather than from a group's index.
+    """
+    fit = light_result.max_log_likelihood_fit
+    tracer = fit.tracer_linear_light_profiles_to_light_profiles
+    lens = next(g for g in tracer.galaxies if getattr(g, "bulge", None) is not None)
+    flux_by_ell_comps = {}
+    for gaussian in lens.bulge.profile_list:
+        ell_comps = tuple(float(c) for c in gaussian.ell_comps)
+        ell = float(np.hypot(*ell_comps))
+        axis_ratio = (1.0 - ell) / (1.0 + ell)
+        flux = float(gaussian.intensity) * float(gaussian.sigma) ** 2 * axis_ratio
+        flux_by_ell_comps[ell_comps] = flux_by_ell_comps.get(ell_comps, 0.0) + flux
+    ell_comps = max(flux_by_ell_comps, key=flux_by_ell_comps.get)
+    logger.info(
+        f"Lens light ell_comps by Gaussian group (flux-weighted): {flux_by_ell_comps}; using {ell_comps}"
+    )
+    return ell_comps
+
+
+def apply_ell_comps_prior_from_light(
+    mass: af.Model, light_result: af.Result, sigma: float = ELL_COMPS_FROM_LIGHT_SIGMA
+) -> af.Model:
+    """Centre `mass.ell_comps` on the lens light's (`light_ell_comps_from`), Gaussian priors of width `sigma`."""
+    ell_comps = light_ell_comps_from(light_result=light_result)
+    mass.ell_comps.ell_comps_0 = af.GaussianPrior(mean=ell_comps[0], sigma=sigma)
+    mass.ell_comps.ell_comps_1 = af.GaussianPrior(mean=ell_comps[1], sigma=sigma)
+    return mass
 
 
 
@@ -41,10 +100,14 @@ def run(
     dataset_model: Optional[af.Model] = None,
     reset_shear_prior: bool = False,
     n_batch: Optional[int] = None,
-    use_prior_chaining=False
+    use_prior_chaining=False,
+    ell_comps_from_light: bool = False,
 ) -> af.Result:
     """
     The SLaM MASS TOTAL PIPELINE, which fits a lens model with a total mass distribution (e.g. a power-law).
+
+    `ell_comps_from_light` replaces the chained `ell_comps` prior of `mass` with Gaussian priors
+    centred on the lens light's shape in `light_result` (see `light_ell_comps_from`).
 
     Parameters
     ----------
@@ -126,6 +189,12 @@ def run(
         bulge = light_result.instance.galaxies.lens.bulge
         disk = light_result.instance.galaxies.lens.disk
         point = light_result.instance.galaxies.lens.point
+
+    if ell_comps_from_light:
+        if light_result is None:
+            raise ValueError("ell_comps_from_light needs a light_result")
+        # Before the multipoles are linked, so they share the new priors.
+        apply_ell_comps_prior_from_light(mass=mass, light_result=light_result)
 
     if multipole_1 is not None:
         link_multipole(multipole_1, m=1, mass=mass)

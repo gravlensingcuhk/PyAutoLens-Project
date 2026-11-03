@@ -11,7 +11,7 @@ This script:
 
   1. loads the masked dataset exactly as the main runners do;
   2. loads the already-completed ``source_pix[1]`` and ``mass_multipole`` results
-     from ``output_sam/`` via the Aggregator (the chain is NOT re-run);
+     from ``output_sam_v2/`` via the Aggregator (the chain is NOT re-run);
   3. runs ONE ``af.Nautilus`` fit of the mass model *without* a subhalo,
      writing it to a tile-independent ``unique_tag`` so every tile job loads
      the same baseline.
@@ -53,7 +53,7 @@ from slam_pipeline.subhalo.loaders import load_search_output, log_evidence_of
 # ---------------------------------------------------------------------------
 cosma_path = path.join(path.sep, "users", "wing-yan.chan", "PyAutoLens-Project")
 workspace_path = cosma_path
-output_path = path.join(cosma_path, "output_sam")
+output_path = path.join(cosma_path, "output_sam_v2")
 config_path = path.join(cosma_path, "config")
 conf.instance.push(new_path=config_path, output_path=output_path)
 data_path = path.join(workspace_path, "data", "cowls_sam")
@@ -100,9 +100,13 @@ dataset = al.Imaging.from_fits(
 with open(path.join(data_path, dataset_name, "info.json"), "r") as file:
     info_file = json.load(file)
 
-positions = al.Grid2DIrregular(
-    al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
-)
+# One grid per source feature: a single grid or, since 2026-11-03, a list of them (the top-level
+# slam_pipeline.positions_util "__Position Sets__"; J18's E+W and N+S pairs are two sets).
+_positions_obj = al.from_json(file_path=path.join(data_path, dataset_name, "positions.json"))
+positions = [
+    al.Grid2DIrregular(values=g)
+    for g in (_positions_obj if isinstance(_positions_obj, list) else [_positions_obj])
+]
 mask_extra_galaxies = al.Mask2D.from_fits(
     file_path=path.join(dataset_path, "mask_extra_galaxies.fits"),
     pixel_scales=dataset.pixel_scales,
@@ -146,7 +150,7 @@ from slam_pipeline.subhalo.loaders import load_result  # noqa: E402
 source_analysis = al.AnalysisImaging(
     dataset=dataset,
     use_jax=use_jax,
-    positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=positions)],
+    positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=p) for p in positions],
 )
 
 source_pix_result_1 = load_result(
