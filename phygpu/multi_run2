@@ -5,6 +5,8 @@
 #   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
 #   sbatch -J cowls phygpu/multi_run2 COSJ100018+022138:4 COSJ100024+021749   # J18 at n_batch 4
 #   sbatch -J hilb_a --export=ALL,PYAUTOLENS_MESH=hilbert phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
+#   sbatch -J hilb_c --export=ALL,PYAUTOLENS_MESH=hilbert,PYAUTOLENS_REGULARIZATION=constant_split phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
+#   (hilb_a = AdaptSplit, the default; hilb_c = the constant_split control chain; see phygpu/README.rst "Submitting")
 #
 # Pass environment switches with --export=ALL,VAR=value: a `VAR=value sbatch ...` prefix is not
 # forwarded reliably on phygpu (a Hilbert job submitted that way ran the RTU chain, 2026-11-02).
