@@ -51,6 +51,11 @@ The *uncapped* image drives the
 pixelization over-sampling map (sub-size 4 where the source S/N > 3, else 2), which must see the
 true S/N. Keep that ordering.
 
+The runners build the adapt images for BOTH searches from the SOURCE LP result
+(`main_runner_*.py`): run 2 deliberately does not re-derive its adapt image from
+`source_pix[1]`'s reconstruction — on J18 that reconstruction fragmented, and adapting the run-2
+mesh to the clumps fed the fragmentation back into the fit (`output_sam_v2/`, 2026-11-04).
+
 __The Hilbert Mesh (re-trial, 2026-10-29)__
 
 `PYAUTOLENS_MESH=hilbert` switches both searches to the thesis scheme, ported from the HST
@@ -90,10 +95,11 @@ from . import search_util
 
 SOURCE_KEY = "('galaxies', 'source')"
 
-# The source mesh, see "__The Source Mesh__". 40 x 40 since 2026-10-27, for a finer source
-# reconstruction (25 x 25 before; HST project: 30 x 30 on 3.5" masks). A source_pix search's
-# GPU memory scales with n_batch x the pixel count (search_util "__Batch Size__").
-RECT_SHAPE = (40, 40)
+# The source mesh, see "__The Source Mesh__". 50 x 50 since 2026-11-04 (40 x 40 before): J18's
+# source is ~0.05" across, one 40 x 40 cell over its 3" mask, and it fragmented; the HST project
+# used 30 x 30 on 3.5" masks with more extended sources. A source_pix search's GPU memory scales
+# with n_batch x the pixel count (search_util "__Batch Size__").
+RECT_SHAPE = (50, 50)
 
 # See "__The Adapt Image__".
 ADAPT_SNR_CAP = 3.0  # 10.0 in updated_output_v2/ (2026-10-28) only, see "__The Adapt Image__"

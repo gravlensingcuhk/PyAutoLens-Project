@@ -20,7 +20,7 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'output_sam_v2')  # fits on data/cowls_sam/ (Sam's reduction, from 2026-11-02); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
+    output_path = path.join(cosma_path, 'output_sam_v3')  # fits from 2026-11-04 (single-group lens light, 50x50 RTU, run-2 adapt image from source_lp); output_sam_v2/ = the 2026-11-03/04 two-group-light fits, output_sam/ = the 2026-11-02/03 separate-disk fits (both gitignored except .zip archives); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls_sam')
@@ -122,14 +122,15 @@ def main():
         centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
     )
 
-    # The lens light (2026-11-03): one basis of two Gaussian groups (a free ellipticity each, one
-    # shared centre, sigmas 0.01" to the mask edge) and a spherical point component on the same
-    # centre. Until 2026-11-03 the "disk" was a second 30-Gaussian basis with its own centre and
-    # ellipticity, which only ever absorbed the arc light (axis ratio 0.76 on J18, three component
-    # centres 0.1" apart), and the point component had a free ellipticity (0.92 on J18); see
-    # slam_pipeline.model_util.mge_model_from.
+    # The lens light (2026-11-04): one basis of 30 Gaussians with a single free ellipticity and
+    # centre (sigmas 0.01" to the mask edge) plus a spherical point component on the same centre.
+    # The second Gaussian group (2026-11-03, gaussian_per_basis=2) is gone: on J18 it fit q ~ 0.2
+    # at every sigma, a razor-thin sheet under the arc whose subtraction residuals the pixelized
+    # source then fit as fake fragmented flux (output_sam_v2/, 2026-11-04); on J24 it was milder
+    # (q ~ 0.6) and added nothing. The separate disk basis before 2026-11-03 (own centre and
+    # ellipticity) likewise only absorbed arc light; see slam_pipeline.model_util.mge_model_from.
     lens_bulge = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=2, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
+        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
     )
 
     lens_disk = None
@@ -200,11 +201,13 @@ def main():
     """
     __SOURCE PIX PIPELINE 2__
 
-    The adapt image is now the pixelized source of search 1; the mesh adapts to it and its
-    weight_power / weight_floor are fitted.
+    The adapt image is the same SOURCE LP one search 1 used, deliberately NOT source_pix[1]'s
+    reconstruction: when the pixelized source fragments (J18), adapting this mesh to it feeds the
+    clumps back into the fit (output_sam_v2/, 2026-11-04). The mesh's weight_power / weight_floor
+    are still fitted. The uncapped image drives the pixelization over-sampling map.
     """
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_pix_result_1, mask=dataset.mask)
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=dataset.mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
         dataset=dataset, mask=dataset.mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,
