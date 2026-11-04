@@ -59,9 +59,12 @@ def mge_model_from(
       centre priors (the runners tie the lens point component to the lens bulge, 2026-11-03):
       one lens light centre, so the components cannot drift apart to pick up source light.
     - `gaussian_per_basis=2` gives two groups of Gaussians with one shared centre and a free
-      ellipticity per group: the workspace template's bulge + disk, in one basis, in place of
-      the separate `lens_disk` basis the runners used until 2026-11-03 (its own centre and
-      ellipticity made it a second copy of the bulge that absorbed the arc light).
+      ellipticity per group: the workspace template's bulge + disk, in one basis. The runners
+      used it for the lens light on 2026-11-03 only — on J18 the second group fit q ~ 0.2 at
+      every sigma (a razor-thin sheet under the arc whose subtraction residuals the pixelized
+      source fit as fake source flux), so since 2026-11-04 the lens light is a single group
+      (`gaussian_per_basis=1`) plus the spherical point component. Before 2026-11-03 a separate
+      `lens_disk` basis with its own centre and ellipticity only absorbed the arc light.
     - This function is a convenience utility: it hides the technical setup of MGE
       composition and provides a ready-to-use lens model for quick experimentation.
     """

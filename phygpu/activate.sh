@@ -79,12 +79,12 @@ cowls_gpu_log_stop() {
 # The Nautilus / JAX vmap batch for a lens argument `<lens>[:<n>]`: the explicit `:<n>`, else an
 # exported PYAUTOLENS_N_BATCH, else the lens's default here. A source_pix search's GPU memory goes
 # as n_batch x source pixels x the FFT frame (search_util "__Batch Size__"): J18 (419 px frame) ran
-# out of the A6000's 48 GB at 20 x 625 = 12,500 FFTs (job 57684). With the 40 x 40 mesh (1600 pixels)
-# J18 starts at 6 (9,600 FFTs); J24's 209 px frame makes each FFT ~4x smaller, so 12. A guess
-# that is too high costs one restart: the runners lower it on an out-of-memory failure
+# out of the A6000's 48 GB at 20 x 625 = 12,500 FFTs (job 57684). With the 50 x 50 mesh (2500
+# pixels) J18 starts at 6 (15,000 FFTs); J24's 209 px frame makes each FFT ~4x smaller, so 12. A
+# guess that is too high costs one restart: the runners lower it on an out-of-memory failure
 # (search_util "__Out-Of-Memory Retry__"). The same values serve the Hilbert/Delaunay chains
 # (PYAUTOLENS_MESH=hilbert): 1500 + 30 edge points on J18 and 1250 + 30 on J24, fewer than the
-# 1600 RTU pixels they were set for (checked 2026-11-02; the HST project saw 21 GB at n_batch 8
+# 2500 RTU pixels they were set for (checked 2026-11-02; the HST project saw 21 GB at n_batch 8
 # with 1530 points on a 24 GB card, the a/c nodes here have 48 GB).
 # Since 2026-11-02 the datasets are trimmed to the mask plus a PSF half-width (config [dataset]
 # trim_to_mask, data/cowls_sam/): the FFT frame is 180 px on J18 (was 400 on the new stamps, 450 on
