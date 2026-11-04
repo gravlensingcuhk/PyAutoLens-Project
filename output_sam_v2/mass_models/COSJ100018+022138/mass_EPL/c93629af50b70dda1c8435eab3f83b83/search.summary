@@ -1,0 +1,16 @@
+Search: Nautilus (slam_pipeline.search_util.Nautilus)
+JAX use = optional, gradient = none, batched = True
+Posterior kind = weighted, produces evidence = True, resumable = True
+Objective = log_likelihood (unit_cube coordinates), invalid value = -1e+99
+Status = stable
+Number of cores = 1 (requested 16): JAX analyses never fork a multiprocessing pool: a forked child of a JAX-initialised process can deadlock in XLA and recompiles the likelihood per worker; parallelism comes from the vectorised (jax.vmap) objective instead
+
+Total Samples = 80016
+Total Accepted Samples = 80016
+Acceptance Ratio = 1.0
+Time To Run = 6:41:23.254143
+Time Per Sample (seconds) = 0.3009804806973166
+Log Likelihood Function Evaluation Time (seconds) = 0.33133625984191895
+Expected Time To Run (seconds) = 7:21:52.202168
+Speed Up Factor (e.g. due to parallelization) = 1.100856304968299
+Visualization Time (seconds) = 27.5037522315979
