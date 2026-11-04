@@ -1,0 +1,62 @@
+{
+    "type": "instance",
+    "class_path": "slam_pipeline.search_util.Nautilus",
+    "arguments": {
+        "path_prefix": {
+            "type": "path",
+            "path": "mass_models"
+        },
+        "n_like_new_bound": null,
+        "checkpoint": true,
+        "seed": null,
+        "inplace": false,
+        "verbose": true,
+        "n_points_min": null,
+        "initial_values": {
+            "type": "dict",
+            "arguments": {}
+        },
+        "vectorized": false,
+        "n_update": null,
+        "initializer": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.initializer.InitializerPrior",
+            "arguments": {}
+        },
+        "n_live": 300,
+        "live_visual_update": false,
+        "discard_exploration": false,
+        "n_batch": 6,
+        "n_like_max": Infinity,
+        "split_threshold": 100,
+        "f_live": 0.01,
+        "iterations_per_quick_update": 1e+99,
+        "enlarge_per_dim": 1.1,
+        "silence": true,
+        "number_of_cores": 16,
+        "iterations_per_full_update": 10000.0,
+        "unique_tag": "COSJ100018+022138",
+        "n_eff": 500,
+        "paths": {
+            "type": "instance",
+            "class_path": "autofit.non_linear.paths.directory.DirectoryPaths",
+            "arguments": {
+                "path_prefix": {
+                    "type": "path",
+                    "path": "mass_models"
+                },
+                "name": "mass_EPL",
+                "identifier": "c93629af50b70dda1c8435eab3f83b83",
+                "parent": null,
+                "is_identifier_in_paths": true,
+                "image_path_suffix": "",
+                "unique_tag": "COSJ100018+022138"
+            }
+        },
+        "n_networks": 4,
+        "name": "mass_EPL",
+        "use_jax_vmap": null,
+        "force_x1_cpu": false,
+        "n_shell": 1
+    }
+}
