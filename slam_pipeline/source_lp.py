@@ -6,6 +6,9 @@ from . import search_util
 from typing import Union, Optional, Tuple
 
 
+SOURCE_LP_N_LIVE = 600
+
+
 def run(
     settings_search: af.SettingsSearch,
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
@@ -108,7 +111,7 @@ def run(
     search = search_util.Nautilus(
         name="source_lp[1]",
         **settings_search.search_dict,
-        n_live=200,
+        n_live=SOURCE_LP_N_LIVE,
         n_batch=search_util.n_batch(),
     )
 

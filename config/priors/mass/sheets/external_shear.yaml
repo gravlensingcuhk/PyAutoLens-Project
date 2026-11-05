@@ -2,7 +2,7 @@ ExternalShear:
   gamma_1:
     type: TruncatedGaussian
     mean: 0.0
-    sigma: 0.04
+    sigma: 0.03
     lower_limit: -0.1
     upper_limit: 0.1
     width_modifier:
@@ -14,7 +14,7 @@ ExternalShear:
   gamma_2:
     type: TruncatedGaussian
     mean: 0.0
-    sigma: 0.04
+    sigma: 0.03
     lower_limit: -0.1
     upper_limit: 0.1
     width_modifier:

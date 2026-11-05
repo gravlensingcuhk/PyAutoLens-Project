@@ -20,7 +20,7 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'output_sam_v3')  # fits from 2026-11-04 (single-group lens light, 50x50 RTU, run-2 adapt image from source_lp); output_sam_v2/ = the 2026-11-03/04 two-group-light fits, output_sam/ = the 2026-11-02/03 separate-disk fits (both gitignored except .zip archives); updated_output*/ = the data/cowls/ fits of 2026-10-26 to 11-02 (gitignored archives), output_v3/ = the pre-2026-10-26 Hilbert/Delaunay fits
+    output_path = path.join(cosma_path, 'output_sam_v4')  # 2026-11-05: one-group J18 lens light, two-component source, free SOURCE LP mass centre, 60x60 RTU, per-lens adapt cap, SOURCE LP adaption in run 2; v3 and earlier output_sam* / updated_output* are archives
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls_sam')
@@ -121,16 +121,16 @@ def main():
         total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
         centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
     )
+    source_disk = slam_pipeline.mge_model_from(
+        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
+        centre_prior_is_uniform=False,
+    )
 
-    # The lens light (2026-11-04): one basis of 30 Gaussians with a single free ellipticity and
-    # centre (sigmas 0.01" to the mask edge) plus a spherical point component on the same centre.
-    # The second Gaussian group (2026-11-03, gaussian_per_basis=2) is gone: on J18 it fit q ~ 0.2
-    # at every sigma, a razor-thin sheet under the arc whose subtraction residuals the pixelized
-    # source then fit as fake fragmented flux (output_sam_v2/, 2026-11-04); on J24 it was milder
-    # (q ~ 0.6) and added nothing. The separate disk basis before 2026-11-03 (own centre and
-    # ellipticity) likewise only absorbed arc light; see slam_pipeline.model_util.mge_model_from.
+    # J18 keeps one lens-light ellipticity: the second group stole source light and produced a
+    # razor-thin component in v2. Its higher likelihood was not a usable physical improvement.
     lens_bulge = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30)
+        total_gaussians=30, gaussian_per_basis=1,
+        log10_sigma_list=np.linspace(-2, np.log10(mask_radius-0.1), 30),
     )
 
     lens_disk = None
@@ -147,13 +147,13 @@ def main():
     source_lp_result = slam_pipeline.source_lp.run(
         settings_search=settings_search,
         analysis=analysis,
-        mass=af.Model(al.mp.Isothermal),
+        mass=mass,
         shear=af.Model(al.mp.ExternalShear),
         lens_bulge=lens_bulge,
         lens_disk=lens_disk,
         lens_point=lens_point,
         source_bulge=source_bulge,
-        mass_centre=(0.0, 0.0),
+        source_disk=source_disk,
         redshift_lens=redshift_lens,
         redshift_source=redshift_source,
     )
@@ -161,10 +161,11 @@ def main():
     """
     __SOURCE PIX PIPELINE__
 
-    Rectangular RTU mesh (40 x 40) + AdaptPower regularization, the HST project's stability setup;
+    Rectangular RTU mesh (60 x 60) + AdaptPower regularization, the HST project's stability setup;
     see slam_pipeline/source_pix.py "__The Source Mesh__" for why the Hilbert/Delaunay/AdaptSplit
-    scheme was dropped, and "__The Hilbert Mesh__" for its re-trial under PYAUTOLENS_MESH=hilbert. The adapt image is the SOURCE LP source capped at S/N 3 on a copy, while the
-    uncapped image drives the pixelization over-sampling map (4 on the arcs, 2 elsewhere).
+    scheme was dropped, and "__The Hilbert Mesh__" for its re-trial under PYAUTOLENS_MESH=hilbert.
+    The adapt image is capped at the S/N of its 50th-brightest pixel (never below 3) on a copy,
+    while the uncapped image drives the pixelization over-sampling map (4 on the arcs, 2 elsewhere).
     """
 
     settings_search = af.SettingsSearch(
@@ -201,10 +202,9 @@ def main():
     """
     __SOURCE PIX PIPELINE 2__
 
-    The adapt image is the same SOURCE LP one search 1 used, deliberately NOT source_pix[1]'s
-    reconstruction: when the pixelized source fragments (J18), adapting this mesh to it feeds the
-    clumps back into the fit (output_sam_v2/, 2026-11-04). The mesh's weight_power / weight_floor
-    are still fitted. The uncapped image drives the pixelization over-sampling map.
+    J18 keeps the SOURCE LP adapt image in search 2: adapting to PIX 1 fed its fragmented clumps
+    back into the v2 mesh. The new per-lens cap preserves more source contrast than v3's flat cap 3.
+    The mesh's weight_power / weight_floor are fitted; the uncapped image drives over-sampling.
     """
 
     adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=dataset.mask)

@@ -20,14 +20,17 @@ output_sam*/**/*.running/
 output_sam*/**/*.replay-*/
 # The first data/cowls_sam fits (2026-11-02/03, separate disk basis, one-group J18 positions); kept locally only
 output_sam/
-# output_sam_v2/v3: only finished .zip archives are committed; a running search's unzipped
+# output_sam_v2/v3/v4: only finished .zip archives are committed; a running search's unzipped
 # state (samples, plots, fits, logs) stays local (2026-11-04)
 output_sam_v2/**
 output_sam_v3/**
+output_sam_v4/**
 !output_sam_v2/**/
 !output_sam_v3/**/
+!output_sam_v4/**/
 !output_sam_v2/**/*.zip
 !output_sam_v3/**/*.zip
+!output_sam_v4/**/*.zip
 # autofit's root logger file
 root.log
 /AGENTS.md

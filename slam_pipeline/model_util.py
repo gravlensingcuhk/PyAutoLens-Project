@@ -13,6 +13,7 @@ def mge_model_from(
     use_spherical: bool = False,
     log10_sigma_list = np.linspace(-2, np.log10(3.0), 30),
     centre_priors: Optional[Tuple[af.Prior, af.Prior]] = None,
+    order_bases: bool = False,
 ) -> af.Collection:
     """
     Construct a Multi-Gaussian Expansion (MGE) for the lens or source galaxy light
@@ -59,12 +60,8 @@ def mge_model_from(
       centre priors (the runners tie the lens point component to the lens bulge, 2026-11-03):
       one lens light centre, so the components cannot drift apart to pick up source light.
     - `gaussian_per_basis=2` gives two groups of Gaussians with one shared centre and a free
-      ellipticity per group: the workspace template's bulge + disk, in one basis. The runners
-      used it for the lens light on 2026-11-03 only — on J18 the second group fit q ~ 0.2 at
-      every sigma (a razor-thin sheet under the arc whose subtraction residuals the pixelized
-      source fit as fake source flux), so since 2026-11-04 the lens light is a single group
-      (`gaussian_per_basis=1`) plus the spherical point component. Before 2026-11-03 a separate
-      `lens_disk` basis with its own centre and ellipticity only absorbed the arc light.
+      ellipticity per group. `order_bases=True` orders the groups by `ell_comps_1`, removing
+      the identical likelihood modes produced by exchanging their labels.
     - This function is a convenience utility: it hides the technical setup of MGE
       composition and provides a ready-to-use lens model for quick experimentation.
     """
@@ -99,6 +96,7 @@ def mge_model_from(
         model_cls = Gaussian
 
     bulge_gaussian_list = []
+    ell_comps_1_list = []
 
     for j in range(gaussian_per_basis):
         # A list of Gaussian model components whose parameters are customized belows.
@@ -120,14 +118,23 @@ def mge_model_from(
                 10 ** log10_sigma_list[i]
             )  # All Gaussian sigmas are fixed to values above.
 
+        if not use_spherical:
+            ell_comps_1_list.append(gaussian_list[0].ell_comps.ell_comps_1)
         bulge_gaussian_list += gaussian_list
 
     # The Basis object groups many light profiles together into a single model component.
 
-    return af.Model(
+    model = af.Model(
         Basis,
         profile_list=bulge_gaussian_list,
     )
+    if order_bases:
+        for j in range(len(ell_comps_1_list) - 1):
+            model.add_assertion(
+                ell_comps_1_list[j] > ell_comps_1_list[j + 1],
+                name=f"mge_basis_{j}_ell_comps_1_gt_basis_{j + 1}",
+            )
+    return model
 
 def hilbert_pixels_from_pixel_scale(pixel_scale: float) -> int:
     """

@@ -39,22 +39,17 @@ ignore `image_plane_mesh_grid`, so the Hilbert mesh, the ring of circle edge poi
 
 __The Adapt Image__
 
-Both searches cap the source adapt image at S/N `ADAPT_SNR_CAP` on a copy: the adapt mesh and
-AdaptPower are max-normalised ((adapt/max)**power), so without the cap the single brightest
-source pixel dominates and starves the extended arc. A cap of 3 turns the whole arc into a flat
-plateau, so the run-2 mesh `weight_power` can only trade arc against background (J24: it fitted
-to ~0.01, i.e. no adaption, with the lattice identical to run 1). `updated_output_v2/`
-(2026-10-28) tried a cap of 10 so the weighting could follow the structure inside the arc: J24's
-`weight_power` stayed at 0.01, and every pixelized stage lost 12-17 in log evidence (the
-regularization coefficients fell by 2-3x and the source went rough), so the cap is back at 3.
-The *uncapped* image drives the
-pixelization over-sampling map (sub-size 4 where the source S/N > 3, else 2), which must see the
-true S/N. Keep that ordering.
+Both searches cap the source adapt image on a copy at the S/N of its
+`HILBERT_ADAPT_SNR_SATURATE`-th (50th) brightest pixel, never below `ADAPT_SNR_CAP` (3). This is
+the HST production rule for both mesh families: a fixed cap of 3 flattened the whole arc, so the
+run-2 mesh's `weight_power` could only trade arc against background and the v3 RTU mesh did not
+zoom (J24 fitted `weight_power` ~0.01). An explicit `adapt_snr_cap` overrides the per-lens value.
+The *uncapped* image drives the pixelization over-sampling map (sub-size 4 where the source S/N >
+3, else 2), which must see the true S/N. Keep that ordering.
 
-The runners build the adapt images for BOTH searches from the SOURCE LP result
-(`main_runner_*.py`): run 2 deliberately does not re-derive its adapt image from
-`source_pix[1]`'s reconstruction — on J18 that reconstruction fragmented, and adapting the run-2
-mesh to the clumps fed the fragmentation back into the fit (`output_sam_v2/`, 2026-11-04).
+Run 1 adapts to the SOURCE LP source. J24's run 2 uses SOURCE PIX 1's pixelized reconstruction,
+the standard two-stage adaption in its better v2 chain. J18 deliberately keeps run 2 on SOURCE LP:
+adapting to its fragmented PIX 1 reconstruction in v2 fed the clumps back into the fit.
 
 __The Hilbert Mesh (re-trial, 2026-10-29)__
 
@@ -67,8 +62,8 @@ curve weighted by the adapt image (max-normalised, `HILBERT_WEIGHT_POWER` 4, flo
 half a pixel outside the (circular) mask and `al.mesh.Delaunay(zeroed_pixels=...)` regularizes
 those to zero, and the regularization is `AdaptSplit` (or `ConstantSplit`, the HST control, via
 `PYAUTOLENS_REGULARIZATION=constant_split`). The adapt image is capped per lens at the S/N of
-its `HILBERT_ADAPT_SNR_SATURATE`-th (50th) brightest pixel, never below `ADAPT_SNR_CAP` (the
-HST production rule), rather than at the fixed cap the RTU mesh uses.
+its `HILBERT_ADAPT_SNR_SATURATE`-th (50th) brightest pixel, never below `ADAPT_SNR_CAP`, as for
+the RTU mesh.
 
 Why re-try what the RTU switch replaced: the 2026-10 ruggedness was traced to the per-step
 recomputation of the pixel signals, and the `weights` normalisation in `config/general.yaml`
@@ -95,11 +90,11 @@ from . import search_util
 
 SOURCE_KEY = "('galaxies', 'source')"
 
-# The source mesh, see "__The Source Mesh__". 50 x 50 since 2026-11-04 (40 x 40 before): J18's
-# source is ~0.05" across, one 40 x 40 cell over its 3" mask, and it fragmented; the HST project
-# used 30 x 30 on 3.5" masks with more extended sources. A source_pix search's GPU memory scales
-# with n_batch x the pixel count (search_util "__Batch Size__").
-RECT_SHAPE = (50, 50)
+# The source mesh, see "__The Source Mesh__". 60 x 60 since 2026-11-05 (50 x 50 in v3, 40 x 40
+# before): J18's source is ~0.05" across, one 40 x 40 cell over its 3" mask, and it fragmented;
+# the HST project used 30 x 30 on 3.5" masks with more extended sources. A source_pix search's
+# GPU memory scales with n_batch x the pixel count (search_util "__Batch Size__").
+RECT_SHAPE = (60, 60)
 
 # See "__The Adapt Image__".
 ADAPT_SNR_CAP = 3.0  # 10.0 in updated_output_v2/ (2026-10-28) only, see "__The Adapt Image__"
@@ -148,7 +143,7 @@ report_if_capped = search_util.report_if_capped
 
 def adapt_images_from(
     result: af.Result,
-    adapt_snr_cap: float = ADAPT_SNR_CAP,
+    adapt_snr_cap: Optional[float] = None,
     mask: Optional[al.Mask2D] = None,
     mesh: Optional[str] = None,
 ):
@@ -157,16 +152,17 @@ def adapt_images_from(
 
     Returns `(adapt_images, source_image_raw)`: the adapt images carry the S/N-capped copy of
     the source image, `source_image_raw` is the uncapped one for the over-sampling map (see
-    "__The Adapt Image__"). For the Hilbert mesh (`mesh="hilbert"`, default from
-    `PYAUTOLENS_MESH`) the cap is the per-lens one and the adapt images also carry the
-    image-plane mesh grid with its ring of edge points (see "__The Hilbert Mesh__"); `mask`
-    is then required.
+    "__The Adapt Image__"). The default cap is the S/N of the 50th-brightest source pixel,
+    never below 3, for both mesh families. An explicit `adapt_snr_cap` takes precedence. For
+    the Hilbert mesh (`mesh="hilbert"`, default from `PYAUTOLENS_MESH`) the adapt images also
+    carry the image-plane mesh grid with its ring of edge points (see "__The Hilbert Mesh__");
+    `mask` is then required.
     """
     mesh = mesh_from_env() if mesh is None else mesh
     galaxy_image_name_dict = al.galaxy_name_image_dict_via_result_from(result=result)
     source_image_raw = galaxy_image_name_dict[SOURCE_KEY]
 
-    if mesh == "hilbert":
+    if adapt_snr_cap is None:
         adapt_snr_cap = hilbert_snr_cap_for(source_image_raw)
 
     source_adapt_image = source_image_raw.copy()

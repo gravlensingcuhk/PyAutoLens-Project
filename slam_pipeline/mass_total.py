@@ -32,12 +32,10 @@ def light_ell_comps_from(light_result: af.Result) -> Tuple[float, float]:
     total mass of an early-type lens are aligned and similarly flattened (the HST project's
     mass-versus-light premise), while the prior is wide enough for the data to move it.
 
-    The lens light has a single Gaussian group since 2026-11-04 (`model_util.mge_model_from(
-    gaussian_per_basis=1)`; a second group fit a razor-thin sheet on J18, see the runners), but
-    the flux-weighted pick is kept so a multi-group basis still works: the group carrying more
-    flux (the sum over its Gaussians of intensity x sigma^2 x axis ratio, with the intensities
-    the maximum-likelihood fit solved) is the "bulge" whose shape is used. The groups are
-    exchangeable in the model, so this is read from the fit rather than from a group's index.
+    For a multi-group lens light, the group carrying more flux (the sum over its Gaussians of
+    intensity x sigma^2 x axis ratio, with the intensities the maximum-likelihood fit solved)
+    supplies the shape. The groups are ordered only to remove label degeneracy, so the physically
+    dominant group is identified from the fit rather than from its index.
     """
     fit = light_result.max_log_likelihood_fit
     tracer = fit.tracer_linear_light_profiles_to_light_profiles
