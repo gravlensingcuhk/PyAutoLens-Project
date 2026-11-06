@@ -11,9 +11,11 @@ from typing import Union, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # See "__The Mass Ellipticity Prior__": sigma of the Gaussian prior on each of the power law's
-# `ell_comps`, centred on the lens light's. 0.2 in ell_comps is about 0.2 in ellipticity, or
-# some 30 degrees of position angle at an ellipticity of 0.2 (Sam, 2026-11-03).
-ELL_COMPS_FROM_LIGHT_SIGMA = 0.2
+# `ell_comps`, centred on the lens light's. Widened 0.2 -> 0.4 on 2026-11-06: at 0.2 every v4
+# mass fit pinned the shear at its +/-0.1 boundary while the mass ellipticity sat ~2 sigma from
+# the light -- the prior capped the mass quadrupole and the overflow went into shear. 0.4 still
+# seeds the light-aligned mode but lets the data move the ellipticity.
+ELL_COMPS_FROM_LIGHT_SIGMA = 0.4
 
 
 def light_ell_comps_from(light_result: af.Result) -> Tuple[float, float]:
