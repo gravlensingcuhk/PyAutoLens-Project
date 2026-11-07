@@ -1,4 +1,5 @@
 import logging
+import os
 
 import autofit as af
 import autolens as al
@@ -214,13 +215,18 @@ def run(
         shear = source_result_for_lens.model.galaxies.lens.shear
     else:
         shear = af.Model(al.mp.ExternalShear)
-        # 2026-11-07 diagnostic: every v4 mass fit pinned the shear at the config's +/-0.1
-        # bounds (both lenses, both meshes, both data reductions, sigma-0.2 and 0.4 mass
-        # ellipticity priors). Widen to +/-0.2 here -- mass stages only, so the source/light
-        # searches upstream keep their identifiers and are reused -- to see where the shear
-        # actually wants to land. If it rails at 0.2 the EPL family cannot express these lenses.
-        shear.gamma_1 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-0.2, upper_limit=0.2)
-        shear.gamma_2 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-0.2, upper_limit=0.2)
+        # 2026-11-07 diagnostic (PYAUTOLENS_SHEAR_MAX=0.2): every v4 mass fit pinned the shear
+        # at the config's +/-0.1 bounds (both lenses, both meshes, both data reductions,
+        # sigma-0.2 and 0.4 mass ellipticity priors). Widening here -- mass stages only, so
+        # the source/light searches upstream keep their identifiers and are reused -- shows
+        # where the shear actually wants to land; if it rails at 0.2 the EPL family cannot
+        # express these lenses. Unset keeps the config prior, so the PSF-floor v5 chain runs
+        # with the v4 baseline shear.
+        shear_max = os.environ.get("PYAUTOLENS_SHEAR_MAX")
+        if shear_max is not None:
+            smax = float(shear_max)
+            shear.gamma_1 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-smax, upper_limit=smax)
+            shear.gamma_2 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-smax, upper_limit=smax)
 
     model = af.Collection(
         galaxies=af.Collection(
