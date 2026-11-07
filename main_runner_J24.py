@@ -20,7 +20,10 @@ def main():
     # The cluster workspace root; set PYAUTOLENS_PROJECT_ROOT to run from another checkout (e.g. locally).
     cosma_path = os.environ.get('PYAUTOLENS_PROJECT_ROOT', path.join(path.sep, 'users', 'wing-yan.chan', 'PyAutoLens-Project'))
     workspace_path = cosma_path
-    output_path = path.join(cosma_path, 'output_sam_v4')  # 2026-11-05: two-group J24 lens light, two-component source, free SOURCE LP mass centre, 60x60 RTU, per-lens adapt cap, PIX 1 adaption in run 2; v3 and earlier output_sam* / updated_output* are archives
+    # 2026-11-05: two-group J24 lens light, two-component source, free SOURCE LP mass centre, 60x60 RTU,
+    # per-lens adapt cap, PIX 1 adaption in run 2; v3 and earlier output_sam* / updated_output* are archives.
+    # PYAUTOLENS_OUTPUT_DIR redirects output (e.g. output_sam_v5 for the PYAUTOLENS_NOISE=psffloor chain).
+    output_path = path.join(cosma_path, os.environ.get('PYAUTOLENS_OUTPUT_DIR', 'output_sam_v4'))
     config_path = path.join(cosma_path, 'config')
     conf.instance.push(new_path=config_path, output_path=output_path)
     data_path = path.join(workspace_path, 'data', 'cowls_sam')
@@ -43,9 +46,13 @@ def main():
     positions_threshold_max = 0.15
     dataset_path = path.join(data_path, dataset_name, filt)
 
+    # PYAUTOLENS_NOISE=psffloor reads noise_map_psffloor.fits (data_prep/add_psf_noise_floor.py:
+    # noise^2 + the shipped psf_err scatter propagated through the convolution).
+    noise_map_file = "noise_map_psffloor.fits" if os.environ.get("PYAUTOLENS_NOISE") == "psffloor" else "noise_map.fits"
+
     dataset = al.Imaging.from_fits(
         data_path=path.join(dataset_path, "data.fits"),
-        noise_map_path=path.join(dataset_path, "noise_map.fits"),
+        noise_map_path=path.join(dataset_path, noise_map_file),
         psf_path=path.join(dataset_path, "psf.fits"),  # the reduction's STPSF kernel, 37 x 37 (SW) / 41 x 41 (LW), sums to 1 (data/cowls_sam/README.md)
         pixel_scales=ps,
         check_noise_map=False
