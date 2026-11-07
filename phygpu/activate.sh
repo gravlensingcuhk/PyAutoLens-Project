@@ -96,15 +96,17 @@ cowls_n_batch_for() {
     case "$1" in
         COSJ100018+022138) echo 6 ;;
         COSJ100024+021749) echo 12 ;;
+        COSJ095921+020638) echo 6 ;;   # F150W 400px, same as J18
         *) echo 20 ;;   # the HST project's GPU batch size
     esac
 }
 
-# The runner for a lens: the two runners differ only in filter and pixel scale.
+# The runner for a lens: the runners differ in filter, pixel scale and lens-light setup.
 cowls_runner_for() {
     case "$1" in
         COSJ100018+022138) echo "$PROJECT_ROOT/main_runner_J18.py" ;;
         COSJ100024+021749) echo "$PROJECT_ROOT/main_runner_J24.py" ;;
+        COSJ095921+020638) echo "$PROJECT_ROOT/main_runner_J0959.py" ;;
         *) echo "cowls_runner_for: no runner for lens '$1'" >&2; return 1 ;;
     esac
 }

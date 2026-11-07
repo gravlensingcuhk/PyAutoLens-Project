@@ -42,6 +42,7 @@ DATA_ROOT = os.path.join("data", "cowls_sam")
 LENSES = {
     "COSJ100018+022138": ["F115W", "F150W", "F277W", "F444W"],
     "COSJ100024+021749": ["F115W", "F150W", "F277W", "F444W"],
+    "COSJ095921+020638": ["F115W", "F150W", "F277W", "F444W"],
 }
 
 for lens, bands in LENSES.items():

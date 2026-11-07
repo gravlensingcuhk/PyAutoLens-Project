@@ -7,6 +7,11 @@ were uncommitted edits of 2026-11-02 21:14 at the time). The runners read this d
 2026-11-02; `data/cowls/` holds the earlier COWLS-shipped products (J24 F444W noise map rebuilt
 2026-10-29) and is kept for the archived runs.
 
+`COSJ095921+020638/` was added on 2026-11-07 from `data/stamps/cowls-mahler/prime/` (same file
+mapping; `info.json` written here, redshifts from the reduction's `info/samples/lens_samples.json`:
+lens z_spec 0.551, source z_spec 3.35, theta_e 0.71; `mask_radius` 2.2 chosen by theta_e analogy
+with J24). Its runner is `main_runner_J0959.py` (a copy of `main_runner_J18.py`).
+
 | File here | Source file | Notes |
 | --- | --- | --- |
 | `<filter>/data.fits` | `stamp12_sci.fits` | 12" x 12" stamp, MJy/sr; 400 px at 0.03"/px (F115W, F150W), 200 px at 0.06"/px (F277W, F444W) |
