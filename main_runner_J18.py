@@ -40,8 +40,11 @@ def main():
     Load and mask the data.
     """
     dataset_name = str(sys.argv[1])
-    filt = "F150W"
-    ps = 0.03
+    # Band override (2026-11-07): PYAUTOLENS_BAND=F277W runs the chain on the LW band
+    # (0.06"/px), which the reduction measures at ~3x the arc S/N of F150W
+    # (primary_band.json). Pair with PYAUTOLENS_OUTPUT_DIR to keep chains separate.
+    filt = os.environ.get('PYAUTOLENS_BAND', 'F150W')
+    ps = 0.03 if filt in ("F115W", "F150W") else 0.06
     # Cap on the chained positions threshold (arcsec, 3.3 px at 0.03"/px); see slam_pipeline.positions_util "__The Threshold__".
     positions_threshold_max = 0.10
     dataset_path = path.join(data_path, dataset_name, filt)
