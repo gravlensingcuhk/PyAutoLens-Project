@@ -277,43 +277,65 @@ def main():
         ),
     )
 
-    mass_result = slam_pipeline.mass_total.run(
-        settings_search=settings_search,
-        analysis=analysis,
-        source_result_for_lens=source_pix_result_1,
-        source_result_for_source=source_pix_result_2,
-        light_result=light_result,
-        mass=af.Model(al.mp.PowerLaw),
-        reset_shear_prior=True,
-        ell_comps_from_light=True,  # ell_comps prior centred on the lens light (mass_total "__The Mass Ellipticity Prior__")
-        name='mass_EPL'
-    )
+    if os.environ.get('PYAUTOLENS_MASS') == 'light_dark':
+        # Stars+halo mass model (2026-11-09, slam_pipeline/mass_light_dark.py), replacing both
+        # mass_total stages. Motivation: every v4 mass fit pinned the shear at its prior edge,
+        # and the PYAUTOLENS_SHEAR_MAX=0.2 diagnostic showed it settles at |gamma| ~ 0.17-0.20
+        # aligned with the lens light -- i.e. the light-anchored EPL outsources internal
+        # quadrupole to the shear. Here the stellar MGE follows the fixed light_lp geometry
+        # with a radial M/L gradient (use_gradient=True), and the NFWMCRScatterLudlow halo is
+        # prior-limited to near-spherical (config/priors/mass/dark/nfw_mcr*.yaml: ell_comps
+        # sigma 0.15, limits +/-0.6) with a narrow centre offset prior (sigma 0.05", +/-0.1"),
+        # so the halo cannot absorb a large quadrupole: shear that survives is genuinely
+        # external. No multipole stage yet (deferred 2026-11-09).
+        mass_result = slam_pipeline.mass_light_dark.run(
+            settings_search=settings_search,
+            analysis=analysis,
+            lp_chain_tracer=light_result.max_log_likelihood_tracer,
+            source_result_for_lens=source_pix_result_1,
+            source_result_for_source=source_pix_result_2,
+            light_result=light_result,
+            use_gradient=True,
+            n_batch=slam_pipeline.search_util.n_batch(),
+        )
+    else:
+        mass_result = slam_pipeline.mass_total.run(
+            settings_search=settings_search,
+            analysis=analysis,
+            source_result_for_lens=source_pix_result_1,
+            source_result_for_source=source_pix_result_2,
+            light_result=light_result,
+            mass=af.Model(al.mp.PowerLaw),
+            reset_shear_prior=True,
+            ell_comps_from_light=True,  # ell_comps prior centred on the lens light (mass_total "__The Mass Ellipticity Prior__")
+            name='mass_EPL'
+        )
 
 
-    """
-    Multipole
+        """
+        Multipole
 
-    Elliptical multipoles (al.mp.PowerLawEllipticalMultipole, PyAutoGalaxy feature/elliptical-multipole):
-    the m=3 and m=4 terms deform the power law's elliptical isodensity contours, with strength k_m and
-    shape angle s_m measured from the major axis, rather than adding a circular multipole in the sky
-    frame (the old al.mp.PowerLawMultipole). They share the power law's centre, ell_comps,
-    einstein_radius and slope by prior links (slam_pipeline.mass_total.link_multipole).
-    """
+        Elliptical multipoles (al.mp.PowerLawEllipticalMultipole, PyAutoGalaxy feature/elliptical-multipole):
+        the m=3 and m=4 terms deform the power law's elliptical isodensity contours, with strength k_m and
+        shape angle s_m measured from the major axis, rather than adding a circular multipole in the sky
+        frame (the old al.mp.PowerLawMultipole). They share the power law's centre, ell_comps,
+        einstein_radius and slope by prior links (slam_pipeline.mass_total.link_multipole).
+        """
 
-    multipole_result = slam_pipeline.mass_total.run(
-        settings_search=settings_search,
-        analysis=analysis,
-        source_result_for_lens=source_pix_result_1,
-        source_result_for_source=source_pix_result_2,
-        light_result=light_result,
-        mass=af.Model(al.mp.PowerLaw),
-        multipole_1=None,
-        multipole_3=af.Model(al.mp.PowerLawEllipticalMultipole),
-        multipole_4=af.Model(al.mp.PowerLawEllipticalMultipole),
-        reset_shear_prior=True,
-        ell_comps_from_light=True,
-        name='mass_multipole'
-    )
+        multipole_result = slam_pipeline.mass_total.run(
+            settings_search=settings_search,
+            analysis=analysis,
+            source_result_for_lens=source_pix_result_1,
+            source_result_for_source=source_pix_result_2,
+            light_result=light_result,
+            mass=af.Model(al.mp.PowerLaw),
+            multipole_1=None,
+            multipole_3=af.Model(al.mp.PowerLawEllipticalMultipole),
+            multipole_4=af.Model(al.mp.PowerLawEllipticalMultipole),
+            reset_shear_prior=True,
+            ell_comps_from_light=True,
+            name='mass_multipole'
+        )
 
 
 

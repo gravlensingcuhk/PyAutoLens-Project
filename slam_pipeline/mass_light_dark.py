@@ -1,3 +1,5 @@
+import os
+
 import autofit as af
 import autolens as al
 
@@ -11,7 +13,7 @@ def run(
     source_result_for_lens: af.Result,
     source_result_for_source: af.Result,
     light_result: af.Result,
-    dark: Optional[af.Model] = af.Model(al.mp.NFWMCRLudlow),
+    dark: Optional[af.Model] = af.Model(al.mp.NFWMCRScatterLudlow),
     smbh: Optional[af.Model] = None,
     use_gradient: bool = False,
     link_mass_to_light_ratios: bool = True,
@@ -105,9 +107,21 @@ def run(
 
     if dark is not None:
         try:
-            dark.centre = lens_bulge.centre
+            light_centre = lens_bulge.centre
         except AttributeError:
-            dark.centre = lens_bulge.profile_list[0].centre
+            light_centre = lens_bulge.profile_list[0].centre
+
+        # 2026-11-09: the dark centre used to be pinned to the (fixed) lens-light centre. It now
+        # gets a narrow Gaussian around that centre (sigma 0.05", hard limits +/-0.1", ~300 pc at
+        # the lens redshifts) so a baryon-halo offset can be measured without the halo wandering.
+        dark.centre_0 = af.TruncatedGaussianPrior(
+            mean=light_centre[0], sigma=0.05,
+            lower_limit=light_centre[0] - 0.1, upper_limit=light_centre[0] + 0.1,
+        )
+        dark.centre_1 = af.TruncatedGaussianPrior(
+            mean=light_centre[1], sigma=0.05,
+            lower_limit=light_centre[1] - 0.1, upper_limit=light_centre[1] + 0.1,
+        )
 
         dark.mass_at_200 = af.LogUniformPrior(lower_limit=1e10, upper_limit=1e15)
         dark.redshift_object = light_result.instance.galaxies.lens.redshift
@@ -120,6 +134,16 @@ def run(
         result=source_result_for_source,
     )
 
+    # Fresh shear prior, as mass_total's reset_shear_prior=True (the shear must not inherit the
+    # source_pix[1] model's posterior): config prior (sigma 0.03, +/-0.1) by default, widened to
+    # sigma 0.05 / +/-PYAUTOLENS_SHEAR_MAX when the env var is set (see mass_total.py, 2026-11-07).
+    shear = af.Model(al.mp.ExternalShear)
+    shear_max = os.environ.get("PYAUTOLENS_SHEAR_MAX")
+    if shear_max is not None:
+        smax = float(shear_max)
+        shear.gamma_1 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-smax, upper_limit=smax)
+        shear.gamma_2 = af.TruncatedGaussianPrior(mean=0.0, sigma=0.05, lower_limit=-smax, upper_limit=smax)
+
     model = af.Collection(
         galaxies=af.Collection(
             lens=af.Model(
@@ -129,7 +153,7 @@ def run(
                 disk=lens_disk,
                 point=light_result.instance.galaxies.lens.point,
                 dark=dark,
-                shear=source_result_for_lens.model.galaxies.lens.shear,
+                shear=shear,
                 smbh=smbh,
             ),
             source=source,
@@ -157,7 +181,7 @@ def run__multi(
     source_result_for_lens: af.Result,
     source_result_for_source: af.Result,
     light_result: af.Result,
-    dark: Optional[af.Model] = af.Model(al.mp.NFWMCRLudlow),
+    dark: Optional[af.Model] = af.Model(al.mp.NFWMCRScatterLudlow),
     smbh: Optional[af.Model] = None,
     use_gradient: bool = False,
     link_mass_to_light_ratios: bool = True,
@@ -258,9 +282,18 @@ def run__multi(
 
         if dark is not None:
             try:
-                dark.centre = lens_bulge.centre
+                light_centre = lens_bulge.centre
             except AttributeError:
-                dark.centre = lens_bulge.profile_list[0].centre
+                light_centre = lens_bulge.profile_list[0].centre
+
+            dark.centre_0 = af.TruncatedGaussianPrior(
+                mean=light_centre[0], sigma=0.05,
+                lower_limit=light_centre[0] - 0.1, upper_limit=light_centre[0] + 0.1,
+            )
+            dark.centre_1 = af.TruncatedGaussianPrior(
+                mean=light_centre[1], sigma=0.05,
+                lower_limit=light_centre[1] - 0.1, upper_limit=light_centre[1] + 0.1,
+            )
 
             dark.mass_at_200 = af.LogUniformPrior(lower_limit=1e10, upper_limit=1e15)
             dark.redshift_object = light_result[i].instance.galaxies.lens.redshift

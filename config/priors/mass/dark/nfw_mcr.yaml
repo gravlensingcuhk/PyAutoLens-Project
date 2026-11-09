@@ -73,23 +73,23 @@ NFWMCRLudlow:
   ell_comps_0:
     type: Gaussian
     mean: 0.0
-    sigma: 0.3
+    sigma: 0.15
     width_modifier:
       type: Absolute
-      value: 0.2
+      value: 0.1
     limits:
-      lower: -1.0
-      upper: 1.0
+      lower: -0.6
+      upper: 0.6
   ell_comps_1:
     type: Gaussian
     mean: 0.0
-    sigma: 0.3
+    sigma: 0.15
     width_modifier:
       type: Absolute
-      value: 0.2
+      value: 0.1
     limits:
-      lower: '-1.0'
-      upper: '1.0'
+      lower: '-0.6'
+      upper: '0.6'
   mass_at_200:
     type: LogUniform
     lower_limit: 100000000.0
