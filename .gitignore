@@ -14,23 +14,19 @@ phygpu/errors/*
 updated_output/
 updated_output_v2/
 updated_output_v3/
-# Never commit a running search's state, only finished archives (phygpu/README.md)
-output_sam*/**/*.hdf5
-output_sam*/**/*.running/
-output_sam*/**/*.replay-*/
-# The first data/cowls_sam fits (2026-11-02/03, separate disk basis, one-group J18 positions); kept locally only
+# All output folders are untracked and local-only (2026-11-12). Finished .zip archives are
+# pulled from phygpu by rsync (--include='*.zip' --include='capped_searches.txt'), not via git.
+old_output_all/
 output_sam/
-# output_sam_v2/v3/v4: only finished .zip archives are committed; a running search's unzipped
-# state (samples, plots, fits, logs) stays local (2026-11-04)
-output_sam_v2/**
-output_sam_v3/**
-output_sam_v4/**
-!output_sam_v2/**/
-!output_sam_v3/**/
-!output_sam_v4/**/
-!output_sam_v2/**/*.zip
-!output_sam_v3/**/*.zip
-!output_sam_v4/**/*.zip
+output_sam_v2/
+output_sam_v3/
+output_sam_v4/
+output_sam_v4_f277/
+output_sam_v5/
+output_test_as*/
+output_v2/
+output_v3/
+output_wrongps/
 # autofit's root logger file
 root.log
 /AGENTS.md
