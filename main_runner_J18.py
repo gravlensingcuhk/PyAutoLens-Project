@@ -215,9 +215,11 @@ def main():
     J18 keeps the SOURCE LP adapt image in search 2: adapting to PIX 1 fed its fragmented clumps
     back into the v2 mesh. The new per-lens cap preserves more source contrast than v3's flat cap 3.
     The mesh's weight_power / weight_floor are fitted; the uncapped image drives over-sampling.
+    PYAUTOLENS_ADAPT_RUN2=sp1 switches back to the standard PIX 1 adaption (2026-11-12 test).
     """
 
-    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=source_lp_result, mask=dataset.mask)
+    adapt_result = source_pix_result_1 if os.environ.get("PYAUTOLENS_ADAPT_RUN2") == "sp1" else source_lp_result
+    adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(result=adapt_result, mask=dataset.mask)
 
     dataset = slam_pipeline.source_pix.apply_pixelization_over_sampling(
         dataset=dataset, mask=dataset.mask, source_image_raw=source_image_raw, over_sample_size_lp=over_sample_size,

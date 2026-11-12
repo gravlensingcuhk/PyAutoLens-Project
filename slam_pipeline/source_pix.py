@@ -48,8 +48,9 @@ The *uncapped* image drives the pixelization over-sampling map (sub-size 4 where
 3, else 2), which must see the true S/N. Keep that ordering.
 
 Run 1 adapts to the SOURCE LP source. J24's run 2 uses SOURCE PIX 1's pixelized reconstruction,
-the standard two-stage adaption in its better v2 chain. J18 deliberately keeps run 2 on SOURCE LP:
-adapting to its fragmented PIX 1 reconstruction in v2 fed the clumps back into the fit.
+the standard two-stage adaption in its better v2 chain. J18 and J0959 deliberately keep run 2 on
+SOURCE LP: adapting to a fragmented PIX 1 reconstruction in v2 fed the clumps back into the fit;
+`PYAUTOLENS_ADAPT_RUN2=sp1` opts back into PIX 1 adaption (see "__The Adapt Floor__").
 
 __The Hilbert Mesh (re-trial, 2026-10-29)__
 
@@ -76,6 +77,31 @@ so a Hilbert chain shares `source_lp[1]` with the RTU chain in the same output d
 is told apart by `model.info` (mesh class). If that `source_lp[1]` is still being fitted, the
 Hilbert runner waits for it instead of dying on the running-search lock (`search_util`
 "__Waiting For A Shared Search__", 2026-11-02).
+
+__The Adapt Floor (2026-11-12)__
+
+J18's 2026-11 AdaptSplit chain converged and fit the image plane (noise-like residuals) but
+the source plane still fragmented: clumps on the caustics and splattered isolated cells. Two
+structural causes, and the two env knobs that address them:
+
+1. The regularization weights come from pixel signals (the adapt image summed per mesh pixel,
+   normalised to max 1, `mapper_util.adaptive_pixel_signals_from`), and J18's adapt image is
+   the smooth SOURCE LP MGE -- it has ~zero floor away from the ring, so outlying cells get
+   ~zero regularization and can hold arbitrary flux. `PYAUTOLENS_ADAPT_FLOOR_FRAC` (0 = off)
+   floors the capped adapt image at that fraction of the cap, bounding the regularization
+   dynamic range. It does NOT affect the over-sampling map (built from the uncapped image).
+2. The Hilbert image mesh starves arc segments that are faint in the adapt image (the knots
+   are in the data but NOT in the smooth MGE adapt image): `PYAUTOLENS_HILBERT_WEIGHT_FLOOR`
+   (default 0.01) raises the floor of the image-mesh weight map so faint segments keep points;
+   `PYAUTOLENS_HILBERT_WEIGHT_POWER` (default 4) and `PYAUTOLENS_HILBERT_PIXELS` (default
+   `hilbert_pixels_from_pixel_scale`) are the other two mesh knobs.
+
+None of these enter the model, so they do NOT change the search identifier: tests with them
+must run in a fresh `PYAUTOLENS_OUTPUT_DIR` or the runner silently resumes the old result.
+`PYAUTOLENS_ADAPT_RUN2=sp1` (runner-side) additionally switches search 2's adapt image from
+SOURCE LP to the PIX 1 reconstruction (the standard scheme J24 uses; J18 avoided it while
+PIX 1 fragmented), which is the only variant that puts mesh points and regularization onto
+the knots themselves.
 """
 import os
 
@@ -101,12 +127,17 @@ ADAPT_SNR_CAP = 3.0  # 10.0 in updated_output_v2/ (2026-10-28) only, see "__The 
 PIX_OVER_SAMPLE_THRESHOLD = 3.0
 PIX_OVER_SAMPLE_SIZES = (4, 2)  # (where source S/N > threshold, elsewhere)
 
-# See "__The Hilbert Mesh__". The HST project's production values.
+# See "__The Hilbert Mesh__". The HST project's production values, env-overridable for the
+# 2026-11-12 fragmentation/coverage tests (PYAUTOLENS_HILBERT_*; see "__The Adapt Floor__").
 MESHES = ("rtu", "hilbert")
-HILBERT_WEIGHT_POWER = 4.0
-HILBERT_WEIGHT_FLOOR = 0.01
+HILBERT_WEIGHT_POWER = float(os.environ.get("PYAUTOLENS_HILBERT_WEIGHT_POWER", 4.0))
+HILBERT_WEIGHT_FLOOR = float(os.environ.get("PYAUTOLENS_HILBERT_WEIGHT_FLOOR", 0.01))
+HILBERT_PIXELS_OVERRIDE = int(os.environ.get("PYAUTOLENS_HILBERT_PIXELS", 0)) or None
 HILBERT_ADAPT_SNR_SATURATE = 50  # cap the adapt image at the S/N of its 50th brightest pixel
 EDGE_PIXELS_TOTAL = 30
+
+# See "__The Adapt Floor__". 0.0 = off (the HST behaviour).
+ADAPT_FLOOR_FRAC = float(os.environ.get("PYAUTOLENS_ADAPT_FLOOR_FRAC", 0.0))
 HILBERT_REGULARIZATIONS = {"adapt_split": al.reg.AdaptSplit, "constant_split": al.reg.ConstantSplit}
 
 
@@ -167,6 +198,10 @@ def adapt_images_from(
 
     source_adapt_image = source_image_raw.copy()
     source_adapt_image[source_adapt_image > adapt_snr_cap] = adapt_snr_cap
+    if ADAPT_FLOOR_FRAC > 0.0:
+        # See "__The Adapt Floor__": bound the regularization dynamic range.
+        adapt_floor = ADAPT_FLOOR_FRAC * adapt_snr_cap
+        source_adapt_image[source_adapt_image < adapt_floor] = adapt_floor
     galaxy_image_name_dict[SOURCE_KEY] = source_adapt_image
 
     if mesh != "hilbert":
@@ -174,11 +209,14 @@ def adapt_images_from(
 
     if mask is None:
         raise ValueError("adapt_images_from needs the mask for the Hilbert mesh")
-    pixels = al.model_util.hilbert_pixels_from_pixel_scale(mask.pixel_scales[0])
+    pixels = HILBERT_PIXELS_OVERRIDE or al.model_util.hilbert_pixels_from_pixel_scale(
+        mask.pixel_scales[0]
+    )
     print(
         f"HILBERT pixels={pixels} (+{EDGE_PIXELS_TOTAL} edge)  weight_power={HILBERT_WEIGHT_POWER}  "
         f"weight_floor={HILBERT_WEIGHT_FLOOR}  regularization={hilbert_regularization_from_env().__name__}  "
         f"adapt_snr_cap={adapt_snr_cap:.2f} (brightest {HILBERT_ADAPT_SNR_SATURATE} px)  "
+        f"adapt_floor_frac={ADAPT_FLOOR_FRAC}  "
         f"mask_radius={mask.circular_radius:.2f}\"",
         flush=True,
     )
