@@ -167,8 +167,9 @@ fit_slide("J18 (z=1.53) — stars+dark fit: shear collapses",
           ["γ = (−0.02, +0.04),  |γ| ≈ 0.04  (EPL wanted 0.20)",
            "Halo near-round (e ≈ 0.04), centre offset 0.06″",
            "M₂₀₀ ≈ 3.9×10¹³ M⊙",
-           "Residuals at noise level; source compact",
-           "BUT: source-plane result not yet reproduced on the second mesh family"])
+           "Image-plane residuals at noise level",
+           "BUT zoomed in the source is multi-clump over ~1″ (next slide),",
+           "and the mass model moves 10–20% between source variants"])
 
 fit_slide("J24 (z=0.36) — stars+dark fit: shear survives",
           IMG / "j24_mld_rtu_fit.png", IMG / "j24_mld_rtu_source_zoom.png",
@@ -185,21 +186,38 @@ fit_slide("J0959 (spec-z, no group) — stars+dark fit",
            "Einstein radius 0.86″ vs 0.71″ in Anguita+09 — unresolved",
            "Compact residual spots remain (lensed AGN?)"])
 
+# --- Slide: J18 source zoomed ---
+image_slide("J18's source, zoomed: fragmented or genuinely clumpy?", [
+    (IMG / "j18_rtu_sp2_zoom.png", "F150W, source_pix[2] (RTU): clumpy chains over ~1.2″ along the caustic path, isolated bright cells."),
+    (IMG / "j18_rtu_mld_zoom.png", "F150W, stars+dark (RTU): four clump groups — a DIFFERENT arrangement (mass-model dependent)."),
+    (IMG / "j18_f277_sp2_zoom.png", "F277W (independent band + fit): also multi-clump, different arrangement again."),
+], note="All meshes and both bands agree the source is multiple clumps (consistent with two marked position sets; z≈3.1 star-formers are clumpy). But clump positions are unstable across mass models and bands — the (mass, source) pair is under-constrained. This is the 10–20% slope/shear systematic.")
+
 # --- Slide 9: the source reconstruction problem ---
 image_slide("The source reconstruction is the systematic (J18)", [
     (IMG / "j18_cs_sp2_source_zoom.png", "ConstantSplit: over-smoothed to one blob → ±10σ knot residuals. Ruled out."),
     (IMG / "j18_as_sp2_source_zoom.png", "AdaptSplit: clean image fit, but clumps scattered on the caustics — fragmentation."),
-    (IMG / "j18_rtu_sp2_source_zoom.png", "RTU (current production): contiguous source, but mesh never zooms (structural)."),
+    (IMG / "j18_rtu_sp2_source_zoom.png", "RTU (production): looked compact at panel zoom, but zoomed view shows clumpy chains too."),
 ], note="The inferred mass model moves 10–20% (slope, γ₂) purely from source-reconstruction freedom. Setup is now chosen by source-plane behaviour, not image-plane residuals.")
+
+# --- Slide: fit gallery ---
+image_slide("Fit gallery — failures vs working fits", [
+    (IMG / "j18_cs_sp2_fit.png", "J18 Delaunay+ConstantSplit: smooth model ring, knot residuals ±10σ — all downstream mass results discarded."),
+    (IMG / "j18_as_sp2_fit.png", "J18 Delaunay+AdaptSplit: image plane clean (±2.4σ) — but source plane still fragments (previous slides)."),
+    (IMG / "j0959_cs_sp2_fit.png", "J0959 CS: misses the compact knots entirely (χ² ~ 243). The RTU chain reconstructs them (χ² ~ 17)."),
+], note="Lesson: image-plane residuals alone cannot adjudicate — the source plane must be inspected.")
 
 # --- Slide 10: next steps ---
 bullets("Next steps", [
-    (0, "J18 (critical path): pick the source scheme that gives a compact, stable source;"),
-    (1, "AdaptSplitPower (λ² regularization) test running now; mesh-independence of the shear collapse still open"),
-    (0, "J0959: finish wide-shear chains; understand r_E offset vs Anguita+09; AGN point-source component if knots persist"),
-    (0, "J24: essentially done — write down the group + elliptical-halo shear story"),
+    (0, "J18 (critical path): joint MULTI-BAND fit wired and running (F150W+F444W+F277W+F115W):"),
+    (1, "ONE shared mass+shear model across all bands — the strongest lever against the mass/source degeneracy"),
+    (1, "plus: AdaptSplitPower test, mesh-independence of the shear collapse, CS wide-shear (completeness)"),
+    (0, "Multi-band plan for all three lenses once J18's chain is proven; J0959 next (F277W strongest there)"),
+    (1, "J24 caveat: its F444W arc S/N measures negative with a contaminant flag — band selection needs care"),
+    (0, "J0959: finish wide-shear chains; r_E offset vs Anguita+09; AGN point-source component if knots persist"),
+    (0, "J24: essentially done single-band — write down the group + elliptical-halo shear story"),
     (0, "Then: freeze the production chain per lens → merge to master → HTCondor subhalo tiling"),
-    (0, "Icebox: model the confirmed group members explicitly; joint multi-band fits; multipoles on the stars+dark model"),
+    (0, "Icebox: model the confirmed group members explicitly; multipoles on the stars+dark model"),
 ])
 
 # --- Slide 11: reference — folder map ---
