@@ -129,14 +129,14 @@ def main():
 
     # Explicit AGN + host decomposition (2026-11-12): with both bases spanning the full sigma
     # range, the v5 fit put both centres 0.017" apart and built the same core+pedestal twice.
-    # Splitting the sigma ranges forces the point-like AGN core (spherical, sub-pixel) and the
-    # extended host apart.
-    source_bulge = slam_pipeline.mge_model_from(
+    # Splitting the sigma ranges forces the point-like AGN core (source_point: spherical,
+    # sub-pixel) and the extended host (source_bulge: elliptical) apart.
+    source_point = slam_pipeline.mge_model_from(
         total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, np.log10(0.03), 10),
         use_spherical=True,
         centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
     )
-    source_disk = slam_pipeline.mge_model_from(
+    source_bulge = slam_pipeline.mge_model_from(
         total_gaussians=20, gaussian_per_basis=1, log10_sigma_list=np.linspace(np.log10(0.03), np.log10(1), 20),
         centre_prior_is_uniform=False,
     )
@@ -168,7 +168,7 @@ def main():
         lens_disk=lens_disk,
         lens_point=lens_point,
         source_bulge=source_bulge,
-        source_disk=source_disk,
+        source_point=source_point,
         redshift_lens=redshift_lens,
         redshift_source=redshift_source,
     )

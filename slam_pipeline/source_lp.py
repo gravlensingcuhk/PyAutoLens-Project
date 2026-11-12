@@ -19,6 +19,7 @@ def run(
     shear: af.Model(al.mp.ExternalShear) = af.Model(al.mp.ExternalShear),
     source_bulge: Optional[af.Model] = af.Model(al.lp.Sersic),
     source_disk: Optional[af.Model] = None,
+    source_point: Optional[af.Model] = None,
     redshift_lens: float = 0.5,
     redshift_source: float = 1.0,
     mass_centre: Optional[Tuple[float, float]] = None,
@@ -55,6 +56,9 @@ def run(
     source_disk
         The model used to represent the light distribution of the source galaxy's disk (set to
         None to omit a disk).
+    source_point
+        The model used to represent point source emission in the source galaxy, e.g. a lensed
+        AGN core (set to None to omit a point).
     redshift_lens
         The redshift of the lens galaxy fitted, used by the pipeline for converting arc-seconds to kpc, masses to
         solMass, etc.
@@ -102,6 +106,7 @@ def run(
                 redshift=redshift_source,
                 bulge=source_bulge,
                 disk=source_disk,
+                point=source_point,
             ),
         ),
         extra_galaxies=extra_galaxies,
