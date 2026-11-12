@@ -127,12 +127,17 @@ def main():
     analysis = al.AnalysisImaging(dataset=dataset, use_jax=use_jax, settings=analysis_settings,
                                   positions_likelihood_list=[al.PositionsLH(threshold=0.2, positions=p) for p in positions],)
 
+    # Explicit AGN + host decomposition (2026-11-12): with both bases spanning the full sigma
+    # range, the v5 fit put both centres 0.017" apart and built the same core+pedestal twice.
+    # Splitting the sigma ranges forces the point-like AGN core (spherical, sub-pixel) and the
+    # extended host apart.
     source_bulge = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
+        total_gaussians=10, gaussian_per_basis=1, log10_sigma_list=np.linspace(-4, np.log10(0.03), 10),
+        use_spherical=True,
         centre_prior_is_uniform=False,  # GaussianPrior(mean=centre, sigma=0.3) -> unrails the source centre
     )
     source_disk = slam_pipeline.mge_model_from(
-        total_gaussians=30, gaussian_per_basis=1, log10_sigma_list=np.linspace(-3, np.log10(1), 30),
+        total_gaussians=20, gaussian_per_basis=1, log10_sigma_list=np.linspace(np.log10(0.03), np.log10(1), 20),
         centre_prior_is_uniform=False,
     )
 
