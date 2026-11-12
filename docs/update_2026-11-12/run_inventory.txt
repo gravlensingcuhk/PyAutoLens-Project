@@ -1,0 +1,139 @@
+RUN INVENTORY — 2026-11-12 (all zips in the local mirror, same layout on phygpu)
+==================================================================================
+Path layout: <output_dir>/<model_setup_free_source|mass_models>/<lens>/<stage>/<identifier>.zip
+Lens names: J18 = COSJ100018+022138, J24 = COSJ100024+021749, J0959 = COSJ095921+020638
+Mesh: RTU-Density (source_pix[1]) / RTU-Image (source_pix[2] onward) or Delaunay.
+Regularization: AdaptPower (RTU chains), AdaptSplit / ConstantSplit / AdaptSplitPower (Delaunay).
+wide = SHEAR_MAX=0.2 shear prior; baseline = +/-0.1 (gamma_2 1-sigma upper rails at 0.1).
+Folders:
+  output_sam_v4       production on data/cowls_sam, J18+J24, RTU + Delaunay(AS/CS) chains, wide-shear + mld
+  output_sam_v4_f277  J18 in F277W (RTU)
+  output_sam_v5       psffloor noise map: J24 full chain, J0959 all chains, J18 partial
+  output_test_as      J18 AdaptSplit + weight_floor 0.1 + adapt_floor 0.02
+  output_test_as_sp1  same, run_2 adapts to PIX 1
+  output_sam_v3       superseded 2026-11-04 chains (single-group light, 50x50 RTU)
+
+### output_sam_v4
+  J18    mass_EPL             Delaunay     AdaptSplit      0c8b3b8de5dc494b*  [wide shear]
+  J18    mass_EPL             RTU-Image    AdaptPower      201756acf43cb38a*  [baseline shear]
+  J18    mass_EPL             RTU-Image    AdaptPower      50088962766241e4*  [baseline shear]
+  J18    mass_EPL             Delaunay     ConstantSplit   6df6865f93e461f1*  [baseline shear]
+  J18    mass_EPL             RTU-Image    AdaptPower      ff53dc005fa3097f*  [wide shear]
+  J18    mass_light_dark[1]   RTU-Image    AdaptPower      60f821ca70ae068d*  [wide shear]
+  J18    mass_light_dark[1]   Delaunay     ConstantSplit   88451090ddb0992e*  [baseline shear]
+  J18    mass_multipole       RTU-Image    AdaptPower      25e03b377bae42c1*  [baseline shear]
+  J18    mass_multipole       RTU-Image    AdaptPower      9d7cf843cb6f01fb*  [wide shear]
+  J18    mass_multipole       RTU-Image    AdaptPower      c860c37816e16f19*  [baseline shear]
+  J18    mass_multipole       Delaunay     ConstantSplit   dd0093f239e4827b*  [baseline shear]
+  J24    mass_EPL             RTU-Image    AdaptPower      0e102780016acb6f*  [wide shear]
+  J24    mass_EPL             RTU-Image    AdaptPower      2c08cf6341ea5b49*  [baseline shear]
+  J24    mass_EPL             RTU-Image    AdaptPower      3d57bc573ff543d4*  [baseline shear]
+  J24    mass_EPL             Delaunay     ConstantSplit   69743abad2cdb8db*  [baseline shear]
+  J24    mass_EPL             Delaunay     AdaptSplit      733e8f25b15b9fe0*  [baseline shear]
+  J24    mass_light_dark[1]   Delaunay     ConstantSplit   4de601086dd73827*  [wide shear]
+  J24    mass_light_dark[1]   RTU-Image    AdaptPower      b2e19554a1eae8a3*  [wide shear]
+  J24    mass_multipole       RTU-Image    AdaptPower      a5876a956b89d339*  [baseline shear]
+  J24    mass_multipole       RTU-Image    AdaptPower      a9ceefa49b564f36*  [baseline shear]
+  J24    mass_multipole       RTU-Image    AdaptPower      a9ded3195f56b6af*  [wide shear]
+  J24    mass_multipole       Delaunay     ConstantSplit   cb7c35363cd1ff5b*  [baseline shear]
+  J24    mass_multipole       Delaunay     AdaptSplit      ff92b139f1eb7418*  [baseline shear]
+  J18    light[1]             Delaunay     ConstantSplit   26d9cb41a2340901*
+  J18    light[1]             Delaunay     AdaptSplit      a5524e3ddb87ce2d*
+  J18    light[1]             RTU-Image    AdaptPower      b299bcdfa16617b8*
+  J18    source_lp[1]         -            -               0f67864c3c55b5c4*
+  J18    source_pix[1]        Delaunay     ConstantSplit   5a1b07f2dc45817f*
+  J18    source_pix[1]        Delaunay     AdaptSplit      7402fbacf766ba9f*
+  J18    source_pix[1]        RTU-Density  AdaptPower      f06b21c95524075f*
+  J18    source_pix[2]        Delaunay     AdaptSplit      94d0ac6d09d0044b*
+  J18    source_pix[2]        RTU-Image    AdaptPower      a8557226f203b360*
+  J18    source_pix[2]        Delaunay     ConstantSplit   ce03e2ba7a348bfa*
+  J24    light[1]             Delaunay     ConstantSplit   80de0bee6526f14b*
+  J24    light[1]             RTU-Image    AdaptPower      cb6d13c71d705ea1*
+  J24    light[1]             Delaunay     AdaptSplit      e0734a333d0a0b30*
+  J24    source_lp[1]         -            -               756be27535617732*
+  J24    source_pix[1]        Delaunay     ConstantSplit   16bd2e465449236f*
+  J24    source_pix[1]        RTU-Density  AdaptPower      b3963ce057a0a4b6*
+  J24    source_pix[1]        Delaunay     AdaptSplit      c4687db33b07e818*
+  J24    source_pix[2]        RTU-Image    AdaptPower      1de83b715ec38667*
+  J24    source_pix[2]        Delaunay     AdaptSplit      9143d562fe3aaa75*
+  J24    source_pix[2]        Delaunay     ConstantSplit   ca102f587b582c3c*
+
+### output_sam_v4_f277
+  J18    mass_EPL             RTU-Image    AdaptPower      e19cbea5f203ae47*  [baseline shear]
+  J18    mass_multipole       RTU-Image    AdaptPower      f8562ab7971e0398*  [baseline shear]
+  J18    light[1]             RTU-Image    AdaptPower      a78c6530fdfa0eaa*
+  J18    source_lp[1]         -            -               0f67864c3c55b5c4*
+  J18    source_pix[1]        RTU-Density  AdaptPower      8d8c85cf76035419*
+  J18    source_pix[2]        RTU-Image    AdaptPower      3b025bbd2ce33d37*
+
+### output_sam_v5
+  J0959  mass_EPL             Delaunay     ConstantSplit   19d3b753e8164c8e*  [wide shear]
+  J0959  mass_EPL             RTU-Image    AdaptPower      2e7a2abc73d958d7*  [baseline shear]
+  J0959  mass_EPL             RTU-Image    AdaptPower      c031cd5a8bd9f388*  [baseline shear]
+  J0959  mass_EPL             Delaunay     ConstantSplit   f07301dde2ea9648*  [baseline shear]
+  J0959  mass_light_dark[1]   Delaunay     ConstantSplit   a49b50c96e11cf2c*  [baseline shear]
+  J0959  mass_light_dark[1]   RTU-Image    AdaptPower      c77480187e03f81c*  [wide shear]
+  J0959  mass_multipole       Delaunay     ConstantSplit   0302932ad7410bea*  [wide shear]
+  J0959  mass_multipole       Delaunay     ConstantSplit   272f598e3afad10f*  [baseline shear]
+  J24    mass_EPL             RTU-Image    AdaptPower      0eb7711ac38ecc3e*  [baseline shear]
+  J24    mass_multipole       RTU-Image    AdaptPower      513ebb3bf5d56a3e*  [baseline shear]
+  J0959  light[1]             RTU-Image    AdaptPower      7d8fb139046c7414*
+  J0959  light[1]             Delaunay     ConstantSplit   97fbafdfd72e5e3a*
+  J0959  source_lp[1]         -            -               81040185a4c37e7e*
+  J0959  source_pix[1]        Delaunay     ConstantSplit   2ca9cd9467c189a7*
+  J0959  source_pix[1]        RTU-Density  AdaptPower      c6a970a346e7f83c*
+  J0959  source_pix[2]        Delaunay     ConstantSplit   465d2db5fed77383*
+  J0959  source_pix[2]        RTU-Image    AdaptPower      b22a5cbd558c6e7a*
+  J18    source_lp[1]         -            -               0f67864c3c55b5c4*
+  J18    source_pix[1]        RTU-Density  AdaptPower      4bf2580ddba9a710*
+  J24    light[1]             RTU-Image    AdaptPower      231f8534a14f526c*
+  J24    source_lp[1]         -            -               756be27535617732*
+  J24    source_pix[1]        RTU-Density  AdaptPower      f77e5ab4b678f5e4*
+  J24    source_pix[2]        RTU-Image    AdaptPower      cf716a672d576a31*
+
+### output_test_as
+  J18    mass_EPL             Delaunay     AdaptSplit      32f9863252983023*  [wide shear]
+  J18    light[1]             Delaunay     AdaptSplit      6177e290773bda4e*
+  J18    source_lp[1]         -            -               0f67864c3c55b5c4*
+  J18    source_pix[1]        Delaunay     AdaptSplit      f7d3c7bb86323c2a*
+  J18    source_pix[2]        Delaunay     AdaptSplit      89e6ae51966cc9bd*
+
+### output_test_as_sp1
+  J18    mass_EPL             Delaunay     AdaptSplit      9af8d7bf2fe63a5a*  [wide shear]
+  J18    light[1]             Delaunay     AdaptSplit      4821de5838a2ace0*
+  J18    source_lp[1]         -            -               0f67864c3c55b5c4*
+  J18    source_pix[1]        Delaunay     AdaptSplit      72abba3abf3ea6ea*
+  J18    source_pix[2]        Delaunay     AdaptSplit      5a3514cb91241dd7*
+
+### output_sam_v3
+  J18    mass_EPL             RTU-Image    AdaptPower      250236bd519ad157*  [baseline shear]
+  J18    mass_EPL             Delaunay     ConstantSplit   9dcad96e6a74b6e2*  [baseline shear]
+  J18    mass_multipole       Delaunay     ConstantSplit   89c58a5932ff734d*  [baseline shear]
+  J18    mass_multipole       RTU-Image    AdaptPower      b280812e21b1f6a6*  [baseline shear]
+  J24    mass_EPL             Delaunay     AdaptSplit      168b46b763d97359*  [baseline shear]
+  J24    mass_EPL             RTU-Image    AdaptPower      6916f2191c550801*  [baseline shear]
+  J24    mass_EPL             Delaunay     ConstantSplit   fe9b9b9c70e7fd74*  [baseline shear]
+  J24    mass_multipole       Delaunay     ConstantSplit   29a343269fcb66e9*  [baseline shear]
+  J24    mass_multipole       RTU-Image    AdaptPower      bc8a0943fe996a4f*  [baseline shear]
+  J24    mass_multipole       Delaunay     AdaptSplit      f22311b77f5b920d*  [baseline shear]
+  J18    light[1]             Delaunay     ConstantSplit   0bcca49b33b336f3*
+  J18    light[1]             RTU-Image    AdaptPower      8def96f8efb1b9aa*
+  J18    light[1]             Delaunay     AdaptSplit      aac0bb32def5961c*
+  J18    source_lp[1]         -            -               954124f38990ff2a*
+  J18    source_pix[1]        Delaunay     ConstantSplit   31737c10f166e71f*
+  J18    source_pix[1]        Delaunay     AdaptSplit      5167c839d4e427fd*
+  J18    source_pix[1]        RTU-Density  AdaptPower      e7aa9562edf4e956*
+  J18    source_pix[2]        RTU-Image    AdaptPower      15e3f8df10e0f35e*
+  J18    source_pix[2]        Delaunay     AdaptSplit      aae25fe0b81864e8*
+  J18    source_pix[2]        Delaunay     ConstantSplit   db85d114664855aa*
+  J24    light[1]             Delaunay     ConstantSplit   2800410000f36ec8*
+  J24    light[1]             RTU-Image    AdaptPower      7618e21251ec88cb*
+  J24    light[1]             Delaunay     AdaptSplit      87d73967238b1c0c*
+  J24    source_lp[1]         -            -               833f3be99449a507*
+  J24    source_pix[1]        Delaunay     AdaptSplit      51034302f33d1dec*
+  J24    source_pix[1]        Delaunay     ConstantSplit   6cae04038163651b*
+  J24    source_pix[1]        RTU-Density  AdaptPower      fc1c508c4137d73f*
+  J24    source_pix[2]        RTU-Image    AdaptPower      061651743d893728*
+  J24    source_pix[2]        Delaunay     AdaptSplit      53cf9de0cef297c4*
+  J24    source_pix[2]        Delaunay     ConstantSplit   af8afdd747a3c66d*
+
