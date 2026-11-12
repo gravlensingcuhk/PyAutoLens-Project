@@ -61,7 +61,7 @@ for i in "${!ARGS[@]}"; do
     N_BATCH=$(cowls_n_batch_for "${ARGS[$i]}")
     RUNNER=$(cowls_runner_for "$LENS") || exit 1
     echo "GPU ${GPUS[$i]}: $LENS -> $(basename "$RUNNER"), n_batch $N_BATCH"
-    CUDA_VISIBLE_DEVICES="${GPUS[$i]}" PYAUTOLENS_N_BATCH=$N_BATCH python3 -u "$RUNNER" "$LENS" \
+    CUDA_VISIBLE_DEVICES="${GPUS[$i]}" PYAUTOLENS_N_BATCH=$N_BATCH python3 -u "$RUNNER" "${LENS%_mb}" \
         > "$PROJECT_ROOT/phygpu/outputs/$LENS.${SLURM_JOB_ID}.log" 2>&1 &
     PIDS+=($!)
 done

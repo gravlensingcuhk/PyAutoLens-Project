@@ -97,13 +97,16 @@ cowls_n_batch_for() {
         COSJ100018+022138) echo 6 ;;
         COSJ100024+021749) echo 12 ;;
         COSJ095921+020638) echo 6 ;;   # F150W 400px, same as J18
+        *_mb) echo 4 ;;   # multi-band: 4 datasets at once (main_runner_mb.py, 2026-11-12)
         *) echo 20 ;;   # the HST project's GPU batch size
     esac
 }
 
 # The runner for a lens: the runners differ in filter, pixel scale and lens-light setup.
+# A `<lens>_mb` argument runs the multi-band chain (main_runner_mb.py, 2026-11-12).
 cowls_runner_for() {
     case "$1" in
+        *_mb) echo "$PROJECT_ROOT/main_runner_mb.py" ;;
         COSJ100018+022138) echo "$PROJECT_ROOT/main_runner_J18.py" ;;
         COSJ100024+021749) echo "$PROJECT_ROOT/main_runner_J24.py" ;;
         COSJ095921+020638) echo "$PROJECT_ROOT/main_runner_J0959.py" ;;
