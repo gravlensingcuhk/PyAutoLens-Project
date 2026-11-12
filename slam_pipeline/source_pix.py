@@ -138,7 +138,13 @@ EDGE_PIXELS_TOTAL = 30
 
 # See "__The Adapt Floor__". 0.0 = off (the HST behaviour).
 ADAPT_FLOOR_FRAC = float(os.environ.get("PYAUTOLENS_ADAPT_FLOOR_FRAC", 0.0))
-HILBERT_REGULARIZATIONS = {"adapt_split": al.reg.AdaptSplit, "constant_split": al.reg.ConstantSplit}
+HILBERT_REGULARIZATIONS = {
+    "adapt_split": al.reg.AdaptSplit,
+    "constant_split": al.reg.ConstantSplit,
+    # lambda^2 coefficient convention, robust to likelihood overflow; see the class docstring
+    # and "__The Adapt Floor__" (2026-11-12 test).
+    "adapt_split_power": al.reg.AdaptSplitPower,
+}
 
 
 def mesh_from_env() -> str:
