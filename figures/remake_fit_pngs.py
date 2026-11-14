@@ -27,10 +27,13 @@ import numpy as np
 from astropy.io import fits as afits
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import slam_pipeline  # applies the caustic-zoom patch
 import autolens as al
 from autolens.imaging.plot import fit_imaging_plots as fip
+from scan_runs import (DIRS, LENS_BAND, LENS_SHORT, STAGE_ORDER, classify_zip,
+                       extras_for, figure_name)
 
 DATA_ROOT = os.path.join("data", "cowls_sam")
 OUT_ROOT = os.path.join("figures", "fit_png_caustic_zoom")
@@ -43,21 +46,16 @@ RUNS = [
     ("output_sam_v5", "COSJ100018+022138", "F150W", "psffloor"),
     ("output_sam_v5", "COSJ100024+021749", "F444W", "psffloor"),
     ("output_sam_v5", "COSJ095921+020638", "F150W", "psffloor"),
+    ("output_sam_v6", "COSJ100018+022138", "F150W", "psfcoh"),
+    ("output_sam_v6", "COSJ100024+021749", "F444W", "psfcoh"),
+    ("output_sam_v6", "COSJ095921+020638", "F150W", "psfcoh"),
     ("output_sam_v4_f277", "COSJ100018+022138", "F277W", None),
     ("output_test_as", "COSJ100018+022138", "F150W", None),
     ("output_test_as_sp1", "COSJ100018+022138", "F150W", None),
     ("output_test_asp", "COSJ100018+022138", "F150W", None),
 ]
 
-STAGES = [
-    ("model_setup_free_source", "source_lp[1]"),
-    ("model_setup_free_source", "source_pix[1]"),
-    ("model_setup_free_source", "source_pix[2]"),
-    ("model_setup_free_source", "light[1]"),
-    ("mass_models", "mass_EPL"),
-    ("mass_models", "mass_multipole"),
-    ("mass_models", "mass_light_dark[1]"),
-]
+STAGES = [(prefix, stage, stage_short) for prefix, stage, stage_short in STAGE_ORDER]
 
 
 def dataset_for(lens, band, noise_tag):
@@ -133,7 +131,7 @@ def rebuild(tmp, dataset, out_png, out_png_log):
 
 for output_dir, lens, band, noise_tag in RUNS:
     dataset = None
-    for prefix, stage in STAGES:
+    for prefix, stage, stage_short in STAGES:
         stage_dir = os.path.join(output_dir, prefix, lens, stage)
         zips = sorted(f for f in os.listdir(stage_dir) if f.endswith(".zip")) \
             if os.path.isdir(stage_dir) else []
@@ -144,9 +142,16 @@ for output_dir, lens, band, noise_tag in RUNS:
         out_dir = os.path.join(OUT_ROOT, output_dir)
         os.makedirs(out_dir, exist_ok=True)
         for z in zips:
-            tag = z.replace(".zip", "")[:8]
-            out_png = os.path.join(out_dir, f"{lens}_{stage}_{tag}.png")
-            out_png_log = os.path.join(out_dir, f"{lens}_{stage}_{tag}_log10.png")
+            zip_path = os.path.join(stage_dir, z)
+            cls = classify_zip(zip_path)
+            if cls.get("error"):
+                print(f"FAIL {output_dir} {lens} {stage} {z[:8]}: unreadable: {cls['error']}")
+                continue
+            name = figure_name(lens, stage_short, DIRS[output_dir]["noise"],
+                               DIRS[output_dir].get("band") or LENS_BAND[LENS_SHORT[lens]],
+                               cls, z[:8], extra=extras_for(output_dir, lens, zip_path))
+            out_png = os.path.join(out_dir, name)
+            out_png_log = out_png.replace(".png", "_log10.png")
             if os.path.exists(out_png):
                 continue
             try:
