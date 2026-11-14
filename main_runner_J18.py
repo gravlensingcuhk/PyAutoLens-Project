@@ -49,9 +49,11 @@ def main():
     positions_threshold_max = 0.10
     dataset_path = path.join(data_path, dataset_name, filt)
 
-    # PYAUTOLENS_NOISE=psffloor reads noise_map_psffloor.fits (data_prep/add_psf_noise_floor.py:
+    # PYAUTOLENS_NOISE=<tag> reads noise_map_<tag>.fits: psffloor (data_prep/add_psf_noise_floor.py:
+    # psf_err scatter propagated as independent pixels), psfcoh (add_psf_coherent_floor.py:
+    # the coherent part propagated as a signed convolution; the v6 floor, 2026-11-14). Legacy:
     # noise^2 + the shipped psf_err scatter propagated through the convolution).
-    noise_map_file = "noise_map_psffloor.fits" if os.environ.get("PYAUTOLENS_NOISE") == "psffloor" else "noise_map.fits"
+    noise_map_file = f'noise_map_{os.environ.get("PYAUTOLENS_NOISE")}.fits' if os.environ.get("PYAUTOLENS_NOISE") else "noise_map.fits"
 
     dataset = al.Imaging.from_fits(
         data_path=path.join(dataset_path, "data.fits"),

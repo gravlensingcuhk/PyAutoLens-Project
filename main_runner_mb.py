@@ -74,7 +74,7 @@ def main():
 
     dataset_name = str(sys.argv[1])
     bands = bands_for(data_path, dataset_name)
-    noise_map_file = "noise_map_psffloor.fits" if os.environ.get("PYAUTOLENS_NOISE") == "psffloor" else "noise_map.fits"
+    noise_map_file = f'noise_map_{os.environ.get("PYAUTOLENS_NOISE")}.fits' if os.environ.get("PYAUTOLENS_NOISE") else "noise_map.fits"
     positions_threshold_max = 0.10
 
     with open(path.join(data_path, dataset_name, 'info.json')) as file:

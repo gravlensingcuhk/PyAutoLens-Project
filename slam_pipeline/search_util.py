@@ -151,8 +151,30 @@ OOM_MARKERS = (
 
 
 def n_batch() -> int:
-    """See "__Batch Size__"."""
-    return int(os.environ.get("PYAUTOLENS_N_BATCH", "16"))
+    """See "__Batch Size__".
+
+    PYAUTOLENS_N_BATCH (set per lens by the batch scripts) is the a/c-node
+    (48 GB A6000) size. On an RTX 4090 (b nodes, 24 GB) it is scaled down by
+    PYAUTOLENS_B_BATCH_SCALE (default 0.5): the 4090 is faster per thread, so
+    the smaller batch roughly breaks even on wall time while staying out of
+    OOM (2026-11-14).
+    """
+    n = int(os.environ.get("PYAUTOLENS_N_BATCH", "16"))
+    try:
+        import jax
+        kind = jax.devices()[0].device_kind.lower()
+    except Exception:
+        try:
+            import subprocess
+            kind = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                text=True).splitlines()[0].lower()
+        except Exception:
+            return n
+    if "4090" in kind:
+        scale = float(os.environ.get("PYAUTOLENS_B_BATCH_SCALE", "0.5"))
+        return max(1, int(n * scale))
+    return n
 
 
 def _flag(name: str) -> bool:

@@ -92,14 +92,19 @@ cowls_gpu_log_stop() {
 # trim_to_mask, data/cowls_sam/): the FFT frame is 180 px on J18 (was 400 on the new stamps, 450 on
 # the old) and 160 px on J24 (was 200 / 240), so these batch sizes now have 3-5x headroom. Raise
 # them once a first job's gpu_*.out shows the memory in use.
+# 2026-11-14: these are the a/c (48 GB A6000) sizes, raised to trial values now that XLA
+# preallocates 0.95; slam_pipeline/search_util.n_batch() scales them by
+# PYAUTOLENS_B_BATCH_SCALE (default 0.5) when it detects an RTX 4090 (b nodes), so the same
+# job runs everywhere and the faster 4090s break even at the smaller batch. The OOM retry
+# (search_util) remains the backstop for a guess that is still too high.
 cowls_n_batch_for() {
     case "$1" in *:*) echo "${1#*:}"; return ;; esac
     if [ -n "$PYAUTOLENS_N_BATCH" ]; then echo "$PYAUTOLENS_N_BATCH"; return; fi
     case "$1" in
-        COSJ100018+022138) echo 6 ;;
-        COSJ100024+021749) echo 12 ;;
-        COSJ095921+020638) echo 6 ;;   # F150W 400px, same as J18
-        *_mb) echo 4 ;;   # multi-band: 4 datasets at once (main_runner_mb.py, 2026-11-12)
+        COSJ100018+022138) echo 16 ;;
+        COSJ100024+021749) echo 16 ;;
+        COSJ095921+020638) echo 12 ;;
+        *_mb) echo 8 ;;   # multi-band: 4 datasets at once (main_runner_mb.py, 2026-11-12)
         *) echo 20 ;;   # the HST project's GPU batch size
     esac
 }
