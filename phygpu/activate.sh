@@ -50,7 +50,9 @@ export PYAUTO_SKIP_WORKSPACE_VERSION_CHECK=1
 export HDF5_USE_FILE_LOCKING=FALSE
 
 # Headroom on the GPU: XLA's default 0.9 preallocation leaves too little for transient buffers.
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+# 0.95 (2026-11-14): the runners are alone on the node (--exclusive), so the transient-buffer
+# margin can shrink; the preallocation is what nvidia-smi reports, not the true working set.
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
 
 # Per-job caches, so concurrent tasks on one node cannot collide.
 export NUMBA_CACHE_DIR=${TMPDIR:-/tmp}/numba_cache_${SLURM_JOB_ID:-$$}

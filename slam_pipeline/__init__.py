@@ -6,4 +6,7 @@ from . import light_lp
 from . import mass_total
 from . import mass_light_dark
 from .model_util import mge_model_from
+from . import plot_patch
+
+plot_patch.patch_source_plane_zoom()
 
