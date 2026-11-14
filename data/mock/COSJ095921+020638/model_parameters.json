@@ -1,7 +1,7 @@
 {
     "lens": "COSJ095921+020638",
     "band": "F150W",
-    "note": "Ground truth of this mock. Lens light is Sersics fitted to the MGE bases of the source_pix[2] max-likelihood tracer (flux-conserving); mass and shear are that fit's values; the source is the fit's pixelized reconstruction (source_plane_reconstruction.fits).",
+    "note": "Ground truth of this mock -- fully parametric. Lens light is Sersics fitted to the MGE bases of the source_pix[2] max-likelihood tracer (flux-conserving); mass and shear are that fit's values; the source is Sersics fitted to the fit's pixelized reconstruction (source_plane_reconstruction.fits is the reconstruction, source_plane_model.fits is the parametric truth).",
     "redshifts": {
         "lens": 0.551,
         "source": 3.35
@@ -43,32 +43,108 @@
     "mass": {
         "profile": "Isothermal (SIE, slope=2.0)",
         "centre": [
-            0.05310228990275148,
-            0.018956234368596572
+            0.012846042956002394,
+            0.0056364077371678575
         ],
         "ell_comps": [
-            0.3666416944099377,
-            9.463241064433433e-05
+            0.34246794147807275,
+            0.05949021428430392
         ],
-        "axis_ratio": 0.4634413616299808,
-        "angle_deg": 0.007394191246296053,
-        "einstein_radius": 0.7593981596849576
+        "axis_ratio": 0.4841236926990348,
+        "angle_deg": 4.927266061915571,
+        "einstein_radius": 0.7186028292785303,
+        "from_zip": "output_sam_v6/model_setup_free_source/COSJ095921+020638/source_lp[1]/9017b6f2b5a2f87d0b6d06627324b265.zip"
     },
     "source": {
-        "type": "pixelized reconstruction (linear interpolation of the mesh values)",
+        "type": "parametric (Sersics fitted to the pixelized reconstruction)",
         "source_pix_zip": "output_sam_v4/model_setup_free_source/COSJ095921+020638/source_pix[2]/ff53a53af2fd522c9bdc23ae57706a1c.zip",
-        "map_file": "source_plane_reconstruction.fits",
-        "map_pixel_scale": 0.0025,
-        "map_origin_yx": [
+        "components": {
+            "comp0": {
+                "profile": "Sersic",
+                "centre": [
+                    -0.06575201701952671,
+                    -0.12784157151891828
+                ],
+                "ell_comps": [
+                    -0.049698409088803394,
+                    0.2440839432466177
+                ],
+                "axis_ratio": 0.6011628822286396,
+                "angle_deg": 50.75439188588282,
+                "intensity": 0.1536229338269815,
+                "effective_radius": 0.13323735866723263,
+                "sersic_index": 0.5000000000000001
+            },
+            "comp1": {
+                "profile": "Sersic",
+                "centre": [
+                    -0.15293225573009833,
+                    -0.11850673845030416
+                ],
+                "ell_comps": [
+                    0.07369017543371413,
+                    -0.22750066227588564
+                ],
+                "axis_ratio": 0.6140257504440203,
+                "angle_deg": -36.026121589750936,
+                "intensity": 0.02506341079572611,
+                "effective_radius": 0.6394975627325101,
+                "sersic_index": 1.5093530831882012
+            }
+        },
+        "fit_quality": {
+            "rms_surface_brightness": 0.1115481127833723,
+            "rms_over_peak": 0.014456136585652231,
+            "flux_conserved_over": ">1% of peak region",
+            "n_components": 3,
+            "lensed_flux_rescale": 0.12011204394261445,
+            "lensed_frac_rms_bright": 1.733242303949371,
+            "lensed_flux_ratio": 1.0
+        },
+        "reference_map_file": "source_plane_reconstruction.fits",
+        "reference_map_pixel_scale": 0.0025,
+        "reference_map_origin_yx": [
             -1.4593990848825695,
             -1.6286517739197108
         ],
-        "n_mesh_pixels": 3600,
-        "total_flux": 394.50212384997747,
-        "centroid": [
-            -0.11436202492478212,
-            -0.005297378781410338
-        ]
+        "point_agn": {
+            "type": "point source (AGN); flux x |magnification| is added to the image pixel containing each solved image",
+            "centre": [
+                -0.08300300124243305,
+                -0.07882691913388744
+            ],
+            "flux": 0.0013067698309809448,
+            "images": [
+                {
+                    "position": [
+                        -0.7421875,
+                        0.05502869753213621
+                    ],
+                    "magnification": 3.8401867702117833
+                },
+                {
+                    "position": [
+                        0.33203125,
+                        0.35768653395888533
+                    ],
+                    "magnification": 1.100843302907933
+                },
+                {
+                    "position": [
+                        -0.3875,
+                        -0.6179452099920214
+                    ],
+                    "magnification": 4.990863418813393
+                },
+                {
+                    "position": [
+                        0.08750000000000001,
+                        -0.7180793973045971
+                    ],
+                    "magnification": 5.575785085671851
+                }
+            ]
+        }
     },
     "fit_quality": {
         "lens_bulge": {
@@ -81,9 +157,9 @@
         }
     },
     "external_shear": {
-        "gamma_1": -0.03108719828394698,
-        "gamma_2": 0.09988933749015155,
-        "gamma": 0.10461497809284688,
-        "angle_deg": 53.64349877193791
+        "gamma_1": 0.007068130087405248,
+        "gamma_2": 0.06300759283172581,
+        "gamma": 0.0634028013370153,
+        "angle_deg": 41.79968740140872
     }
 }

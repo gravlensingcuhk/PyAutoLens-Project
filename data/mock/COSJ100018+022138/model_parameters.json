@@ -1,7 +1,7 @@
 {
     "lens": "COSJ100018+022138",
     "band": "F150W",
-    "note": "Ground truth of this mock. Lens light is Sersics fitted to the MGE bases of the source_pix[2] max-likelihood tracer (flux-conserving); mass and shear are that fit's values; the source is the fit's pixelized reconstruction (source_plane_reconstruction.fits).",
+    "note": "Ground truth of this mock -- fully parametric. Lens light is Sersics fitted to the MGE bases of the source_pix[2] max-likelihood tracer (flux-conserving); mass and shear are that fit's values; the source is Sersics fitted to the fit's pixelized reconstruction (source_plane_reconstruction.fits is the reconstruction, source_plane_model.fits is the parametric truth).",
     "redshifts": {
         "lens": 1.53,
         "source": 3.147
@@ -52,22 +52,60 @@
         ],
         "axis_ratio": 0.7211666321830196,
         "angle_deg": 53.28765056173692,
-        "einstein_radius": 0.3692182800831217
+        "einstein_radius": 0.3692182800831217,
+        "from_zip": "output_sam_v4/model_setup_free_source/COSJ100018+022138/source_pix[2]/ce03e2ba7a348bfae8e799470da902b1.zip"
     },
     "source": {
-        "type": "pixelized reconstruction (linear interpolation of the mesh values)",
+        "type": "parametric (Sersics fitted to the pixelized reconstruction)",
         "source_pix_zip": "output_sam_v4/model_setup_free_source/COSJ100018+022138/source_pix[2]/ce03e2ba7a348bfae8e799470da902b1.zip",
-        "map_file": "source_plane_reconstruction.fits",
-        "map_pixel_scale": 0.0025,
-        "map_origin_yx": [
+        "components": {
+            "comp0": {
+                "profile": "Sersic",
+                "centre": [
+                    -0.03612006381787476,
+                    -0.05058861253663111
+                ],
+                "ell_comps": [
+                    -0.09567008865123262,
+                    0.08059949166128355
+                ],
+                "axis_ratio": 0.7776258678695831,
+                "angle_deg": 69.94337910721879,
+                "intensity": 0.2772622754273834,
+                "effective_radius": 0.03686339114923034,
+                "sersic_index": 0.6431015547563284
+            },
+            "comp1": {
+                "profile": "Sersic",
+                "centre": [
+                    -0.0279784711321821,
+                    0.015314843890444992
+                ],
+                "ell_comps": [
+                    0.15453768994518574,
+                    -0.31545155821485316
+                ],
+                "axis_ratio": 0.48008758858096956,
+                "angle_deg": -31.950031772606913,
+                "intensity": 0.02058826424693727,
+                "effective_radius": 0.47670150635503833,
+                "sersic_index": 1.3349228815570129
+            }
+        },
+        "fit_quality": {
+            "rms_surface_brightness": 0.010970234630697396,
+            "rms_over_peak": 0.013907758248267295,
+            "flux_conserved_over": ">1% of peak region",
+            "n_components": 2,
+            "lensed_flux_rescale": 0.9401966154015682,
+            "lensed_frac_rms_bright": 0.1678974207561074,
+            "lensed_flux_ratio": 1.0000000000000002
+        },
+        "reference_map_file": "source_plane_reconstruction.fits",
+        "reference_map_pixel_scale": 0.0025,
+        "reference_map_origin_yx": [
             -1.1681656247070196,
             -1.226511706851891
-        ],
-        "n_mesh_pixels": 1530,
-        "total_flux": 357.42416075409164,
-        "centroid": [
-            -0.035259027240027274,
-            -0.046314699507353466
         ]
     },
     "fit_quality": {

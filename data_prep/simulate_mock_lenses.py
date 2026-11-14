@@ -92,6 +92,14 @@ LENSES = {
         "source_pix_zip": "output_sam_v4/model_setup_free_source/COSJ095921+020638/"
                           "source_pix[2]/ff53a53af2fd522c9bdc23ae57706a1c.zip",
         "noise_file": "noise_map.fits",
+        # The pixelized fit's mass (r_E 0.759) puts the reconstructed AGN position
+        # OUTSIDE its caustic (only 2 images). The source_lp mass (r_E 0.719)
+        # quadruples the source_lp AGN position and lands two images within
+        # 0.02" of the real marks, so J0959's truth takes mass + shear + the AGN
+        # point (position, flux) from the v6 source_lp; the host Sersics still
+        # come from the pixelized reconstruction.
+        "mass_agn_zip": "output_sam_v6/model_setup_free_source/COSJ095921+020638/"
+                        "source_lp[1]/9017b6f2b5a2f87d0b6d06627324b265.zip",
     },
 }
 
@@ -101,6 +109,105 @@ FIT_GRID_SCALE = 0.005  # arcsec/px for the MGE -> Sersic fit
 FIT_GRID_HALF = 2.0     # arcsec half-width
 SUB = 4                 # sub-sampling of the forward ray-traced image grid
 SRC_GRID_SCALE = 0.0025  # arcsec/px of the saved source-plane map
+
+# Number of parametric source components fitted to each pixelized reconstruction.
+N_SOURCE_COMPONENTS = {
+    "COSJ100018+022138": 2,   # compact clumpy core + broad smooth disk
+    "COSJ100024+021749": 3,   # three clumps along the banana
+    "COSJ095921+020638": 3,   # AGN spike + host core + extended halo
+}
+
+# Lenses whose source has a genuine point-source AGN. After the Sersic fit, the
+# most compact component is removed from the smooth profiles and treated as a
+# true point source: its multiple images are solved with `al.PointSolver`, its
+# magnifications from a finite-difference Jacobian of the lens equation, and
+# its flux x |mu| is added to the image pixel containing each image (a delta
+# evaluated as a light profile mis-accounts flux when the pixel scale is much
+# larger than the profile width).
+POINT_AGN = {"COSJ095921+020638"}
+
+
+def fit_source_parametric(mesh, recon, n_comp):
+    """Fit `n_comp` elliptical Sersics to the source-plane reconstruction.
+
+    The map is interpolated onto a regular grid; the fit uses sqrt-flux-weighted
+    linear residuals over the significant pixels (> 0.3% of peak), initialised
+    from the brightest separated peaks. Total flux is conserved over the >1%-peak
+    region. Returns (profiles, map_info, quality).
+    """
+    interp = LinearNDInterpolator(mesh, recon, fill_value=0.0)
+    pad = 0.05
+    y0, y1 = mesh[:, 0].min() - pad, mesh[:, 0].max() + pad
+    x0, x1 = mesh[:, 1].min() - pad, mesh[:, 1].max() + pad
+    nys = int((y1 - y0) / SRC_GRID_SCALE) + 1
+    nxs = int((x1 - x0) / SRC_GRID_SCALE) + 1
+    sy, sx = np.meshgrid(np.linspace(y0, y1, nys), np.linspace(x0, x1, nxs), indexing="ij")
+    src_map = np.clip(interp(sy, sx), 0.0, None)
+
+    peak = float(src_map.max())
+    use = src_map > 3e-3 * peak
+    yy, xx = sy[use], sx[use]
+    vals = src_map[use]
+    fit_grid = al.Grid2DIrregular(values=np.column_stack([yy, xx]))
+    weight = np.sqrt(vals / peak)
+
+    # Initial centres: brightest peaks separated by >= 0.08".
+    from scipy.ndimage import maximum_filter, label as ndi_label, center_of_mass
+    peaks_mask = (src_map == maximum_filter(src_map, size=int(0.08 / SRC_GRID_SCALE))) \
+        & (src_map > 0.05 * peak)
+    lab, _ = ndi_label(peaks_mask)
+    peaks = sorted(
+        (center_of_mass(src_map, lab, i) for i in range(1, lab.max() + 1)),
+        key=lambda c: -src_map[int(round(c[0])), int(round(c[1]))],
+    )
+    centres = [(y0 + c[0] * SRC_GRID_SCALE, x0 + c[1] * SRC_GRID_SCALE) for c in peaks]
+    cy_flux = float(np.average(yy, weights=vals))
+    cx_flux = float(np.average(xx, weights=vals))
+    while len(centres) < n_comp:
+        centres.append((cy_flux, cx_flux))
+    centres = centres[:n_comp]
+
+    def unpack(p):
+        profs = []
+        for i in range(n_comp):
+            cy, cx, e1, e2, log_i, log_r, n = p[7 * i:7 * i + 7]
+            profs.append(al.lp.Sersic(centre=(cy, cx), ell_comps=(e1, e2),
+                                      intensity=10 ** log_i,
+                                      effective_radius=10 ** log_r, sersic_index=n))
+        return profs
+
+    def residual(p):
+        model = np.sum([np.asarray(pr.image_2d_from(grid=fit_grid))
+                        for pr in unpack(p)], axis=0)
+        return (model - vals) * weight
+
+    p0, lo, hi = [], [], []
+    for i, (cy, cx) in enumerate(centres):
+        r_init = [0.02, 0.08, 0.25][i] if i < 3 else 0.2
+        p0 += [cy, cx, 0.0, 0.0, np.log10(max(src_map.max() * 0.3, 1e-6)),
+               np.log10(r_init), 1.5]
+        lo += [cy - 0.4, cx - 0.4, -0.95, -0.95, -8, np.log10(0.004), 0.5]
+        hi += [cy + 0.4, cx + 0.4, 0.95, 0.95, 8, np.log10(2.0), 6.0]
+    res = least_squares(residual, p0, bounds=(lo, hi), max_nfev=500)
+    profs = unpack(res.x)
+
+    # Conserve flux over the >1%-peak region.
+    region = src_map > 1e-2 * peak
+    full_grid = al.Grid2DIrregular(
+        values=np.column_stack([sy[region].ravel(), sx[region].ravel()]))
+    model_flux = float(np.sum([np.asarray(pr.image_2d_from(grid=full_grid)).sum()
+                               for pr in profs]))
+    scale = float(src_map[region].sum() / model_flux)
+    for pr in profs:
+        pr.intensity *= scale
+
+    rms = float(np.sqrt(np.mean((res.fun / weight) ** 2)))
+    quality = {"rms_surface_brightness": rms,
+               "rms_over_peak": rms / peak,
+               "flux_conserved_over": ">1% of peak region",
+               "n_components": n_comp}
+    map_info = {"src_map": src_map, "y0": y0, "x0": x0, "sy": sy, "sx": sx}
+    return profs, map_info, quality
 
 
 def noise_params_from(data, noise, pixel_scale):
@@ -188,13 +295,49 @@ def fit_sersic(target, coords, spherical):
 def sersic_params_json(prof):
     e1, e2 = getattr(prof, "ell_comps", (0.0, 0.0))
     q, pa = ell_to_q_pa(e1, e2)
-    return {"profile": type(prof).__name__,
-            "centre": [float(prof.centre[0]), float(prof.centre[1])],
-            "ell_comps": [float(e1), float(e2)],
-            "axis_ratio": q, "angle_deg": pa,
-            "intensity": float(prof.intensity),
-            "effective_radius": float(prof.effective_radius),
-            "sersic_index": float(prof.sersic_index)}
+    d = {"profile": type(prof).__name__,
+         "centre": [float(prof.centre[0]), float(prof.centre[1])],
+         "ell_comps": [float(e1), float(e2)],
+         "axis_ratio": q, "angle_deg": pa,
+         "intensity": float(prof.intensity)}
+    if hasattr(prof, "effective_radius"):
+        d["effective_radius"] = float(prof.effective_radius)
+    if hasattr(prof, "sersic_index"):
+        d["sersic_index"] = float(prof.sersic_index)
+    if hasattr(prof, "sigma"):
+        d["sigma"] = float(prof.sigma)
+        d["note"] = "delta-like point source (AGN); PSF-shaped after convolution"
+    return d
+
+
+def agn_images_from(mass_tracer, beta):
+    """(position, |magnification|) for each image of a point source at beta.
+
+    Images from `al.PointSolver`; magnifications from a finite-difference
+    Jacobian of the lens equation (this autolens version has no tracer
+    magnification method).
+    """
+    solver = al.PointSolver.for_limits_and_scale(
+        y_min=-2.5, y_max=2.5, x_min=-2.5, x_max=2.5,
+        scale=0.05, pixel_scale_precision=0.001)
+    pos = np.asarray(solver.solve(tracer=mass_tracer,
+                                  source_plane_coordinate=tuple(beta)))
+    pos = pos[np.isfinite(pos).all(axis=1)]
+    eps = 1e-4
+    images = []
+    for p in pos:
+        jac = np.zeros((2, 2))
+        for ax in range(2):
+            dp = np.zeros(2)
+            dp[ax] = eps
+            gp = np.asarray(mass_tracer.deflections_yx_2d_from(
+                grid=al.Grid2DIrregular(values=np.array([p + dp]))))[0]
+            gm = np.asarray(mass_tracer.deflections_yx_2d_from(
+                grid=al.Grid2DIrregular(values=np.array([p - dp]))))[0]
+            jac[:, ax] = (gp - gm) / (2 * eps)
+        mu = 1.0 / abs(np.linalg.det(np.eye(2) - jac))
+        images.append((np.asarray(p), float(mu)))
+    return images
 
 
 def truth_from_zip(cfg):
@@ -305,6 +448,34 @@ def simulate(lens, cfg):
     source_g = tracer.galaxies[-1]
     mass, shear = lens_g.mass, getattr(lens_g, "shear", None)
 
+    # Parametric source: Sersics fitted to the pixelized reconstruction.
+    src_profs, map_info, src_quality = fit_source_parametric(
+        mesh, recon, N_SOURCE_COMPONENTS[lens])
+    src_map = map_info["src_map"]
+
+    # Point-source AGN. J0959: position and flux from the source_lp point basis,
+    # and mass + shear from source_lp too (see LENSES note); the most compact
+    # Sersic is still popped so the host fit does not double-count the spike.
+    agn = None
+    if lens in POINT_AGN:
+        i_min = int(np.argmin([float(pr.effective_radius) for pr in src_profs]))
+        src_profs.pop(i_min)
+    if cfg.get("mass_agn_zip"):
+        with tempfile.TemporaryDirectory() as tmp:
+            zipfile.ZipFile(cfg["mass_agn_zip"]).extractall(tmp)
+            lp_tracer = al.from_json(os.path.join(tmp, "files", "tracer.json"))
+        lp_lens, lp_source = lp_tracer.galaxies[0], lp_tracer.galaxies[-1]
+        mass, shear = lp_lens.mass, getattr(lp_lens, "shear", None)
+        pb = getattr(lp_source, "point", None)
+        profs = getattr(pb, "profile_list", None) or getattr(pb, "light_profile_list", None)
+        if profs:
+            agn = {
+                "centre": (float(profs[0].centre[0]), float(profs[0].centre[1])),
+                "flux": float(sum(2.0 * np.pi * float(p.intensity) * float(p.sigma) ** 2
+                                  for p in profs)),
+            }
+    agn_flux_fixed = agn is not None  # AGN flux is fitted to the knots below; only the host is rescaled
+
     # --- forward image ------------------------------------------------------
     real = al.Imaging.from_fits(
         data_path=os.path.join(real_path, "data.fits"),
@@ -312,26 +483,98 @@ def simulate(lens, cfg):
         psf_path=os.path.join(real_path, "psf.fits"), pixel_scales=ps)
     t, b = noise_params_from(real.data.native, real.noise_map.native, ps)
 
-    # Lens light: Sersics evaluated on a SUB x SUB sub-sampled full-frame grid.
+    # Full parametric tracer (Sersic lens light + SIE + shear + Sersic source).
+    def make_tracer():
+        return al.Tracer(galaxies=[
+            al.Galaxy(redshift=lens_g.redshift, mass=mass,
+                      **({**lens_kwargs, "shear": shear} if shear is not None
+                         else lens_kwargs)),
+            al.Galaxy(redshift=source_g.redshift,
+                      **{f"comp{i}": pr for i, pr in enumerate(src_profs)}),
+        ])
+
+    # Lensed-flux normalisation: a smoothed source redistributes flux across the
+    # caustic, so source-plane flux conservation does NOT conserve lensed flux
+    # (J0959's compact core gave 6.4x too much). Rescale the source intensities
+    # so the lensed flux matches the inversion's lensed image on its bright
+    # pixels -- the arcs then have the observed brightness.
+    lens_light_image = np.asarray(
+        al.Galaxy(redshift=lens_g.redshift, **lens_kwargs)
+        .image_2d_from(grid=al.Grid2DIrregular(values=slim_coords)))
+    bright = lensed_slim > 0.1 * lensed_slim.max()
+
+    mass_tracer = al.Tracer(galaxies=[
+        al.Galaxy(redshift=lens_g.redshift, mass=mass,
+                  **({"shear": shear} if shear is not None else {})),
+        al.Galaxy(redshift=source_g.redshift),
+    ])
+    agn_image_list = agn_images_from(mass_tracer, agn["centre"]) if agn else []
+
+    def add_agn(values, coords, pixel_area, flux):
+        for p, mu in agn_image_list:
+            i = int(np.argmin(np.sum((coords - p) ** 2, axis=1)))
+            values[i] += mu * flux / pixel_area
+        return values
+
+    lensed_host = np.asarray(make_tracer().image_2d_from(
+        grid=al.Grid2DIrregular(values=slim_coords))) - lens_light_image
+    lensed_agn = np.zeros_like(lensed_host)
+    if agn:
+        # AGN flux measured from the REAL data: 3x3 aperture at each model image
+        # position, lens light subtracted, per-image F = knot_flux / mu, averaged.
+        # (The source_lp point-basis flux would make the knots ~10x brighter than
+        # observed -- that fit let the point basis soak up ring flux.)
+        lens_sersic = al.Galaxy(redshift=lens_g.redshift, **lens_kwargs)
+        sub_tmp = sub_grid_coords(real.shape_native, ps)
+        lens_full = np.asarray(lens_sersic.image_2d_from(
+            grid=al.Grid2DIrregular(values=sub_tmp.reshape(-1, 2))))
+        lens_full = lens_full.reshape(-1, SUB * SUB).mean(axis=1).reshape(real.shape_native)
+        ring = real.data.native - lens_full
+        nyf, nxf = real.shape_native
+        f_est = []
+        for p, mu in agn_image_list:
+            iy = int(np.rint((nyf - 1) / 2.0 - p[0] / ps))
+            ix = int(np.rint(p[1] / ps + (nxf - 1) / 2.0))
+            ap = ring[iy - 1:iy + 2, ix - 1:ix + 2]
+            knot = max(0.0, float(ap.sum()) * ps ** 2)
+            f_est.append(knot / mu)
+        agn["flux"] = float(np.mean(f_est)) if f_est else 0.0
+        lensed_agn = add_agn(lensed_agn, slim_coords, ps ** 2, agn["flux"])
+    if agn_flux_fixed:
+        # AGN fixed at its fitted flux; the host is rescaled to the remaining
+        # brightness of the inversion's lensed image.
+        rescale = float((lensed_slim[bright].sum() - lensed_agn[bright].sum())
+                        / lensed_host[bright].sum())
+        for pr in src_profs:
+            pr.intensity *= rescale
+    else:
+        rescale = float(lensed_slim[bright].sum()
+                        / (lensed_host + lensed_agn)[bright].sum())
+        for pr in src_profs:
+            pr.intensity *= rescale
+        if agn:
+            agn["flux"] *= rescale
+    src_quality["lensed_flux_rescale"] = rescale
+
+    true_tracer = make_tracer()
     sub = sub_grid_coords(real.shape_native, ps)          # (n_pix, SUB^2, 2)
     grid_irreg = al.Grid2DIrregular(values=sub.reshape(-1, 2))
-    lens_sersic = al.Galaxy(redshift=lens_g.redshift, **lens_kwargs)
-    img_lens = np.asarray(lens_sersic.image_2d_from(grid=grid_irreg))
-    img_lens = img_lens.reshape(-1, SUB * SUB).mean(axis=1)
+    img = np.asarray(true_tracer.image_2d_from(grid=grid_irreg))
+    if agn:
+        img = add_agn(img, sub.reshape(-1, 2), (ps / SUB) ** 2, agn["flux"])
+    img = img.reshape(-1, SUB * SUB).mean(axis=1)
+    image = al.Array2D.no_mask(values=img.reshape(real.shape_native), pixel_scales=ps)
 
-    # Lensed source: the inversion's own unconvolved lensed image (validated to
-    # reproduce the fit's convolved model image to machine precision), embedded
-    # into the full frame by its (y, x) coordinates. Zero outside the mask --
-    # the ring is well inside it, and the PSF convolution below blurs outward.
-    nyf, nxf = real.shape_native
-    img_src = np.zeros(nyf * nxf)
-    iy = np.rint((nyf - 1) / 2.0 - slim_coords[:, 0] / ps).astype(int)
-    ix = np.rint(slim_coords[:, 1] / ps + (nxf - 1) / 2.0).astype(int)
-    ok = (iy >= 0) & (iy < nyf) & (ix >= 0) & (ix < nxf)
-    img_src[iy[ok] * nxf + ix[ok]] = lensed_slim[ok]
-
-    image = al.Array2D.no_mask(values=(img_lens + img_src).reshape(real.shape_native),
-                               pixel_scales=ps)
+    # Lensed-image consistency after rescaling.
+    lensed_par = np.asarray(true_tracer.image_2d_from(
+        grid=al.Grid2DIrregular(values=slim_coords))) - lens_light_image
+    if agn:
+        lensed_par = add_agn(lensed_par, slim_coords, ps ** 2, agn["flux"])
+    src_quality["lensed_frac_rms_bright"] = float(
+        np.sqrt(np.mean((lensed_par[bright] - lensed_slim[bright]) ** 2))
+        / lensed_slim[bright].mean())
+    src_quality["lensed_flux_ratio"] = float(
+        lensed_par[bright].sum() / lensed_slim[bright].sum())
 
     simulator = al.SimulatorImaging(
         exposure_time=t, background_sky_level=b, psf=real.psf,
@@ -355,52 +598,63 @@ def simulate(lens, cfg):
                  np.sqrt(dataset.noise_map.native ** 2 + var_psf).astype(np.float32),
                  overwrite=True)
 
-    # --- source-plane map on a regular grid --------------------------------
-    interp = LinearNDInterpolator(mesh, recon, fill_value=0.0)
-    pad = 0.05
-    y0, y1 = mesh[:, 0].min() - pad, mesh[:, 0].max() + pad
-    x0, x1 = mesh[:, 1].min() - pad, mesh[:, 1].max() + pad
-    nys = int((y1 - y0) / SRC_GRID_SCALE) + 1
-    nxs = int((x1 - x0) / SRC_GRID_SCALE) + 1
-    sy, sx = np.meshgrid(np.linspace(y0, y1, nys), np.linspace(x0, x1, nxs), indexing="ij")
-    src_map = interp(sy, sx)
+    # --- source-plane reference maps ---------------------------------------
     fits.writeto(os.path.join(out_lens, "source_plane_reconstruction.fits"),
                  src_map.astype(np.float32), overwrite=True)
+    sy, sx = map_info["sy"], map_info["sx"]
+    src_model_map = np.zeros_like(src_map)
+    map_grid = al.Grid2DIrregular(
+        values=np.column_stack([sy.ravel(), sx.ravel()]))
+    for pr in src_profs:
+        src_model_map += np.asarray(pr.image_2d_from(grid=map_grid)).reshape(src_map.shape)
+    if agn:
+        iy = int(np.argmin(np.abs(sy[:, 0] - agn["centre"][0])))
+        ix = int(np.argmin(np.abs(sx[0, :] - agn["centre"][1])))
+        src_model_map[iy, ix] += agn["flux"] / SRC_GRID_SCALE ** 2
+    fits.writeto(os.path.join(out_lens, "source_plane_model.fits"),
+                 src_model_map.astype(np.float32), overwrite=True)
 
-    # --- ground-truth tracer (source galaxy empty; its truth is the map) ---
-    true_lens = al.Galaxy(redshift=lens_g.redshift, mass=mass,
-                          **({**lens_kwargs, "shear": shear} if shear is not None
-                             else lens_kwargs))
-    true_tracer = al.Tracer(galaxies=[true_lens, al.Galaxy(redshift=source_g.redshift)])
+    # --- ground-truth tracer (fully parametric) ----------------------------
     al.output_to_json(obj=true_tracer, file_path=os.path.join(out_lens, "tracer.json"))
 
     q_m, pa_m = ell_to_q_pa(*mass.ell_comps)
     params = {
         "lens": lens, "band": band,
-        "note": "Ground truth of this mock. Lens light is Sersics fitted to the MGE "
-                "bases of the source_pix[2] max-likelihood tracer (flux-conserving); "
-                "mass and shear are that fit's values; the source is the fit's "
-                "pixelized reconstruction (source_plane_reconstruction.fits).",
+        "note": "Ground truth of this mock -- fully parametric. Lens light is Sersics "
+                "fitted to the MGE bases of the source_pix[2] max-likelihood tracer "
+                "(flux-conserving); mass and shear are that fit's values; the source "
+                "is Sersics fitted to the fit's pixelized reconstruction "
+                "(source_plane_reconstruction.fits is the reconstruction, "
+                "source_plane_model.fits is the parametric truth).",
         "redshifts": {"lens": float(lens_g.redshift), "source": float(source_g.redshift)},
         "light": light_params,
         "mass": {"profile": f"{type(mass).__name__} (SIE, slope={getattr(mass, 'slope', 2.0)})",
                  "centre": [float(mass.centre[0]), float(mass.centre[1])],
                  "ell_comps": [float(mass.ell_comps[0]), float(mass.ell_comps[1])],
                  "axis_ratio": q_m, "angle_deg": pa_m,
-                 "einstein_radius": float(mass.einstein_radius)},
+                 "einstein_radius": float(mass.einstein_radius),
+                 "from_zip": cfg.get("mass_agn_zip", cfg["source_pix_zip"])},
         "source": {
-            "type": "pixelized reconstruction (linear interpolation of the mesh values)",
+            "type": "parametric (Sersics fitted to the pixelized reconstruction)",
             "source_pix_zip": cfg["source_pix_zip"],
-            "map_file": "source_plane_reconstruction.fits",
-            "map_pixel_scale": SRC_GRID_SCALE,
-            "map_origin_yx": [float(y0), float(x0)],
-            "n_mesh_pixels": int(len(recon)),
-            "total_flux": float(recon.sum()),
-            "centroid": [float(np.average(mesh[:, 0], weights=recon)),
-                         float(np.average(mesh[:, 1], weights=recon))],
+            "components": {f"comp{i}": sersic_params_json(pr)
+                           for i, pr in enumerate(src_profs)},
+            "fit_quality": src_quality,
+            "reference_map_file": "source_plane_reconstruction.fits",
+            "reference_map_pixel_scale": SRC_GRID_SCALE,
+            "reference_map_origin_yx": [float(map_info["y0"]), float(map_info["x0"])],
         },
         "fit_quality": fit_quality,
     }
+    if agn:
+        params["source"]["point_agn"] = {
+            "type": "point source (AGN); flux x |magnification| is added to the "
+                    "image pixel containing each solved image",
+            "centre": [float(agn["centre"][0]), float(agn["centre"][1])],
+            "flux": agn["flux"],
+            "images": [{"position": [float(p[0]), float(p[1])],
+                        "magnification": mu} for p, mu in agn_image_list],
+        }
     if shear is not None:
         g1, g2 = float(shear.gamma_1), float(shear.gamma_2)
         params["external_shear"] = {"gamma_1": g1, "gamma_2": g2,
@@ -417,8 +671,10 @@ def simulate(lens, cfg):
         "mock": True,
         "made": "2026-11-14",
         "script": "data_prep/simulate_mock_lenses.py",
-        "ground_truth": "model_parameters.json + tracer.json (lens Sersics, SIE, shear) "
-                        "+ source_plane_reconstruction.fits (source map)",
+        "ground_truth": "model_parameters.json + tracer.json (fully parametric: lens "
+                        "Sersics, SIE, shear, source Sersics); "
+                        "source_plane_model.fits is the parametric source truth, "
+                        "source_plane_reconstruction.fits the reconstruction it fits",
         "source_pix_zip": cfg["source_pix_zip"],
         "real_dataset": os.path.join(real_path, "data.fits"),
         "simulator": {
@@ -427,8 +683,7 @@ def simulate(lens, cfg):
             "noise_model": "sigma^2 = (I + b) / t, Poisson on (I + b) * t counts",
             "noise_seed": cfg["seed"],
             "psf": "real psf.fits kernel, real-space convolution",
-            "forward_model": f"{SUB}x{SUB} sub-sampled ray-tracing; source map interpolated "
-                             "at traced positions",
+            "forward_model": f"full parametric tracer on a {SUB}x{SUB} sub-sampled grid",
             "note": "t and b are effective values fitted to the real noise map; "
                     "the real map's 1/f correction is not reproduced.",
         },
@@ -442,13 +697,15 @@ def simulate(lens, cfg):
     json.dump(mock_meta, open(os.path.join(out_lens, "mock.json"), "w"), indent=4)
 
     # --- quick-look ---------------------------------------------------------
-    fig, axes = plt.subplots(1, 5, figsize=(27, 5.5))
+    fig, axes = plt.subplots(1, 6, figsize=(32, 5.5))
     mock_img = dataset.data.native
     vmax = np.percentile(mock_img[mock_img > 0], 99.5)
-    panels = [(mock_img, "mock data", None), (dataset.noise_map.native, "mock noise", None),
-              (mock_img / dataset.noise_map.native, "mock S/N", None),
-              (real.data.native, "real data", None), (src_map, "source map (truth)", None)]
-    for ax, (arr, title, _) in zip(axes, panels):
+    panels = [(mock_img, "mock data"), (dataset.noise_map.native, "mock noise"),
+              (mock_img / dataset.noise_map.native, "mock S/N"),
+              (real.data.native, "real data"),
+              (src_map, "source reconstruction"),
+              (src_model_map, "source truth (parametric)")]
+    for ax, (arr, title) in zip(axes, panels):
         im = ax.imshow(arr, origin="lower",
                        vmax=vmax if title in ("mock data", "real data") else None)
         ax.set_title(f"{lens} {band}\n{title}", fontsize=9)
@@ -463,6 +720,13 @@ def simulate(lens, cfg):
           f"peak S/N={np.max(mock_img / dataset.noise_map.native):.0f} -> {out_band}")
     for label, qq in fit_quality.items():
         print(f"   {label}: log_rms={qq['log_rms']:.3f}")
+    print(f"   source: {N_SOURCE_COMPONENTS[lens]} Sersics, "
+          f"lensed frac rms={src_quality['lensed_frac_rms_bright']:.3f}, "
+          f"lensed flux ratio={src_quality['lensed_flux_ratio']:.3f}")
+    if agn:
+        print(f"   AGN: point source, flux {agn['flux']:.3g}, "
+              f"{len(agn_image_list)} images, mu: "
+              + " ".join(f"{m:.1f}" for _, m in agn_image_list))
 
 
 for lens, cfg in LENSES.items():
