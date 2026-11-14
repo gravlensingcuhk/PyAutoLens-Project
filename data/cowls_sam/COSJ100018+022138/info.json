@@ -1,0 +1,22 @@
+{
+    "code": "COSJ100018+022138",
+    "ra": "150.07693452226474",
+    "dec": "2.3607571280031108",
+    "score": "M25",
+    "primary_waveband": "F115W",
+    "mask_radius": 1.5,
+    "mask_radius_small": 1.5,
+    "visual_1_type": "M25",
+    "data_field": "B7",
+    "catalogue_number": "210140",
+    "lens_spec_z": 1.53,
+    "lens_spec_z_source": "https://arxiv.org/abs/1309.2826",
+    "lens_cw_photo_z_med": 1.6894,
+    "lens_cw_photo_z_L68": 1.68,
+    "lens_cw_photo_U_L68": 1.6973,
+    "source_spec_z": 3.147,
+    "source_spec_z_ref": "https://arxiv.org/abs/1309.2826",
+    "lens_cw_stmass_med": 10.79433,
+    "lens_cw_stmass_L68": 10.75,
+    "lens_cw_stmass_U68": 10.83835
+}

@@ -1,0 +1,89 @@
+{
+    "lens": "COSJ095921+020638",
+    "band": "F150W",
+    "note": "Ground truth of this mock. Lens light is Sersics fitted to the MGE bases of the source_pix[2] max-likelihood tracer (flux-conserving); mass and shear are that fit's values; the source is the fit's pixelized reconstruction (source_plane_reconstruction.fits).",
+    "redshifts": {
+        "lens": 0.551,
+        "source": 3.35
+    },
+    "light": {
+        "lens_bulge": {
+            "profile": "Sersic",
+            "centre": [
+                -0.012788263935543663,
+                0.0025399632349514855
+            ],
+            "ell_comps": [
+                0.06889529249868333,
+                -0.06447938203605907
+            ],
+            "axis_ratio": 0.8275491464483751,
+            "angle_deg": -21.55184158068037,
+            "intensity": 0.2769782711412476,
+            "effective_radius": 0.6866945785702763,
+            "sersic_index": 7.999999999999766
+        },
+        "lens_nucleus": {
+            "profile": "SersicSph",
+            "centre": [
+                -0.013001866136185924,
+                0.0024925405449260298
+            ],
+            "ell_comps": [
+                0.0,
+                0.0
+            ],
+            "axis_ratio": 1.0,
+            "angle_deg": 0.0,
+            "intensity": 6.947537020730299,
+            "effective_radius": 0.011791403805147904,
+            "sersic_index": 0.7608795292912204
+        }
+    },
+    "mass": {
+        "profile": "Isothermal (SIE, slope=2.0)",
+        "centre": [
+            0.05310228990275148,
+            0.018956234368596572
+        ],
+        "ell_comps": [
+            0.3666416944099377,
+            9.463241064433433e-05
+        ],
+        "axis_ratio": 0.4634413616299808,
+        "angle_deg": 0.007394191246296053,
+        "einstein_radius": 0.7593981596849576
+    },
+    "source": {
+        "type": "pixelized reconstruction (linear interpolation of the mesh values)",
+        "source_pix_zip": "output_sam_v4/model_setup_free_source/COSJ095921+020638/source_pix[2]/ff53a53af2fd522c9bdc23ae57706a1c.zip",
+        "map_file": "source_plane_reconstruction.fits",
+        "map_pixel_scale": 0.0025,
+        "map_origin_yx": [
+            -1.4593990848825695,
+            -1.6286517739197108
+        ],
+        "n_mesh_pixels": 3600,
+        "total_flux": 394.50212384997747,
+        "centroid": [
+            -0.11436202492478212,
+            -0.005297378781410338
+        ]
+    },
+    "fit_quality": {
+        "lens_bulge": {
+            "log_rms": 0.039144598090480015,
+            "flux_conserved": true
+        },
+        "lens_nucleus": {
+            "log_rms": 0.1770961425490081,
+            "flux_conserved": true
+        }
+    },
+    "external_shear": {
+        "gamma_1": -0.03108719828394698,
+        "gamma_2": 0.09988933749015155,
+        "gamma": 0.10461497809284688,
+        "angle_deg": 53.64349877193791
+    }
+}

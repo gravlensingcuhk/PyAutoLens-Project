@@ -1,0 +1,22 @@
+{
+    "code": "COSJ100024+021749",
+    "ra": "150.10008884771986",
+    "dec": "2.2971327568143396",
+    "score": "M25",
+    "primary_waveband": "F444W",
+    "mask_radius": 2.2,
+    "mask_radius_small": 2.2,
+    "visual_1_type": "M25",
+    "data_field": "B8",
+    "catalogue_number": "256338",
+    "lens_spec_z": 0.3616999983787536,
+    "lens_spec_z_source": "COSMOS2015",
+    "lens_cw_photo_z_med": 0.36,
+    "lens_cw_photo_z_L68": 0.3524,
+    "lens_cw_photo_U_L68": 0.37,
+    "source_spec_z": 2.625,
+    "source_spec_z_ref": "https://ui.adsabs.harvard.edu/abs/2024A%26A...690L..16J/abstract",
+    "lens_cw_stmass_med": 10.50001,
+    "lens_cw_stmass_L68": 10.46599,
+    "lens_cw_stmass_U68": 10.55
+}

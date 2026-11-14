@@ -1,0 +1,13 @@
+{
+    "code": "COSJ095921+020638",
+    "ra": "149.840689409",
+    "dec": "2.110652506",
+    "sample": "cowls-mahler",
+    "mask_radius": 2.2,
+    "theta_e": 0.71,
+    "lens_spec_z": 0.551,
+    "lens_spec_z_source": "VLT/FORS1 Anguita+09; zCOSMOS 0.5518 Lilly+07; DESI DR2 0.5509 Ratajczak+25 (JWST_lenses_data_reduction info/samples/lens_samples.json)",
+    "source_spec_z": 3.35,
+    "source_spec_z_ref": "XSHOOTER, Sonnenfeld+13 SL2S IV",
+    "mock": true
+}
