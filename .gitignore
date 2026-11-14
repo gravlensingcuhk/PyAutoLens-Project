@@ -23,7 +23,12 @@ output_sam_v3/
 output_sam_v4/
 output_sam_v4_f277/
 output_sam_v5/
+output_sam_v6/
+output_sam_mb*/
 output_test_as*/
+# Generated figures are local-only (2026-11-14): the remade fit panels and one-off plots
+figures/fit_png_caustic_zoom/
+figures/*.png
 output_v2/
 output_v3/
 output_wrongps/
