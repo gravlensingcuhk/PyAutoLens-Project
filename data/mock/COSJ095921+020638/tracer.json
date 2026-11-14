@@ -2,6 +2,15 @@
     "type": "instance",
     "class_path": "autolens.lens.tracer.Tracer",
     "arguments": {
+        "cosmology": {
+            "type": "instance",
+            "class_path": "autogalaxy.cosmology.model.Planck15",
+            "arguments": {}
+        },
+        "fields": {
+            "type": "list",
+            "values": []
+        },
         "galaxies": {
             "type": "list",
             "values": [
@@ -9,33 +18,35 @@
                     "type": "instance",
                     "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
                     "arguments": {
-                        "label": null,
                         "redshift": 0.551,
+                        "label": null,
                         "mass": {
                             "type": "instance",
                             "class_path": "autogalaxy.profiles.mass.total.isothermal.Isothermal",
                             "arguments": {
-                                "einstein_radius": 0.7593981596849576,
-                                "ell_comps": {
-                                    "type": "tuple",
-                                    "values": [
-                                        0.3666416944099377,
-                                        9.463241064433433e-05
-                                    ]
-                                },
                                 "centre": {
                                     "type": "tuple",
                                     "values": [
-                                        0.05310228990275148,
-                                        0.018956234368596572
+                                        0.012846042956002394,
+                                        0.0056364077371678575
                                     ]
-                                }
+                                },
+                                "ell_comps": {
+                                    "type": "tuple",
+                                    "values": [
+                                        0.34246794147807275,
+                                        0.05949021428430392
+                                    ]
+                                },
+                                "einstein_radius": 0.7186028292785303
                             }
                         },
                         "bulge": {
                             "type": "instance",
                             "class_path": "autogalaxy.profiles.light.standard.sersic.Sersic",
                             "arguments": {
+                                "sersic_index": 7.999999999999766,
+                                "intensity": 0.2769782711412476,
                                 "effective_radius": 0.6866945785702763,
                                 "centre": {
                                     "type": "tuple",
@@ -44,8 +55,6 @@
                                         0.0025399632349514855
                                     ]
                                 },
-                                "intensity": 0.2769782711412476,
-                                "sersic_index": 7.999999999999766,
                                 "ell_comps": {
                                     "type": "tuple",
                                     "values": [
@@ -59,24 +68,24 @@
                             "type": "instance",
                             "class_path": "autogalaxy.profiles.light.standard.sersic.SersicSph",
                             "arguments": {
-                                "intensity": 6.947537020730299,
-                                "sersic_index": 0.7608795292912204,
-                                "effective_radius": 0.011791403805147904,
                                 "centre": {
                                     "type": "tuple",
                                     "values": [
                                         -0.013001866136185924,
                                         0.0024925405449260298
                                     ]
-                                }
+                                },
+                                "intensity": 6.947537020730299,
+                                "sersic_index": 0.7608795292912204,
+                                "effective_radius": 0.011791403805147904
                             }
                         },
                         "shear": {
                             "type": "instance",
                             "class_path": "autogalaxy.profiles.mass.sheets.external_shear.ExternalShear",
                             "arguments": {
-                                "gamma_1": -0.03108719828394698,
-                                "gamma_2": 0.09988933749015155
+                                "gamma_1": 0.007068130087405248,
+                                "gamma_2": 0.06300759283172581
                             }
                         }
                     }
@@ -85,20 +94,57 @@
                     "type": "instance",
                     "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
                     "arguments": {
+                        "redshift": 3.35,
                         "label": null,
-                        "redshift": 3.35
+                        "comp0": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.light.standard.sersic.Sersic",
+                            "arguments": {
+                                "sersic_index": 0.5000000000000001,
+                                "intensity": 0.1536229338269815,
+                                "effective_radius": 0.13323735866723263,
+                                "centre": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.06575201701952671,
+                                        -0.12784157151891828
+                                    ]
+                                },
+                                "ell_comps": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.049698409088803394,
+                                        0.2440839432466177
+                                    ]
+                                }
+                            }
+                        },
+                        "comp1": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.light.standard.sersic.Sersic",
+                            "arguments": {
+                                "sersic_index": 1.5093530831882012,
+                                "intensity": 0.02506341079572611,
+                                "effective_radius": 0.6394975627325101,
+                                "centre": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.15293225573009833,
+                                        -0.11850673845030416
+                                    ]
+                                },
+                                "ell_comps": {
+                                    "type": "tuple",
+                                    "values": [
+                                        0.07369017543371413,
+                                        -0.22750066227588564
+                                    ]
+                                }
+                            }
+                        }
                     }
                 }
             ]
-        },
-        "fields": {
-            "type": "list",
-            "values": []
-        },
-        "cosmology": {
-            "type": "instance",
-            "class_path": "autogalaxy.cosmology.model.Planck15",
-            "arguments": {}
         }
     }
 }
