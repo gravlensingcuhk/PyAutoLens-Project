@@ -1,0 +1,22 @@
+{
+    "mock": true,
+    "made": "2026-11-14",
+    "script": "data_prep/simulate_mock_lenses.py",
+    "ground_truth": "model_parameters.json + tracer.json (lens Sersics, SIE, shear) + source_plane_reconstruction.fits (source map)",
+    "source_pix_zip": "output_sam_v4/model_setup_free_source/COSJ095921+020638/source_pix[2]/ff53a53af2fd522c9bdc23ae57706a1c.zip",
+    "real_dataset": "data/cowls_sam/COSJ095921+020638/F150W/data.fits",
+    "simulator": {
+        "exposure_time_effective": 225.20320502734148,
+        "background_sky_level_effective": 0.5183931221189229,
+        "noise_model": "sigma^2 = (I + b) / t, Poisson on (I + b) * t counts",
+        "noise_seed": 103,
+        "psf": "real psf.fits kernel, real-space convolution",
+        "forward_model": "4x4 sub-sampled ray-tracing; source map interpolated at traced positions",
+        "note": "t and b are effective values fitted to the real noise map; the real map's 1/f correction is not reproduced."
+    },
+    "caveats": [
+        "positions.json and info.json are copied from the real lens.",
+        "mask_extra_galaxies.fits is all-clear (no contaminants are simulated).",
+        "noise_map_psffloor.fits uses the real psf_err.fits; the mock PSF is exact, so the floor is for layout parity only."
+    ]
+}

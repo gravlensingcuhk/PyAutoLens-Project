@@ -1,0 +1,104 @@
+{
+    "type": "instance",
+    "class_path": "autolens.lens.tracer.Tracer",
+    "arguments": {
+        "galaxies": {
+            "type": "list",
+            "values": [
+                {
+                    "type": "instance",
+                    "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                    "arguments": {
+                        "label": null,
+                        "redshift": 1.53,
+                        "mass": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.mass.total.isothermal.Isothermal",
+                            "arguments": {
+                                "einstein_radius": 0.3692182800831217,
+                                "ell_comps": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.04621531218345598,
+                                        0.1552706288870471
+                                    ]
+                                },
+                                "centre": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.04309805051312712,
+                                        -0.04478458997934677
+                                    ]
+                                }
+                            }
+                        },
+                        "bulge": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.light.standard.sersic.Sersic",
+                            "arguments": {
+                                "effective_radius": 0.10125180168940094,
+                                "centre": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.005280708280922428,
+                                        -0.01947635628205083
+                                    ]
+                                },
+                                "intensity": 1.056841722231832,
+                                "sersic_index": 0.7501510482880762,
+                                "ell_comps": {
+                                    "type": "tuple",
+                                    "values": [
+                                        0.28917520018765525,
+                                        -0.24270381159653795
+                                    ]
+                                }
+                            }
+                        },
+                        "point": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.light.standard.sersic.SersicSph",
+                            "arguments": {
+                                "intensity": 1.3719991071645314,
+                                "sersic_index": 0.5001414751544986,
+                                "effective_radius": 0.02943745747268818,
+                                "centre": {
+                                    "type": "tuple",
+                                    "values": [
+                                        -0.005281085726804563,
+                                        -0.019474619614770268
+                                    ]
+                                }
+                            }
+                        },
+                        "shear": {
+                            "type": "instance",
+                            "class_path": "autogalaxy.profiles.mass.sheets.external_shear.ExternalShear",
+                            "arguments": {
+                                "gamma_1": -0.004298908154132115,
+                                "gamma_2": 0.07083291332658066
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "instance",
+                    "class_path": "autogalaxy.galaxy.galaxy.Galaxy",
+                    "arguments": {
+                        "label": null,
+                        "redshift": 3.147
+                    }
+                }
+            ]
+        },
+        "fields": {
+            "type": "list",
+            "values": []
+        },
+        "cosmology": {
+            "type": "instance",
+            "class_path": "autogalaxy.cosmology.model.Planck15",
+            "arguments": {}
+        }
+    }
+}
