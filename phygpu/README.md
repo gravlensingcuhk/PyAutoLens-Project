@@ -33,6 +33,19 @@ sbatch -J hilb_a --export=ALL,PYAUTOLENS_MESH=hilbert phygpu/multi_run2 COSJ1000
 sbatch -J hilb_c --export=ALL,PYAUTOLENS_MESH=hilbert,PYAUTOLENS_REGULARIZATION=constant_split phygpu/multi_run2 COSJ100018+022138 COSJ100024+021749
 ```
 
+**Packing (2026-11-14).** Never leave an exclusive node with idle GPUs: a single-lens
+`multi_run2` job on a b node idles 3 of 4 GPUs. Use:
+
+- `phygpu/multi_pack` — whole node (`--exclusive`, `--gres=gpu:N` = number of slots), one
+  runner per GPU, each slot `<lens>[:<n_batch>][@VAR=val,...]` carrying its own env so
+  chains with different mesh/regularization/noise/output dirs can share a node. It
+  refuses to start with fewer slots than GPUs unless `PYAUTOLENS_ALLOW_IDLE_GPUS=1`.
+  Two slots must not share an unfinished search (same output dir + identifier) or the
+  lock-waiting runner idles its GPU and phygpu kills the job; different lenses,
+  different output dirs, or chains past their shared source_lp are safe.
+- `phygpu/run_one` — non-exclusive single GPU (`--gres=gpu:1`, 16 CPUs) for odd singles
+  that cannot start together (staggered `--begin` starts, `afterany` followers).
+
 Each lens runs at its own Nautilus batch size: `cowls_n_batch_for` in `activate.sh` (J18 6, J24 12
 with the 60 x 60 mesh), an exported `PYAUTOLENS_N_BATCH` for every lens of a job, or `<lens>:<n>`
 for one lens. A runner that runs out of GPU memory restarts itself at `floor(0.8 n_batch)`. Its

@@ -1,0 +1,90 @@
+#!/bin/bash -l
+#
+# Whole node, one runner per GPU, with per-slot environment (2026-11-14).
+#
+#   sbatch -J pack0959 -p b --gres=gpu:4 phygpu/multi_pack \
+#       'COSJ095921+020638@PYAUTOLENS_NOISE=psffloor,PYAUTOLENS_OUTPUT_DIR=output_sam_v5' \
+#       'COSJ095921+020638@PYAUTOLENS_MESH=hilbert,PYAUTOLENS_NOISE=psffloor,PYAUTOLENS_OUTPUT_DIR=output_sam_v5' \
+#       'COSJ095921+020638@PYAUTOLENS_OUTPUT_DIR=output_sam_v4' \
+#       'COSJ095921+020638@PYAUTOLENS_MESH=hilbert,PYAUTOLENS_REGULARIZATION=adapt_split_power,PYAUTOLENS_NOISE=psfcoh,PYAUTOLENS_OUTPUT_DIR=output_sam_v6'
+#
+# Each slot is <lens>[:<n_batch>][@VAR=val,VAR=val,...]; the @-part is exported for that
+# runner only, on top of whatever sbatch --export set job-wide. This is what lets chains
+# with different mesh / regularization / noise / output dirs share one node: multi_run2
+# can only vary the lens, so such chains used to take a whole node each and idle the
+# other GPUs (16 of 20 held GPUs idle on 2026-11-14).
+#
+# The slot count must equal the number of allocated GPUs, so --exclusive never leaves a
+# GPU idle (export PYAUTOLENS_ALLOW_IDLE_GPUS=1 to waive). Match --gres=gpu:N to the
+# node's GPU count: gpu:4 for b (4090), gpu:2 for a.
+#
+# Same-node safety: two slots must not share an UNFINISHED search (same output dir and
+# same identifier), or one waits on the search lock at 0% GPU and phygpu auto-kills the
+# job. Different lenses, different PYAUTOLENS_OUTPUT_DIRs, or chains already past their
+# shared source_lp are all safe. Per-slot logs are <lens>.<slot>.<jobid>.log.
+#
+# 48 hours is the partition maximum. Every search resumes from its output folder.
+
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --exclusive
+#SBATCH --mem=0
+#SBATCH -p b
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=closest
+#SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/mp_%x.%A.out
+#SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/mp_%x.%A.err
+#SBATCH -t 48:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
+
+IFS=',' read -ra GPUS <<< "$CUDA_VISIBLE_DEVICES"
+N_SLOTS=${#GPUS[@]}
+
+if [ $# -ne $N_SLOTS ] && [ "$PYAUTOLENS_ALLOW_IDLE_GPUS" != "1" ]; then
+    echo "multi_pack: $# slot args but $N_SLOTS GPUs ($CUDA_VISIBLE_DEVICES)."
+    echo "Refusing to hold idle GPUs behind --exclusive; give one slot per GPU"
+    echo "or export PYAUTOLENS_ALLOW_IDLE_GPUS=1."
+    exit 1
+fi
+
+# Read by activate.sh in place of SLURM_CPUS_PER_TASK.
+export COWLS_THREADS=$(( ${SLURM_CPUS_ON_NODE:-${#GPUS[@]}} / ${#GPUS[@]} ))
+
+source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
+
+nvidia-smi
+cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
+echo "node $SLURMD_NODENAME: $N_SLOTS GPUs, ${SLURM_CPUS_ON_NODE} CPUs, $COWLS_THREADS threads per runner"
+
+cd "$PROJECT_ROOT"
+ARGS=("$@")
+PIDS=()
+for i in "${!ARGS[@]}"; do
+    SPEC="${ARGS[$i]}"
+    LENS_NB="${SPEC%%@*}"
+    SLOT_ENV="${SPEC#*@}"
+    [ "$SLOT_ENV" = "$SPEC" ] && SLOT_ENV=""
+    LENS=${LENS_NB%%:*}
+    N_BATCH=$(cowls_n_batch_for "$LENS_NB")
+    RUNNER=$(cowls_runner_for "$LENS") || exit 1
+    ENV_PAIRS=()
+    if [ -n "$SLOT_ENV" ]; then
+        IFS=',' read -ra KVS <<< "$SLOT_ENV"
+        ENV_PAIRS=("${KVS[@]}")
+    fi
+    echo "GPU ${GPUS[$i]} slot $i: $LENS -> $(basename "$RUNNER"), n_batch $N_BATCH, env [$SLOT_ENV]"
+    env CUDA_VISIBLE_DEVICES="${GPUS[$i]}" PYAUTOLENS_N_BATCH=$N_BATCH "${ENV_PAIRS[@]}" \
+        python3 -u "$RUNNER" "${LENS%_mb}" \
+        > "$PROJECT_ROOT/phygpu/outputs/$LENS.$i.${SLURM_JOB_ID}.log" 2>&1 &
+    PIDS+=($!)
+done
+
+# The runners only: a bare `wait` would also wait on the GPU logger. Any runner failing
+# fails the job, so SLURM does not report a crashed run as COMPLETED.
+RC=0
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || RC=1
+done
+cowls_gpu_log_stop
+exit $RC

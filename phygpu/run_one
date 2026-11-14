@@ -1,0 +1,48 @@
+#!/bin/bash -l
+#
+# One lens on one GPU, sharing the node with other jobs (non-exclusive). For odd singles
+# that cannot be packed into a whole node with multi_pack (e.g. chains that must start at
+# different times, or afterany followers): a single --exclusive job would idle the node's
+# other GPUs. Use multi_pack for anything that can start together.
+#
+#   sbatch -J j0959_rtu_v6 --begin=now+3hour --export=ALL,PYAUTOLENS_NOISE=psfcoh,... \
+#       phygpu/run_one COSJ095921+020638
+#
+# n_batch: cowls_n_batch_for in activate.sh, an exported PYAUTOLENS_N_BATCH, or `:<n>`.
+# 16 CPUs (a b node's per-GPU share; a/c give more per GPU, SLURM tops up). Shares the
+# node: keep the footprint to the allocated CPUs (activate.sh pins thread counts).
+#
+# 48 hours is the partition maximum. Every search resumes from its output folder.
+
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH -p a,b,c
+#SBATCH --exclude=a8,a9
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=closest
+#SBATCH --mem-per-gpu=47G
+#SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/r1_%x.%A.out
+#SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/r1_%x.%A.err
+#SBATCH -t 48:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
+
+[ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_one <lens>[:<n_batch>]"; exit 1; }
+
+source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
+
+LENS=${1%%:*}
+export PYAUTOLENS_N_BATCH=$(cowls_n_batch_for "$1")
+RUNNER=$(cowls_runner_for "$LENS") || exit 1
+echo "node $SLURMD_NODENAME: $LENS -> $(basename "$RUNNER"), n_batch $PYAUTOLENS_N_BATCH (shared node)"
+
+nvidia-smi
+cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"
+
+cd "$PROJECT_ROOT"
+python3 -u "$RUNNER" "${LENS%_mb}" \
+    > "$PROJECT_ROOT/phygpu/outputs/$LENS.${SLURM_JOB_ID}.log" 2>&1
+RC=$?
+cowls_gpu_log_stop
+exit $RC
