@@ -54,14 +54,16 @@ PowerLaw:
       lower: -1.0
       upper: 1.0
   slope:
-    type: Uniform
+    type: TruncatedGaussian
+    mean: 2.0
+    sigma: 0.3
     lower_limit: 1.5
     upper_limit: 3.0
     width_modifier:
       type: Absolute
       value: 0.2
     limits:
-      lower: 1.0
+      lower: 1.5
       upper: 3.0
 PowerLawSph:
   centre_0:
@@ -95,12 +97,14 @@ PowerLawSph:
       lower: 0.0
       upper: inf
   slope:
-    type: Uniform
+    type: TruncatedGaussian
+    mean: 2.0
+    sigma: 0.3
     lower_limit: 1.5
     upper_limit: 3.0
     width_modifier:
       type: Absolute
       value: 0.2
     limits:
-      lower: 1.0
+      lower: 1.5
       upper: 3.0
