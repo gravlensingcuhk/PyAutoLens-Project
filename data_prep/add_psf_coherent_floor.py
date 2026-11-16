@@ -16,7 +16,9 @@ __What__
 Per filter, the per-star residuals (rebuilt from `star_check.npz` exactly as
 `psf_star_check.py --error-maps` does) are decomposed into
 
-    coherent   = |mean_i res_i|           (shared signed pattern)
+    coherent   = mean_i res_i             (shared SIGNED pattern; the v6 abs()
+                                           destroyed the cancellation on
+                                           extended emission - see below)
     incoherent = sqrt(psf_err^2 - coh^2)  (phase scatter + star-to-star; the
                                            shipped psf_err carries both)
 
@@ -29,6 +31,21 @@ and propagated as
 
 Runners read `noise_map_psfcoh.fits` with PYAUTOLENS_NOISE=psfcoh (v6 chains,
 output_sam_v6). `noise_map.fits` and `noise_map_psffloor.fits` are untouched.
+
+__The Signed Pattern (v8, 2026-11-16)__
+
+Two v6 flaws fixed here. (1) The floor took `coherent = |mean_i res_i|`: the absolute
+value turns a signed ripple into an all-positive pattern, destroying the cancellation
+on smooth extended emission. (2) Worse, the pattern carries a uniform negative pedestal
+in its outer region (~-1e-4 of the star flux per pixel beyond 9 px) -- a background
+offset of the star cutouts, not a PSF-shape error. Convolving it with the data charges
+every pixel ~|pedestal| x (flux in the whole kernel box); at arc pixels that box holds
+the bright LENS core, so the source arc paid the lens light's "error" (~2.2x noise on
+J0959's F150W arc). The result was a ~5x flatter mass-model likelihood ridge, the
+stalled J0959 mass_EPL searches, lens-core residuals hidden at ~2.8 sigma, and an
+under-fluxed (~75%) reconstructed source. The pattern is now kept SIGNED and the
+outer pedestal (median of r > 9 px) is subtracted: the coherent error applies at full
+strength only to compact structure (the AGN knots) and cancels on extended emission.
 
 Run from the project root:  uv run python data_prep/add_psf_coherent_floor.py
 """
@@ -82,7 +99,16 @@ def coherent_map_for_filter(filt):
             a, b = core_fit_ab(r, t, e, rad, float(z["r_fit"]))
             res.append(((r - b) / a - t) / t.sum())
     res = np.array(res)
-    coh = np.abs(np.ma.mean(sigma_clip(res, sigma=3.0, axis=0), axis=0).filled(0.0))
+    coh = np.ma.mean(sigma_clip(res, sigma=3.0, axis=0), axis=0).filled(0.0)
+    # The pattern's outer region is a uniform negative pedestal (~-1e-4 of the star's flux
+    # per pixel beyond 9 px in every filter): a background-offset systematic of the star
+    # cutouts, not a PSF-shape error. Kept in, it charges ~|pedestal| x (flux in a whole
+    # kernel box) -- at arc pixels that box contains the bright LENS core, so the source
+    # pixels were paying the lens light's "PSF error" (v6/v7: ~2.2x noise on the J0959 arc,
+    # a ~5x flatter mass likelihood, stalled mass_EPL searches, 2026-11-16). Subtract it.
+    C = coh.shape[0]
+    yy, xx = np.mgrid[:C, :C]
+    coh = coh - np.median(coh[np.hypot(xx - C // 2, yy - C // 2) > 9])
     return coh, len(res)
 
 
@@ -102,7 +128,8 @@ def to_kernel(m, k):
 coherent_maps = {filt: coherent_map_for_filter(filt) for filt in
                  ["F115W", "F150W", "F277W", "F444W"]}
 for filt, (coh, n) in coherent_maps.items():
-    print(f"{filt}: coherent pattern from {n} stars, err_frac {float(np.sqrt((coh ** 2).sum())):.4f}")
+    print(f"{filt}: coherent pattern from {n} stars, err_frac {float(np.sqrt((coh ** 2).sum())):.4f}, "
+          f"pattern sum {float(coh.sum()):+.5f} (near 0 => cancels on extended emission)")
 
 for lens, bands in LENSES.items():
     for band in bands:

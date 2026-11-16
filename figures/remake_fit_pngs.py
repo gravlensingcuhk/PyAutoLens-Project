@@ -49,6 +49,12 @@ RUNS = [
     ("output_sam_v6", "COSJ100018+022138", "F150W", "psfcoh"),
     ("output_sam_v6", "COSJ100024+021749", "F444W", "psfcoh"),
     ("output_sam_v6", "COSJ095921+020638", "F150W", "psfcoh"),
+    ("output_sam_v7", "COSJ100018+022138", "F150W", "psfcoh"),
+    ("output_sam_v7", "COSJ100024+021749", "F444W", "psfcoh"),
+    ("output_sam_v7", "COSJ095921+020638", "F150W", "psfcoh"),
+    ("output_sam_v8", "COSJ100018+022138", "F150W", "psfcoh"),
+    ("output_sam_v8", "COSJ100024+021749", "F444W", "psfcoh"),
+    ("output_sam_v8", "COSJ095921+020638", "F150W", "psfcoh"),
     ("output_sam_v4_f277", "COSJ100018+022138", "F277W", None),
     ("output_test_as", "COSJ100018+022138", "F150W", None),
     ("output_test_as_sp1", "COSJ100018+022138", "F150W", None),
@@ -158,7 +164,7 @@ for output_dir, lens, band, noise_tag in RUNS:
                 with tempfile.TemporaryDirectory() as tmp:
                     zipfile.ZipFile(os.path.join(stage_dir, z)).extractall(tmp)
                     kind = rebuild(tmp, dataset, out_png, out_png_log)
-                print(f"{output_dir} {lens} {stage} {tag}: {kind}")
+                print(f"{output_dir} {lens} {stage} {z[:8]}: {kind}")
             except Exception as exc:
-                print(f"FAIL {output_dir} {lens} {stage} {tag}: {type(exc).__name__}: {exc}")
+                print(f"FAIL {output_dir} {lens} {stage} {z[:8]}: {type(exc).__name__}: {exc}")
                 traceback.print_exc(limit=2)

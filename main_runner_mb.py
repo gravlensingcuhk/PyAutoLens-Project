@@ -196,7 +196,14 @@ def main():
         adapt_result = source_pix_result_1[i] if os.environ.get("PYAUTOLENS_ADAPT_RUN2") == "sp1" else source_lp_results[i]
         adapt_images, source_image_raw = slam_pipeline.source_pix.adapt_images_from(
             result=adapt_result, mask=datasets[i].mask)
-        analysis_list.append(analysis_for(i, adapt_images=adapt_images, positions_likelihood_list=None))
+        analysis_list.append(analysis_for(
+            i,
+            adapt_images=adapt_images,
+            # Positions restored in run_2 (2026-11-16), on the primary band only.
+            positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+                result=source_pix_result_1[0], positions=positions, maximum_threshold=positions_threshold_max
+            ) if i == 0 else None,
+        ))
 
     source_pix_result_2 = slam_pipeline.multi_band.run_2__multi_shared(
         settings_search=settings_search,
@@ -229,7 +236,14 @@ def main():
         )
         light_results.append(slam_pipeline.light_lp.run(
             settings_search=settings_light,
-            analysis=analysis_for(i, adapt_images=analysis_list[i].adapt_images, positions_likelihood_list=None),
+            analysis=analysis_for(
+                i,
+                adapt_images=analysis_list[i].adapt_images,
+                # Positions in light (2026-11-16), on the primary band only.
+                positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+                    result=source_pix_result_2[0], positions=positions, maximum_threshold=positions_threshold_max
+                ) if i == 0 else None,
+            ),
             source_result_for_lens=source_pix_result_1[i],
             source_result_for_source=source_pix_result_2[i],
             lens_bulge=lens_bulge,

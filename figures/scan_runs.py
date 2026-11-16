@@ -80,6 +80,15 @@ DIRS = {
         "noise": "v6",
         "desc": "psfcoh noise map (coherent PSF-error floor) + wideshear everywhere",
     },
+    "output_sam_v7": {
+        "noise": "v7",
+        "desc": "v6 + slope TruncatedGaussian(2.0, 0.3); J0959 shear 0.1",
+    },
+    "output_sam_v8": {
+        "noise": "v8",
+        "desc": "signed+pedestal-subtracted psfcoh floor, positions LH in pix2/light, "
+                "4-mark J0959 positions, slope TG(2,0.3); J0959 shear 0.1",
+    },
     "output_sam_mb_v6": {
         "noise": "v6",
         "band": "mb",

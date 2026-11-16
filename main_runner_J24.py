@@ -231,6 +231,11 @@ def main():
         settings=analysis_settings,
         adapt_images=adapt_images,
         use_jax=use_jax,
+        # Positions restored in run_2 (2026-11-16): an unconstrained run_2 drifted off the
+        # marks AND set the mass-stage threshold from its own scatter.
+        positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+            result=source_pix_result_1, positions=positions, maximum_threshold=positions_threshold_max
+        ),
     )
 
     source_pix_result_2 = slam_pipeline.source_pix.run_2(
@@ -247,6 +252,11 @@ def main():
         dataset=dataset,
         settings=analysis_settings,
         adapt_images=adapt_images,
+        # Positions in light (2026-11-16): the light refit moves the lens light and with it
+        # the effective mass centre; keep it on the marks.
+        positions_likelihood_list=slam_pipeline.positions_util.positions_likelihood_list_from(
+            result=source_pix_result_2, positions=positions, maximum_threshold=positions_threshold_max
+        ),
     )
 
     light_result = slam_pipeline.light_lp.run(
