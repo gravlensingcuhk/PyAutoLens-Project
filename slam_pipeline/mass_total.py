@@ -176,13 +176,13 @@ def run(
         )
     print(mass)
 
-    # Optional mass-stage-only einstein_radius prior reset (e.g. "0.2,2.0" for v9): the runners
-    # cap it at Uniform(0, 1) for source_lp, which the default prior-chaining then carries into
-    # the mass stages. Changes the model, hence the mass-stage identifiers; upstream stages are
-    # untouched and are reused.
+    # Optional mass-stage-only einstein_radius prior reset (e.g. "0.2:2.0" for v9; colon because
+    # sbatch --export is comma-separated): the runners cap it at Uniform(0, 1) for source_lp,
+    # which the default prior-chaining then carries into the mass stages. Changes the model,
+    # hence the mass-stage identifiers; upstream stages are untouched and are reused.
     einstein_radius_limits = os.environ.get("PYAUTOLENS_MASS_EINSTEIN_RADIUS_LIMITS")
     if einstein_radius_limits is not None:
-        lower, upper = (float(value) for value in einstein_radius_limits.split(","))
+        lower, upper = (float(value) for value in einstein_radius_limits.replace(",", ":").split(":"))
         mass.einstein_radius = af.UniformPrior(lower_limit=lower, upper_limit=upper)
 
     if mass_centre is not None:
