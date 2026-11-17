@@ -3,6 +3,8 @@ import os
 import autofit as af
 import autolens as al
 
+from . import search_util
+
 from typing import Optional, Union
 
 
@@ -162,11 +164,14 @@ def run(
         dataset_model=dataset_model,
     )
 
+    overrides = search_util.mass_nautilus_overrides()
+
     search = af.Nautilus(
         name="mass_light_dark[1]",
         **settings_search.search_dict,
-        n_live=250,
+        n_live=overrides.pop("n_live", 250),
         n_batch=n_batch,
+        **overrides,
     )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
@@ -330,11 +335,14 @@ def run__multi(
 
     factor_graph = af.FactorGraphModel(*analysis_factor_list, use_jax=True)
 
+    overrides = search_util.mass_nautilus_overrides()
+
     search = af.Nautilus(
         name="mass_light_dark[1]",
         **settings_search.search_dict,
-        n_live=350,
+        n_live=overrides.pop("n_live", 350),
         n_batch=n_batch,
+        **overrides,
     )
 
     result = search.fit(model=factor_graph.global_prior_model, analysis=factor_graph)
