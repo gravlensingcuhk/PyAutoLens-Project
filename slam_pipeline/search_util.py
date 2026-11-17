@@ -12,6 +12,7 @@ __Contents__
 - **Setup Search Stopping:** The `f_live` the setup searches stop at.
 - **Likelihood-Call Caps:** Why every setup search has a hard ceiling, and how a capped search is reported.
 - **The Sampler Pool:** Training Nautilus's networks on several CPU cores so a GPU is not idle-killed.
+- **Mass Stage Bound Learning:** Env overrides for the mass stages' Nautilus settings when the bound never shrinks.
 - **Waiting For A Shared Search:** A second process reaching a search another one is fitting waits for it.
 - **Batch Size:** `n_batch` from the environment: 16 on the CPU cluster, per lens on a GPU.
 - **Out-Of-Memory Retry:** Why a runner restarts itself with a smaller batch instead of failing.
@@ -38,7 +39,6 @@ in the job log and appends a line to `<output_path>/capped_searches.txt`, so a c
 at rather than trusted silently. `n_like_max` is not part of the output identifier either.
 
 __The Sampler Pool__
-
 On the vectorised (JAX) path Nautilus's own calculations between likelihood batches -- training
 the bounding networks, drawing from the bounds -- run on the host, single-threaded, with the GPU
 idle. phygpu auto-kills a job whose GPU sits below 5% utilisation for long. `Nautilus` here is
@@ -46,6 +46,19 @@ idle. phygpu auto-kills a job whose GPU sits below 5% utilisation for long. `Nau
 `PYAUTOLENS_SAMPLER_PROCESSES` (default 1 = no pool; the phygpu activation script sets 4). The
 pool's workers are spawned with JAX forced to the CPU and CUDA hidden, so none of them ever
 touches the GPU, and each gets an equal share of `CPUS_PER_TASK` BLAS threads.
+
+__Mass Stage Bound Learning__
+
+The mass-stage likelihood has a hard plateau: models whose lensed positions miss the threshold
+get a ~-1e7 penalty, so most of the prior volume is near-flat floor. Nautilus's learned bound then
+fails to shrink below the prior volume (`f_live` pinned at 1.0, iterations crawling at thousands
+of likelihood calls each, ESS ~ 1) and the search never converges: J0959's Delaunay/AdaptSplitPower
+`mass_EPL` burned 300k calls / 19 h in this state (2026-11-16, job 485942) while the RTU chain of
+the same lens escaped after 28k calls and finished in 64k. `mass_nautilus_overrides` lets a job
+retry the mass stages with a larger live set (more good-region seeds and better bound training),
+more bound networks, and more frequent bound rebuilds, without touching the model or any other
+stage. `n_live` / `n_networks` / `n_like_new_bound` are Nautilus identifier fields, so an
+overridden mass stage writes a fresh search directory rather than resuming a stalled checkpoint.
 
 __Waiting For A Shared Search__
 
@@ -246,6 +259,23 @@ class _ExecutorPool:
 def sampler_processes() -> int:
     """Size of the sampler pool (`PYAUTOLENS_SAMPLER_PROCESSES`, default 1); <= 1 means no pool."""
     return int(os.environ.get("PYAUTOLENS_SAMPLER_PROCESSES", "1"))
+
+
+def mass_nautilus_overrides() -> dict:
+    """See "__Mass Stage Bound Learning__". Empty unless the PYAUTOLENS_MASS_* env vars are set."""
+    overrides = {}
+    n_live = os.environ.get("PYAUTOLENS_MASS_N_LIVE")
+    if n_live is not None:
+        overrides["n_live"] = int(n_live)
+    n_networks = os.environ.get("PYAUTOLENS_MASS_N_NETWORKS")
+    if n_networks is not None:
+        overrides["n_networks"] = int(n_networks)
+    n_like_new_bound = os.environ.get("PYAUTOLENS_MASS_N_LIKE_NEW_BOUND")
+    if n_like_new_bound is not None:
+        overrides["n_like_new_bound"] = int(n_like_new_bound)
+    if _flag("PYAUTOLENS_MASS_DISCARD_EXPLORATION"):
+        overrides["discard_exploration"] = True
+    return overrides
 
 
 def _sampler_pool(processes: int):

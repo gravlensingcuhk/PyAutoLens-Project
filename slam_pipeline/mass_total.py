@@ -257,11 +257,15 @@ def run(
     if n_batch is None:
         n_batch = search_util.n_batch()
 
+    overrides = search_util.mass_nautilus_overrides()
+    nlive = overrides.pop("n_live", nlive)
+
     search = search_util.Nautilus(
         name=name,
         **settings_search.search_dict,
         n_live=nlive,
         n_batch=n_batch,
+        **overrides,
     )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
