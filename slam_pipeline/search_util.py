@@ -273,6 +273,12 @@ def mass_nautilus_overrides() -> dict:
     n_like_new_bound = os.environ.get("PYAUTOLENS_MASS_N_LIKE_NEW_BOUND")
     if n_like_new_bound is not None:
         overrides["n_like_new_bound"] = int(n_like_new_bound)
+    split_threshold = os.environ.get("PYAUTOLENS_MASS_SPLIT_THRESHOLD")
+    if split_threshold is not None:
+        overrides["split_threshold"] = int(split_threshold)
+    enlarge_per_dim = os.environ.get("PYAUTOLENS_MASS_ENLARGE_PER_DIM")
+    if enlarge_per_dim is not None:
+        overrides["enlarge_per_dim"] = float(enlarge_per_dim)
     if _flag("PYAUTOLENS_MASS_DISCARD_EXPLORATION"):
         overrides["discard_exploration"] = True
     return overrides

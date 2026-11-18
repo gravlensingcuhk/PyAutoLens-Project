@@ -277,13 +277,27 @@ def run(
     overrides = search_util.mass_nautilus_overrides()
     nlive = overrides.pop("n_live", nlive)
 
-    search = search_util.Nautilus(
-        name=name,
-        **settings_search.search_dict,
-        n_live=nlive,
-        n_batch=n_batch,
-        **overrides,
-    )
+    if os.environ.get("PYAUTOLENS_MASS_SEARCH", "nautilus").lower().startswith("dynesty"):
+        # Serial nested-sampling fallback for surfaces where Nautilus's learned bound never
+        # shrinks below the prior (see pyauto_prs/positions_likelihood_gate.md): dynesty's
+        # multi-ellipsoid bounds + random-walk MCMC need no bound training. No vmap, so
+        # ~0.3 s per likelihood call on the GPU, and JAX analyses must not fork, hence
+        # number_of_cores=1.
+        search_dict = settings_search.search_dict_for(af.DynestyStatic)
+        search_dict["number_of_cores"] = 1
+        search = af.DynestyStatic(
+            name=name,
+            **search_dict,
+            nlive=int(os.environ.get("PYAUTOLENS_MASS_DYNESTY_NLIVE", "500")),
+        )
+    else:
+        search = search_util.Nautilus(
+            name=name,
+            **settings_search.search_dict,
+            n_live=nlive,
+            n_batch=n_batch,
+            **overrides,
+        )
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
 
