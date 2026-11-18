@@ -89,6 +89,17 @@ DIRS = {
         "desc": "signed+pedestal-subtracted psfcoh floor, positions LH in pix2/light, "
                 "4-mark J0959 positions, slope TG(2,0.3); J0959 shear 0.1",
     },
+    "output_sam_v9": {
+        "noise": "v9",
+        "desc": "v8 setup stages copied; mass stages rerun with discard_exploration + "
+                "theta_E Uniform(0.2,2); J0959 aspow also n_live 1500/n_networks 8/n_like_new_bound 2000",
+    },
+    "output_sam_v10": {
+        "noise": "v10",
+        "desc": "v9 setup stages; positions-scan TruncatedGaussian theta_E priors "
+                "(pyauto_prs/positions_likelihood_gate.md): J18 EPL-family gauss(0.41,0.06,[0.35,0.55]), "
+                "J0959 aspow gauss(0.75,0.05,[0.66,0.78]); discard_exploration",
+    },
     "output_sam_mb_v6": {
         "noise": "v6",
         "band": "mb",
