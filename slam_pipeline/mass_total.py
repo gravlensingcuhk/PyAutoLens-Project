@@ -85,6 +85,55 @@ def link_multipole(multipole: af.Model, m: int, mass: af.Model) -> af.Model:
     multipole.slope = mass.slope
     return multipole
 
+
+def _apply_einstein_radius_override(mass: af.Model) -> None:
+    # Optional mass-stage-only einstein_radius prior reset (colon-separated, because sbatch
+    # --export is comma-separated): "lo:hi" for a Uniform prior, "gauss:mean:sigma:lo:hi" for a
+    # TruncatedGaussian (v10: set from the positions-only SPL+shear scan, see pyauto_prs/
+    # positions_likelihood_gate.md). The runners cap it at Uniform(0, 1) for source_lp, which
+    # the default prior-chaining then carries into the mass stages. Changes the model, hence
+    # the mass-stage identifiers; upstream stages are untouched and are reused.
+    einstein_radius_limits = os.environ.get("PYAUTOLENS_MASS_EINSTEIN_RADIUS_LIMITS")
+    if einstein_radius_limits is None:
+        return
+    values = [float(value) for value in einstein_radius_limits.replace(",", ":").split(":")[-2:]]
+    if einstein_radius_limits.startswith("gauss:"):
+        mean, sigma = (float(value) for value in einstein_radius_limits.split(":")[1:3])
+        mass.einstein_radius = af.TruncatedGaussianPrior(
+            mean=mean, sigma=sigma, lower_limit=values[0], upper_limit=values[1]
+        )
+    else:
+        mass.einstein_radius = af.UniformPrior(lower_limit=values[0], upper_limit=values[1])
+
+
+def _mass_search(name: str, settings_search: af.SettingsSearch, n_live: int, n_batch: int):
+    """
+    The mass-stage search: `search_util.Nautilus` with the `mass_nautilus_overrides` env
+    overrides, or the serial Dynesty fallback with `PYAUTOLENS_MASS_SEARCH=dynesty`. Dynesty's
+    multi-ellipsoid bounds + random-walk MCMC need no bound training (used for surfaces where
+    Nautilus's learned bound never shrinks, see pyauto_prs/positions_likelihood_gate.md); it has
+    no vmap, so ~0.3 s per likelihood call on the GPU, and JAX analyses must not fork, hence
+    number_of_cores=1.
+    """
+    if os.environ.get("PYAUTOLENS_MASS_SEARCH", "nautilus").lower().startswith("dynesty"):
+        search_dict = settings_search.search_dict_for(af.DynestyStatic)
+        search_dict["number_of_cores"] = 1
+        return af.DynestyStatic(
+            name=name,
+            **search_dict,
+            nlive=int(os.environ.get("PYAUTOLENS_MASS_DYNESTY_NLIVE", "500")),
+        )
+    overrides = search_util.mass_nautilus_overrides()
+    n_live = overrides.pop("n_live", n_live)
+    return search_util.Nautilus(
+        name=name,
+        **settings_search.search_dict,
+        n_live=n_live,
+        n_batch=n_batch,
+        **overrides,
+    )
+
+
 def run(
     settings_search: af.SettingsSearch,
     analysis: Union[al.AnalysisImaging, al.AnalysisInterferometer],
@@ -176,22 +225,7 @@ def run(
         )
     print(mass)
 
-    # Optional mass-stage-only einstein_radius prior reset (colon-separated, because sbatch
-    # --export is comma-separated): "lo:hi" for a Uniform prior, "gauss:mean:sigma:lo:hi" for a
-    # TruncatedGaussian (v10: set from the positions-only SPL+shear scan, see pyauto_prs/
-    # positions_likelihood_gate.md). The runners cap it at Uniform(0, 1) for source_lp, which
-    # the default prior-chaining then carries into the mass stages. Changes the model, hence
-    # the mass-stage identifiers; upstream stages are untouched and are reused.
-    einstein_radius_limits = os.environ.get("PYAUTOLENS_MASS_EINSTEIN_RADIUS_LIMITS")
-    if einstein_radius_limits is not None:
-        values = [float(value) for value in einstein_radius_limits.replace(",", ":").split(":")[-2:]]
-        if einstein_radius_limits.startswith("gauss:"):
-            mean, sigma = (float(value) for value in einstein_radius_limits.split(":")[1:3])
-            mass.einstein_radius = af.TruncatedGaussianPrior(
-                mean=mean, sigma=sigma, lower_limit=values[0], upper_limit=values[1]
-            )
-        else:
-            mass.einstein_radius = af.UniformPrior(lower_limit=values[0], upper_limit=values[1])
+    _apply_einstein_radius_override(mass)
 
     if mass_centre is not None:
         mass.centre = mass_centre
@@ -274,30 +308,7 @@ def run(
     if n_batch is None:
         n_batch = search_util.n_batch()
 
-    overrides = search_util.mass_nautilus_overrides()
-    nlive = overrides.pop("n_live", nlive)
-
-    if os.environ.get("PYAUTOLENS_MASS_SEARCH", "nautilus").lower().startswith("dynesty"):
-        # Serial nested-sampling fallback for surfaces where Nautilus's learned bound never
-        # shrinks below the prior (see pyauto_prs/positions_likelihood_gate.md): dynesty's
-        # multi-ellipsoid bounds + random-walk MCMC need no bound training. No vmap, so
-        # ~0.3 s per likelihood call on the GPU, and JAX analyses must not fork, hence
-        # number_of_cores=1.
-        search_dict = settings_search.search_dict_for(af.DynestyStatic)
-        search_dict["number_of_cores"] = 1
-        search = af.DynestyStatic(
-            name=name,
-            **search_dict,
-            nlive=int(os.environ.get("PYAUTOLENS_MASS_DYNESTY_NLIVE", "500")),
-        )
-    else:
-        search = search_util.Nautilus(
-            name=name,
-            **settings_search.search_dict,
-            n_live=nlive,
-            n_batch=n_batch,
-            **overrides,
-        )
+    search = _mass_search(name=name, settings_search=settings_search, n_live=nlive, n_batch=n_batch)
 
     result = search.fit(model=model, analysis=analysis, **settings_search.fit_dict)
 
@@ -387,6 +398,8 @@ def run__multi(
             unfix_mass_centre=True,
         )
 
+        _apply_einstein_radius_override(mass)
+
         if mass_centre is not None:
             mass.centre = mass_centre
 
@@ -446,12 +459,7 @@ def run__multi(
     if n_batch is None:
         n_batch = search_util.n_batch()
 
-    search = search_util.Nautilus(
-        name="mass_total[1]",
-        **settings_search.search_dict,
-        n_live=300,
-        n_batch=n_batch,
-    )
+    search = _mass_search(name="mass_total[1]", settings_search=settings_search, n_live=300, n_batch=n_batch)
 
     result = search.fit(model=factor_graph.global_prior_model, analysis=factor_graph)
 
