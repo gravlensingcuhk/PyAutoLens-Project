@@ -105,6 +105,12 @@ DIRS = {
         "band": "mb",
         "desc": "multi-band shared-mass chains, psfcoh noise",
     },
+    "output_sam_mb_v10": {
+        "noise": "v10",
+        "band": "mb",
+        "desc": "multi-band shared-mass chains, all 4 bands, psfcoh, discard_exploration, "
+                "scan theta_E priors (J0959 0.75/0.05, J18 0.41/0.06, J24 0.73/0.23), b partition",
+    },
     "output_test_as": {
         "noise": "v4",
         "extra": ["asfix"],
