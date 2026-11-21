@@ -15,12 +15,13 @@ PIXEL_SCALES = {"F115W": 0.03, "F150W": 0.03, "F277W": 0.06, "F444W": 0.06}
 
 def bands_for(data_path, dataset_name):
     """
-    PYAUTOLENS_BANDS="F150W,F277W,..." overrides. Default: the primary band first, then the
-    rest by measured arc S/N (primary_band.json), i.e. strongest constraint first.
+    PYAUTOLENS_BANDS="F150W:F277W:..." overrides (colon-separated; sbatch --export eats
+    commas). Default: the primary band first, then the rest by measured arc S/N
+    (primary_band.json), i.e. strongest constraint first.
     """
     env = os.environ.get("PYAUTOLENS_BANDS")
     if env:
-        return [b.strip() for b in env.split(",")]
+        return [b.strip() for b in env.replace(",", ":").split(":")]
     with open(path.join(data_path, dataset_name, "primary_band.json")) as f:
         pb = json.load(f)
     scores = pb["scores"]

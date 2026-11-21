@@ -34,7 +34,12 @@ import autolens as al
 
 from . import search_util
 from .source_pix import pixelization_from, SETUP_F_LIVE, SETUP_N_LIKE_MAX, report_if_capped
-from .mass_total import link_multipole, apply_ell_comps_prior_from_light
+from .mass_total import (
+    _apply_einstein_radius_override,
+    _mass_search,
+    link_multipole,
+    apply_ell_comps_prior_from_light,
+)
 
 
 def _shared_mass_shear_from(source_lp_result_0):
@@ -199,6 +204,8 @@ def mass__multi_shared(
         unfix_mass_centre=True,
     )
 
+    _apply_einstein_radius_override(mass)
+
     apply_ell_comps_prior_from_light(mass=mass, light_result=light_result_list[0])
 
     if multipole_3 is not None:
@@ -243,11 +250,6 @@ def mass__multi_shared(
         n_batch = search_util.n_batch()
 
     nlive = 400 if (multipole_3 is not None or multipole_4 is not None) else 300
-    search = search_util.Nautilus(
-        name=name,
-        **settings_search.search_dict,
-        n_live=nlive,
-        n_batch=n_batch,
-    )
+    search = _mass_search(name=name, settings_search=settings_search, n_live=nlive, n_batch=n_batch)
 
     return search.fit(model=factor_graph.global_prior_model, analysis=factor_graph, **settings_search.fit_dict)
