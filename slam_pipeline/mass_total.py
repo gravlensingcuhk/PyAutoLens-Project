@@ -86,7 +86,42 @@ def link_multipole(multipole: af.Model, m: int, mass: af.Model) -> af.Model:
     return multipole
 
 
+def _delaunay_nn_for_mass_stage(source) -> None:
+    """
+    Swap a plain Delaunay source mesh for DelaunayNN at the mass stage (default on;
+    PYAUTOLENS_MASS_DELAUNAY_NN=0 disables).
+
+    The mass stage ray-traces the fixed image-plane seed grid through every trial mass model
+    and re-triangulates in the source plane, so the plain Delaunay likelihood jumps +-10-35
+    logL per 0.00025" of theta_E at triangle-flip seams (J0959 scan, 2026-11-24,
+    data_prep/scan_mass_likelihood_roughness.py) -- the salt-and-pepper surface that stalled
+    every Nautilus setting and Dynesty alike on J0959's Delaunay mass_EPL. DelaunayNN keeps
+    the same vertices, connectivity and regularization but interpolates with Sibson
+    natural-neighbour weights, which are continuous through the flips: the same scan is smooth
+    to ~1 logL. The setup (source_pix/light) stages keep the plain Delaunay mesh (their mass
+    model is fixed, so nothing moves), preserving their identifiers; the mass-stage model
+    changes, so the mesh swap writes fresh mass-stage directories.
+    """
+    if os.environ.get("PYAUTOLENS_MASS_DELAUNAY_NN", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    pixelization = getattr(source, "pixelization", None)
+    if pixelization is None:
+        return
+    from autoarray.inversion.mesh.mesh.delaunay import Delaunay
+    from autoarray.inversion.mesh.mesh.delaunay_nn import DelaunayNN
+
+    mesh = pixelization.mesh
+    if isinstance(mesh, DelaunayNN) or not isinstance(mesh, Delaunay):
+        return
+    pixelization.mesh = DelaunayNN(
+        pixels=mesh.pixels,
+        zeroed_pixels=mesh.zeroed_pixels,
+        areas_factor=mesh.areas_factor,
+    )
+
+
 def _apply_einstein_radius_override(mass: af.Model) -> None:
+
     # Optional mass-stage-only einstein_radius prior reset (colon-separated, because sbatch
     # --export is comma-separated): "lo:hi" for a Uniform prior, "gauss:mean:sigma:lo:hi" for a
     # TruncatedGaussian (v10: set from the positions-only SPL+shear scan, see pyauto_prs/
@@ -262,6 +297,8 @@ def run(
         result=source_result_for_source,
     )
 
+    _delaunay_nn_for_mass_stage(source)
+
     if not reset_shear_prior:
         shear = source_result_for_lens.model.galaxies.lens.shear
     else:
@@ -428,6 +465,8 @@ def run__multi(
         source = al.util.chaining.source_from(
             result=source_result_for_source[i],
         )
+
+        _delaunay_nn_for_mass_stage(source)
 
         model = af.Collection(
             galaxies=af.Collection(

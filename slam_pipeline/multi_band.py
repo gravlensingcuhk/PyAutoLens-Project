@@ -36,6 +36,7 @@ from . import search_util
 from .source_pix import pixelization_from, SETUP_F_LIVE, SETUP_N_LIKE_MAX, report_if_capped
 from .mass_total import (
     _apply_einstein_radius_override,
+    _delaunay_nn_for_mass_stage,
     _mass_search,
     link_multipole,
     apply_ell_comps_prior_from_light,
@@ -224,6 +225,8 @@ def mass__multi_shared(
     analysis_factor_list = []
     for i, analysis in enumerate(analysis_list):
         light = light_result_list[i]
+        source = al.util.chaining.source_from(result=source_pix_result_2[i])
+        _delaunay_nn_for_mass_stage(source)
         model = af.Collection(
             galaxies=af.Collection(
                 lens=af.Model(
@@ -237,7 +240,7 @@ def mass__multi_shared(
                     multipole_4=multipole_4,
                     shear=shear,
                 ),
-                source=al.util.chaining.source_from(result=source_pix_result_2[i]),
+                source=source,
             ),
             extra_galaxies=extra_galaxies,
             dataset_model=_dataset_model_for(i),

@@ -136,6 +136,10 @@ def run(
         result=source_result_for_source,
     )
 
+    from .mass_total import _delaunay_nn_for_mass_stage
+
+    _delaunay_nn_for_mass_stage(source)
+
     # Fresh shear prior, as mass_total's reset_shear_prior=True (the shear must not inherit the
     # source_pix[1] model's posterior): config prior (sigma 0.03, +/-0.1) by default, widened to
     # sigma 0.05 / +/-PYAUTOLENS_SHEAR_MAX when the env var is set (see mass_total.py, 2026-11-07).
@@ -310,6 +314,10 @@ def run__multi(
         source = al.util.chaining.source_from(
             result=source_result_for_source[i],
         )
+
+        from .mass_total import _delaunay_nn_for_mass_stage
+
+        _delaunay_nn_for_mass_stage(source)
 
         model = af.Collection(
             galaxies=af.Collection(
