@@ -282,9 +282,19 @@ def pixelization_from(
         if adapt_images is None:
             raise ValueError("pixelization_from needs the adapt images for the Hilbert mesh")
         grid = adapt_images.galaxy_name_image_plane_mesh_grid_dict[SOURCE_KEY]
+        # A/B (2026-11-24): PYAUTOLENS_PIX_DELAUNAY_NN=1 uses the Sibson natural-neighbour
+        # interpolant in the pix stages too. Default off: pix stages converge fine on plain
+        # Delaunay (pix2's mass is fixed so the mesh never moves; pix1's mass freedom is the
+        # open question the A/B answers). The mesh class enters the identifier, so the A/B
+        # reruns the whole chain.
+        mesh_cls = al.mesh.Delaunay
+        if os.environ.get("PYAUTOLENS_PIX_DELAUNAY_NN", "0").strip().lower() in ("1", "true", "yes", "on"):
+            from autoarray.inversion.mesh.mesh.delaunay_nn import DelaunayNN
+
+            mesh_cls = DelaunayNN
         return af.Model(
             al.Pixelization,
-            mesh=al.mesh.Delaunay(pixels=grid.shape[0], zeroed_pixels=EDGE_PIXELS_TOTAL),
+            mesh=mesh_cls(pixels=grid.shape[0], zeroed_pixels=EDGE_PIXELS_TOTAL),
             regularization=af.Model(hilbert_regularization_from_env()),
         )
     mesh_cls = al.mesh.RectangularRTUAdaptDensity if search == 1 else al.mesh.RectangularRTUAdaptImage
