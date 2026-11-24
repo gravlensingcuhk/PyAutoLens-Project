@@ -271,3 +271,135 @@ class MeshGeometryDelaunay(AbstractMeshGeometry):
             scipy.spatial.Delaunay(mesh_grid_xy).simplices,
             xp=np,
         )
+
+
+# Quadrature cells per axis for `MeshGeometryKNearestNeighbor.areas_for_magnification`.
+# On a 144-vertex mesh the identity-lens magnification moved by < 3e-5 between
+# 200, 400 and 800 cells per axis (PyAutoArray#665); 256 costs ~1 s there.
+KNN_AREA_QUADRATURE_PIXELS: int = 256
+
+
+class MeshGeometryKNearestNeighbor(MeshGeometryDelaunay):
+    def __init__(self, mesh, mesh_grid, data_grid, interpolator_cls, xp=np, **kwargs):
+        """
+        The geometry of the kNN meshes (`KNearestNeighbor`, `KNNBarycentric`):
+        Delaunay vertex geometry, but magnification areas that integrate the
+        kNN interpolant itself.
+
+        Parameters
+        ----------
+        interpolator_cls
+            The kNN interpolator class that built this geometry; its basis
+            functions are evaluated on a quadrature grid to compute
+            `areas_for_magnification`.
+        """
+        super().__init__(
+            mesh=mesh,
+            mesh_grid=mesh_grid,
+            data_grid=data_grid,
+            dual_areas=None,
+            xp=xp,
+            **kwargs,
+        )
+
+        self.interpolator_cls = interpolator_cls
+
+    @cached_property
+    def areas_for_magnification(self) -> np.ndarray:
+        """
+        The integral of every vertex's interpolation basis function over the
+        convex hull of the mesh, so `sum(reconstruction * areas_for_magnification)`
+        is the integral of the reconstructed source.
+
+        The Delaunay barycentric dual areas are these integrals only for the linear
+        barycentric interpolant. The Wendland-kNN and 3-nearest barycentric
+        interpolants are not linear on the Delaunay triangles, and weighting by the
+        dual areas biased their magnification by up to ~6% (PyAutoArray#665).
+
+        The integral is a midpoint quadrature: the interpolator's own mapping
+        weights are evaluated at the centres of a uniform
+        `KNN_AREA_QUADRATURE_PIXELS`^2 grid over the vertices' bounding box, the
+        centres outside the convex hull are dropped, and the weights times the
+        cell area are summed per vertex. The total is rescaled to the hull area,
+        which removes the cells straddling the hull edge from the sum (the same
+        domain the Delaunay dual areas tile).
+
+        Computed host-side on first access, like the Delaunay dual-area fallback.
+        """
+        nodes = np.asarray(self.mesh_grid_xy)
+        points = basis_quadrature_points_from(nodes)
+
+        interpolator = self.interpolator_cls(
+            mesh=self.mesh,
+            mesh_grid=self.mesh_grid,
+            data_grid=points,
+            xp=np,
+        )
+        mappings, _, weights = interpolator._mappings_sizes_weights
+
+        return basis_integral_areas_from(nodes, mappings, weights)
+
+
+def basis_quadrature_points_from(nodes: np.ndarray) -> np.ndarray:
+    """
+    The midpoint-quadrature points for integrating an interpolant's basis functions over the convex hull of
+    ``nodes``: the centres of a uniform ``KNN_AREA_QUADRATURE_PIXELS``^2 grid over their bounding box, keeping
+    those inside the hull.
+    """
+    import scipy.spatial
+
+    lo = nodes.min(axis=0)
+    hi = nodes.max(axis=0)
+
+    n = KNN_AREA_QUADRATURE_PIXELS
+    u = (np.arange(n) + 0.5) / n
+    grid_0, grid_1 = np.meshgrid(
+        lo[0] + u * (hi[0] - lo[0]), lo[1] + u * (hi[1] - lo[1]), indexing="ij"
+    )
+    points = np.stack([grid_0.ravel(), grid_1.ravel()], axis=1)
+    return points[scipy.spatial.Delaunay(nodes).find_simplex(points) >= 0]
+
+
+def basis_integral_areas_from(nodes, mappings, weights) -> np.ndarray:
+    """
+    Every vertex's basis-function integral from the interpolation ``mappings`` / ``weights`` of the
+    ``basis_quadrature_points_from`` points: the weights summed per vertex (``-1`` padding ignored), rescaled
+    so the total is the convex-hull area, which removes the cells straddling the hull edge from the sum.
+    """
+    import scipy.spatial
+
+    mappings = np.asarray(mappings).ravel()
+    weights = np.asarray(weights).ravel()
+    valid = mappings >= 0
+
+    areas = np.bincount(
+        mappings[valid], weights=weights[valid], minlength=nodes.shape[0]
+    )
+
+    return areas * scipy.spatial.ConvexHull(nodes).volume / np.sum(areas)
+
+
+class MeshGeometryDelaunayNN(MeshGeometryDelaunay):
+    @cached_property
+    def areas_for_magnification(self) -> np.ndarray:
+        """
+        The integral of every vertex's Sibson (natural-neighbour) basis function over the convex hull of the
+        mesh, so `sum(reconstruction * areas_for_magnification)` is the integral of the reconstructed source.
+
+        The Delaunay barycentric dual areas are these integrals only for the linear barycentric interpolant.
+        The Sibson interpolant is not linear on the Delaunay triangles; its dual-area approximation biased the
+        identity-lens magnification on a regular mesh by -2.65% once the Sibson weights at internal edges
+        were corrected (PyAutoArray#610), against +0.04% for these integrals. The quadrature is the one the
+        kNN meshes use (`MeshGeometryKNearestNeighbor`, PyAutoArray#665), evaluated with the Sibson weights.
+
+        Computed host-side on first access, like the Delaunay dual-area fallback.
+        """
+        from autoarray.inversion.mesh.interpolator.sibson import (
+            sibson_mappings_weights_from,
+        )
+
+        nodes = np.asarray(self.mesh_grid_xy)
+        points = basis_quadrature_points_from(nodes)
+        mappings, _, weights = sibson_mappings_weights_from(nodes, points)
+
+        return basis_integral_areas_from(nodes, mappings, weights)

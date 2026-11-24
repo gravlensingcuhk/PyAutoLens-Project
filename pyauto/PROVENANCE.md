@@ -8,7 +8,7 @@ plus a `.postN` for commits beyond it, so the intra-family `>=` floors stay sati
 
 | Package     | Branch                        | Commit                                     | Version            |
 |-------------|-------------------------------|--------------------------------------------|--------------------|
-| autoarray   | `production/hst`              | `4bc7b5a5` (2026-11-02; trim-to-mask, cherry-picked from `feature/trim-to-mask` `a7f9fbc7`) | 2026.10.23.1.post6 |
+| autoarray   | `production/cowls`            | `ca3593f7` (= `4bc7b5a5` 2026-11-02 + cherry-picked `51a1f1fd` from main: Sibson internal-edge repair (PyAutoArray#610) + `MeshGeometryDelaunayNN` Sibson-quadrature magnification areas; minimal delta, no mid-campaign upstream churn) | 9999.0.0.dev0 (branch default) |
 | autofit     | `production/hst`              | `production/hst` head, 2026-10-26 (lock patch committed upstream) | 2026.10.23.1.post1 |
 | autogalaxy  | `feature/elliptical-multipole`| `b1f4cabfe4276bebcd2c64cf22dcaebf10ff8d7b` | 2026.10.16.1.post5 |
 
