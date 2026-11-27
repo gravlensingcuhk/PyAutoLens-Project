@@ -78,29 +78,6 @@ cowls_gpu_log_stop() {
     COWLS_GPU_LOG_PID=
 }
 
-# __Wallclock Watchdog__: the batch scripts set no #SBATCH -t, so a job gets the MaxTime of
-# the partition it lands on (a/c 2 days, b 7 days). Seven days is longer than a chain should
-# hold a 4090 unwatched, so on b a background sleeper self-cancels the job at
-# COWLS_B_WATCHDOG_DAYS (default 3) — but only when the job's limit is the 7-day partition
-# default; an explicit sbatch -t is respected. For a deliberate long run (e.g. the mb chains)
-# submit with -t 6-00:00:00: below the max, so the watchdog stays off.
-cowls_wallclock_watchdog() {
-    [ -n "$SLURM_JOB_ID" ] || return 0
-    if [ "$SLURM_JOB_PARTITION" != "b" ]; then
-        echo "wallclock: partition $SLURM_JOB_PARTITION enforces its own max (2 days), watchdog off"
-        return 0
-    fi
-    local tl secs
-    tl=$(scontrol show job "$SLURM_JOB_ID" | grep -o 'TimeLimit=[^ ]*' | cut -d= -f2)
-    if [ "$tl" != "7-00:00:00" ]; then
-        echo "wallclock: explicit TimeLimit=$tl respected, watchdog off"
-        return 0
-    fi
-    secs=${COWLS_B_WATCHDOG_SECS:-$(( ${COWLS_B_WATCHDOG_DAYS:-3} * 86400 - 900 ))}
-    ( sleep "$secs"; scancel "$SLURM_JOB_ID" ) &
-    echo "wallclock: b-node watchdog armed, self-cancel in ${secs}s (job $SLURM_JOB_ID)"
-}
-
 # The Nautilus / JAX vmap batch for a lens argument `<lens>[:<n>]`: the explicit `:<n>`, else an
 # exported PYAUTOLENS_N_BATCH, else the lens's default here. A source_pix search's GPU memory goes
 # as n_batch x source pixels x the FFT frame (search_util "__Batch Size__"): J18 (419 px frame) ran

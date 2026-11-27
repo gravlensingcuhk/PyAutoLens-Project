@@ -7,9 +7,8 @@
 #
 # n_batch: cowls_n_batch_for in activate.sh, or the `:<n>` given.
 #
-# No -t here: partition a/c's 2-day MaxTime applies directly (this script is a/c-only).
-# Every search resumes from its output folder, so a job that hits the wall is resubmitted.
-# 8 CPUs: the runner plus its 4-process sampler pool.
+# 48 hours is partition a/c's maximum. Every search resumes from its output folder, so a job
+# that hits the wall is resubmitted. 8 CPUs: the runner plus its 4-process sampler pool.
 
 #SBATCH -N 1
 #SBATCH --ntasks=1
@@ -20,11 +19,11 @@
 #SBATCH --mem-per-gpu=47G
 #SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/r_%x.%A.out
 #SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/r_%x.%A.err
+#SBATCH -t 48:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
 
 source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
-cowls_wallclock_watchdog
 
 [ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_lens <lens>[:<n_batch>]"; exit 1; }
 LENS=${1%%:*}

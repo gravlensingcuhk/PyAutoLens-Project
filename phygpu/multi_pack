@@ -23,8 +23,7 @@
 # job. Different lenses, different PYAUTOLENS_OUTPUT_DIRs, or chains already past their
 # shared source_lp are all safe. Per-slot logs are <lens>.<slot>.<jobid>.log.
 #
-# No -t here: b's 7-day MaxTime applies, capped at 3 days by the watchdog in activate.sh.
-# Every search resumes from its output folder.
+# 48 hours is the partition maximum. Every search resumes from its output folder.
 
 #SBATCH -N 1
 #SBATCH --ntasks=1
@@ -35,6 +34,7 @@
 #SBATCH --gpu-bind=closest
 #SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/mp_%x.%A.out
 #SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/mp_%x.%A.err
+#SBATCH -t 48:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
 
@@ -52,7 +52,6 @@ fi
 export COWLS_THREADS=$(( ${SLURM_CPUS_ON_NODE:-${#GPUS[@]}} / ${#GPUS[@]} ))
 
 source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
-cowls_wallclock_watchdog
 
 nvidia-smi
 cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"

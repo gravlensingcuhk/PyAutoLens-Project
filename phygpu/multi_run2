@@ -17,10 +17,8 @@
 # with --exclude=a8,a9: the HST project's hpc/mass/batch/multi_run2 (__Why A Whole Node__).
 # Each runner gets an equal share of the node's CPUs for Nautilus's host-side work.
 #
-# No -t here: the job takes the MaxTime of the partition it lands on (a/c 2 days, b 7 days),
-# with the b-node watchdog in activate.sh capping defaulted limits at 3 days. Every search
-# resumes from its output folder, so if the chain is not through mass_multipole by then,
-# resubmit the same command.
+# 48 hours is the partition maximum. Every search resumes from its output folder, so if the
+# chain is not through mass_multipole by then, resubmit the same command.
 
 #SBATCH -N 1
 #SBATCH --ntasks=1
@@ -32,6 +30,7 @@
 #SBATCH --gpu-bind=closest
 #SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/m2_%x.%A.out
 #SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/m2_%x.%A.err
+#SBATCH -t 48:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
 
@@ -48,7 +47,6 @@ IFS=',' read -ra GPUS <<< "$CUDA_VISIBLE_DEVICES"
 export COWLS_THREADS=$(( ${SLURM_CPUS_ON_NODE:-${#GPUS[@]}} / ${#GPUS[@]} ))
 
 source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
-cowls_wallclock_watchdog
 
 nvidia-smi
 cowls_gpu_log_start "$PROJECT_ROOT/phygpu/outputs"

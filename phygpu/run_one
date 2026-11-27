@@ -12,9 +12,7 @@
 # 16 CPUs (a b node's per-GPU share; a/c give more per GPU, SLURM tops up). Shares the
 # node: keep the footprint to the allocated CPUs (activate.sh pins thread counts).
 #
-# No -t here: the job takes the MaxTime of the partition it lands on (a/c 2 days, b 7 days),
-# with the b-node watchdog in activate.sh capping defaulted limits at 3 days. Every search
-# resumes from its output folder.
+# 48 hours is the partition maximum. Every search resumes from its output folder.
 
 #SBATCH -N 1
 #SBATCH --ntasks=1
@@ -26,13 +24,13 @@
 #SBATCH --mem-per-gpu=47G
 #SBATCH -o /home/user/lange/phygpu/PyAutoLens-Project/phygpu/outputs/r1_%x.%A.out
 #SBATCH -e /home/user/lange/phygpu/PyAutoLens-Project/phygpu/errors/r1_%x.%A.err
+#SBATCH -t 48:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=samuel.c.lange@cuhk.edu.hk
 
 [ $# -eq 1 ] || { echo "Usage: sbatch -J <tag> phygpu/run_one <lens>[:<n_batch>]"; exit 1; }
 
 source /home/user/lange/phygpu/PyAutoLens-Project/phygpu/activate.sh
-cowls_wallclock_watchdog
 
 LENS=${1%%:*}
 export PYAUTOLENS_N_BATCH=$(cowls_n_batch_for "$1")
