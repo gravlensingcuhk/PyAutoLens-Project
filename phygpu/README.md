@@ -56,15 +56,9 @@ working value back into `cowls_n_batch_for` so the next job does not pay for the
 Logs: `phygpu/outputs/m2_<tag>.<job>.out` (SLURM), `phygpu/outputs/<lens>.<job>.log` (each
 runner), `phygpu/outputs/gpu_<tag>.<job>.out` (GPU use every 30 s; summarise with the HST
 project's `hpc/gpu_usage.py`). Results: `output_sam_v4/<prefix>/<lens>/<search>/<id>.zip`, the layout
-the HTCondor side reads, tracked in git. A job that hits the time wall is resubmitted with the same command; every
+the HTCondor side reads, tracked in git. A job that hits the 48 h wall is resubmitted with the same command; every
 search resumes from its folder. `output_sam_v4/capped_searches.txt` lists setup searches that stopped at
 their likelihood-call cap; look at those before trusting what they seeded.
-
-Time limits are node-dependent (2026-11-27): the batch scripts set no `-t`, so a job gets the
-MaxTime of the partition it lands on (a/c 2 days, b 7 days), and on b the
-`cowls_wallclock_watchdog` in `activate.sh` self-cancels at `COWLS_B_WATCHDOG_DAYS` (default 3)
-when the limit is the 7-day partition default. An explicit `sbatch -t` is respected — submit
-deliberate long runs (the mb chains) with `-t 6-00:00:00`, which keeps the watchdog off.
 
 Settings `phygpu/activate.sh` exports (unset on the CPU cluster):
 
