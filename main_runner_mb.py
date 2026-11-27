@@ -153,6 +153,7 @@ def main():
             redshift_lens=redshift_lens,
             redshift_source=redshift_source,
         ))
+        slam_pipeline.search_util.clear_jax_caches()
 
     settings_search = af.SettingsSearch(
         path_prefix='model_setup_mb',
@@ -186,6 +187,7 @@ def main():
         analysis_list=analysis_list,
         source_lp_result_list=source_lp_results,
     )
+    slam_pipeline.search_util.clear_jax_caches()
 
     """
     __SOURCE PIX 2 (multi-band, mass fixed)__
@@ -212,6 +214,7 @@ def main():
         source_lp_result_list=source_lp_results,
         source_pix_result_1=source_pix_result_1,
     )
+    slam_pipeline.search_util.clear_jax_caches()
 
     """
     __LIGHT LP (per band)__
@@ -251,6 +254,7 @@ def main():
             lens_disk=None,
             lens_point=lens_point,
         ))
+        slam_pipeline.search_util.clear_jax_caches()
 
     """
     __MASS (multi-band, shared EPL / EPL+multipoles)__
@@ -280,6 +284,7 @@ def main():
         light_result_list=light_results,
         name='mass_EPL',
     )
+    slam_pipeline.search_util.clear_jax_caches()
 
     multipole_result = slam_pipeline.multi_band.mass__multi_shared(
         settings_search=settings_mass,

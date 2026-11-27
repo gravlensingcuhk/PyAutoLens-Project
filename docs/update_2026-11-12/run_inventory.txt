@@ -207,6 +207,75 @@ Figure naming (figures/fit_png_caustic_zoom/<output_dir>/):
   J18    mass_light_dark[1]   rtu-img+adaptpow       wideshear    7b994d39536c6238*  2026-11-17
   J24    mass_light_dark[1]   delaunay+aspower       wideshear    de5ddc5cb171b80b*  2026-11-17
 
+### output_sam_v9  [v9] v8 setup stages copied; mass stages rerun with discard_exploration + theta_E Uniform(0.2,2); J0959 aspow also n_live 1500/n_networks 8/n_like_new_bound 2000
+  J18    source_lp[1]         -                      narrowshear  21c5fa043ba869f8*  2026-11-16
+  J24    source_lp[1]         -                      narrowshear  ebf436cd99f1c6fa*  2026-11-16
+  J0959  source_lp[1]         -                      narrowshear  9017b6f2b5a2f87d*  2026-11-16
+  J18    source_pix[1]        rtu-dens+adaptpow      narrowshear  1916c97d8484b624*  2026-11-16
+  J18    source_pix[1]        delaunay+aspower       narrowshear  fc5f5f7c2667997b*  2026-11-16
+  J24    source_pix[1]        delaunay+aspower       narrowshear  926b2e934e3e8b4e*  2026-11-16
+  J24    source_pix[1]        rtu-dens+adaptpow      narrowshear  beef59c9df153b27*  2026-11-16
+  J0959  source_pix[1]        delaunay+aspower       narrowshear  05e63b9a7f5e6c1d*  2026-11-16
+  J0959  source_pix[1]        rtu-dens+adaptpow      narrowshear  8172e2a4033a7612*  2026-11-16
+  J18    source_pix[2]        delaunay+aspower       -            206a0a0bb24dd653*  2026-11-16
+  J18    source_pix[2]        rtu-img+adaptpow       -            45b92cb05473b984*  2026-11-16
+  J24    source_pix[2]        rtu-img+adaptpow       -            2ac08018512ad591*  2026-11-16
+  J24    source_pix[2]        delaunay+aspower       -            317d50fc8593fdef*  2026-11-16
+  J0959  source_pix[2]        delaunay+aspower       -            64ae909a325de700*  2026-11-16
+  J0959  source_pix[2]        rtu-img+adaptpow       -            96bd6885c97a1abb*  2026-11-16
+  J18    light[1]             delaunay+aspower       -            afd46bd8c022ff0e*  2026-11-16
+  J18    light[1]             rtu-img+adaptpow       -            b4aef5163f27b40f*  2026-11-16
+  J24    light[1]             rtu-img+adaptpow       -            abe91d3d0ef5c978*  2026-11-17
+  J24    light[1]             delaunay+aspower       -            f87bffc3b64ac71c*  2026-11-16
+  J0959  light[1]             delaunay+aspower       -            2100855eedb0d4a4*  2026-11-16
+  J0959  light[1]             rtu-img+adaptpow       -            3b22723bea6f2c22*  2026-11-16
+  J18    mass_EPL             rtu-img+adaptpow       wideshear    f01ba3d65dba53e0*  2026-11-17
+  J24    mass_EPL             delaunay+aspower       wideshear    a2847e09494c431e*  2026-11-17
+  J24    mass_EPL             rtu-img+adaptpow       wideshear    f8d22fc7eb1d3bd0*  2026-11-17
+  J0959  mass_EPL             rtu-img+adaptpow       narrowshear  9ac0b146fbf7ba54*  2026-11-18
+  J18    mass_multipole       rtu-img+adaptpow       wideshear    2c8eca2d49e13f7b*  2026-11-17
+  J24    mass_multipole       delaunay+aspower       wideshear    39f191d48e700e13*  2026-11-17
+  J24    mass_multipole       rtu-img+adaptpow       wideshear    ef6e7daa165ce184*  2026-11-17
+  J18    mass_light_dark[1]   delaunay+aspower       wideshear    3811e905ff710f72*  2026-11-18
+  J18    mass_light_dark[1]   rtu-img+adaptpow       wideshear    a72e2c376bdee600*  2026-11-17
+  J24    mass_light_dark[1]   rtu-img+adaptpow       wideshear    17d8fe6ad564d5a5*  2026-11-18
+  J24    mass_light_dark[1]   delaunay+aspower       wideshear    c3c5feeedb1594a2*  2026-11-18
+  J0959  mass_light_dark[1]   rtu-img+adaptpow       narrowshear  238bbbb65e7c1c86*  2026-11-21
+  J0959  mass_light_dark[1]   delaunay+aspower       narrowshear  4a9fbd66f982c166*  2026-11-18
+
+### output_sam_v10  [v10] v9 setup stages; positions-scan TruncatedGaussian theta_E priors (pyauto_prs/positions_likelihood_gate.md): J18 EPL-family gauss(0.41,0.06,[0.35,0.55]), J0959 aspow gauss(0.75,0.05,[0.66,0.78]); discard_exploration
+  J18    source_lp[1]         -                      narrowshear  21c5fa043ba869f8*  2026-11-16
+  J24    source_lp[1]         -                      narrowshear  ebf436cd99f1c6fa*  2026-11-16
+  J0959  source_lp[1]         -                      narrowshear  9017b6f2b5a2f87d*  2026-11-16
+  J18    source_pix[1]        rtu-dens+adaptpow      narrowshear  1916c97d8484b624*  2026-11-16
+  J18    source_pix[1]        delaunay+aspower       narrowshear  fc5f5f7c2667997b*  2026-11-16
+  J24    source_pix[1]        delaunay+aspower       narrowshear  926b2e934e3e8b4e*  2026-11-16
+  J24    source_pix[1]        rtu-dens+adaptpow      narrowshear  beef59c9df153b27*  2026-11-16
+  J0959  source_pix[1]        delaunay+aspower       narrowshear  05e63b9a7f5e6c1d*  2026-11-16
+  J0959  source_pix[1]        rtu-dens+adaptpow      narrowshear  8172e2a4033a7612*  2026-11-16
+  J0959  source_pix[1]        DelaunayNN+aspower     narrowshear  f85fda3e02707475*  2026-11-24
+  J18    source_pix[2]        delaunay+aspower       -            206a0a0bb24dd653*  2026-11-16
+  J18    source_pix[2]        rtu-img+adaptpow       -            45b92cb05473b984*  2026-11-16
+  J24    source_pix[2]        rtu-img+adaptpow       -            2ac08018512ad591*  2026-11-16
+  J24    source_pix[2]        delaunay+aspower       -            317d50fc8593fdef*  2026-11-16
+  J0959  source_pix[2]        DelaunayNN+aspower     -            57b3bd13b97e40c1*  2026-11-24
+  J0959  source_pix[2]        delaunay+aspower       -            64ae909a325de700*  2026-11-16
+  J0959  source_pix[2]        rtu-img+adaptpow       -            96bd6885c97a1abb*  2026-11-16
+  J18    light[1]             delaunay+aspower       -            afd46bd8c022ff0e*  2026-11-16
+  J18    light[1]             rtu-img+adaptpow       -            b4aef5163f27b40f*  2026-11-16
+  J24    light[1]             rtu-img+adaptpow       -            abe91d3d0ef5c978*  2026-11-17
+  J24    light[1]             delaunay+aspower       -            f87bffc3b64ac71c*  2026-11-16
+  J0959  light[1]             delaunay+aspower       -            2100855eedb0d4a4*  2026-11-16
+  J0959  light[1]             rtu-img+adaptpow       -            3b22723bea6f2c22*  2026-11-16
+  J0959  light[1]             DelaunayNN+aspower     -            435c50f6757b6473*  2026-11-24
+  J18    mass_EPL             delaunay+aspower       wideshear    aa0690a07c1b2228*  2026-11-23
+  J18    mass_EPL             rtu-img+adaptpow       wideshear    ce894f97f8a2e9e2*  2026-11-19
+  J24    mass_EPL             delaunay+aspower       wideshear    5e55ad868af2f7fe*  2026-11-21
+  J24    mass_EPL             DelaunayNN+aspower     wideshear    c7be01ac6d02754b*  2026-11-24
+  J18    mass_multipole       rtu-img+adaptpow       wideshear    09117724253b3399*  2026-11-19
+  J24    mass_multipole       delaunay+aspower       wideshear    091f3f3cc40fb5bf*  2026-11-22
+  J24    mass_multipole       DelaunayNN+aspower     wideshear    dd7283a48e796d7f*  2026-11-24
+
 ### output_test_as  [v4] J18 AdaptSplit test: weight_floor 0.1 + adapt_floor 0.02
   J18    source_lp[1]         -                      narrowshear  0f67864c3c55b5c4*  2026-11-12  [asfix]
   J18    source_pix[1]        delaunay+adaptsplit    narrowshear  f7d3c7bb86323c2a*  2026-11-12  [asfix]

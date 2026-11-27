@@ -359,6 +359,27 @@ class Nautilus(af.Nautilus):
         return PooledSampler
 
 
+# ---- JAX cache clearing between stages -------------------------------------------------------
+
+
+def clear_jax_caches() -> None:
+    """
+    Free XLA's JIT compilation caches between chained pipeline stages.
+
+    The multi-band runner executes 16+ searches in one process; each stage's JIT'd
+    likelihood (different shapes per band/stage) stays cached in the device memory pool,
+    which is preallocated at XLA_PYTHON_CLIENT_MEM_FRACTION=0.95. By the later stages the
+    pool is exhausted and the next stage's first allocation fails at any n_batch (the
+    2026-11-27 mb OOMs at the mass_EPL transition). Clearing between stages forfeits a
+    few minutes of recompilation per stage in exchange for not dying at stage ~14.
+    """
+    try:
+        import jax
+        jax.clear_caches()
+    except Exception as e:
+        print(f"jax.clear_caches() failed (non-fatal): {e}", flush=True)
+
+
 # ---- Out-of-memory retry (see "__Out-Of-Memory Retry__") -------------------------------------
 
 
